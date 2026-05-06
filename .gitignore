@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# secrets — DO NOT COMMIT
+.env
+
+# Claude Code / Cowork local state (lock files, scheduled tasks, etc.)
+.claude/
+
+# generated artifacts
+cache/
+models/
+reports/

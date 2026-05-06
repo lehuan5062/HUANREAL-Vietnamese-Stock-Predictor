@@ -1,0 +1,118 @@
+# Vietnamese T+2 Stock Predictor - configuration
+# All knobs live here so the code stays declarative.
+
+data:
+  source: VCI                # vnstock data source: VCI | TCBS | KBS
+  cache_dir: cache           # parquet cache root
+  history_start: "2018-01-01"
+  fetch_workers: 6           # threads when bulk-fetching OHLCV
+  fetch_delay_sec: 0.15      # polite delay per request
+  exchanges: [HSX, HNX, UPCOM]
+  # Rate limit for outbound API calls (sliding 60s window).
+  # Vnstock guest tier = 20/min hard cap; staying well under reduces 429s.
+  # Override at runtime via env: STOCKPREDICT_API_PER_MIN=10
+  api_per_min: 12
+
+universe:
+  liquidity_filter:
+    # vnstock returns prices in thousand-VND units, so all VND thresholds below
+    # are also in thousand-VND. close >= 5 means 5,000 VND, adv >= 1_000_000
+    # thousand-VND-shares means ~1B VND of daily traded value (~$40k).
+    min_adv_vnd: 1_000_000       # 20-day average daily value, in thousand-VND-shares
+    min_close_vnd: 5             # avoid penny stocks (5,000 VND)
+    min_history_days: 250
+
+features:
+  rsi_period: 14
+  macd: {fast: 12, slow: 26, signal: 9}
+  momentum_windows: [5, 20]
+  atr_period: 14
+  volume_zscore_window: 20
+  realized_vol_window: 20
+
+target:
+  # Horizon for the swing trade. T+2 close-to-close by default.
+  # Switch entry to "next_open" if you plan to buy at T+1 open instead of T close.
+  entry: close              # close | next_open
+  exit_offset_days: 2       # T -> T+2
+
+model:
+  algorithm: lightgbm
+  params:
+    n_estimators: 400
+    learning_rate: 0.03
+    num_leaves: 31
+    min_child_samples: 50
+    feature_fraction: 0.85
+    bagging_fraction: 0.85
+    bagging_freq: 5
+    objective: regression
+    verbose: -1
+  ensemble_seeds: [11, 22, 33, 44, 55]
+  early_stopping_rounds: 40
+  validation_fraction: 0.15
+
+backtest:
+  start: "2020-01-01"
+  train_window_years: 2
+  oos_window_months: 6
+  step_months: 6
+  top_k: 5
+  # round-trip cost in basis points — derived from `broker:` below
+  # (ACBS default: 0.15% commission × 2 sides + 10% VAT on commission
+  # + 0.10% PIT on sell ~= 43 bps). Override here only for sensitivity tests.
+  cost_bps: 43
+
+broker:
+  name: ACBS
+  # All percentages are absolute (i.e. 0.15 means 0.15%, not 15%).
+  commission_pct: 0.15        # per side
+  vat_pct: 10                 # VAT on commission (10% in VN)
+  pit_pct: 0.10               # personal income tax on the SELL transaction value
+  min_fee_vnd: 0              # per-order minimum (ACBS online has none)
+  lot_size: 100               # HOSE/HNX/UPCOM minimum lot
+  default_position_units: 100 # how many units a typical retail buy is
+  # The pipeline sizes every pick at default_position_units so the user sees
+  # absolute VND fees and net P&L for the trade they would actually place.
+
+pricing:
+  # How wide to set the stop-loss, in multiples of ATR(14).
+  # 1.0 = very tight (often stopped out by noise);
+  # 1.5 = moderate; 2.0 = loose (expensive when wrong).
+  stop_atr_mult: 1.5
+  # Minimum required net risk-reward (after fees) to flag a pick as actionable.
+  # The CLI shows `actionable: True/False` based on this gate.
+  min_rr_ratio: 0.8
+
+modes:
+  base:
+    top_k: 5
+  claude:
+    candidate_pool: 20      # ML narrows to 20, news re-ranks to 5
+    news_weight: 0.05
+  gemini:
+    candidate_pool: 20
+    news_weight: 0.05
+
+news:
+  # These are STARTING POINTS, not an exhaustive list. The Claude interactive
+  # plan and Gemini prompt both tell the LLM to use these to seed a search,
+  # then go broader (WebSearch / google_search grounding) for any other
+  # relevant Vietnamese press, sector reports, or macro coverage.
+  vn_sources:
+    baomoi:           "https://baomoi.com/tim-kiem/{symbol}.epi"
+    google_news_vn:   "https://www.google.com/search?q=%22{symbol}%22+co+phieu+chung+khoan&tbm=nws"
+    cafef:            "https://cafef.vn/tim-kiem.html?keywords={symbol}"
+    vietstock:        "https://finance.vietstock.vn/{symbol}"
+    vneconomy:        "https://vneconomy.vn/tim-kiem.htm?keyword={symbol}"
+    ndh:              "https://ndh.vn/tim-kiem.html?keyword={symbol}"
+    theinvestor:      "https://theinvestor.vn/?s={symbol}"
+    tradingview:      "https://www.tradingview.com/symbols/HOSE-{symbol}/"
+  # Macro / global context — read once per session, not per ticker.
+  global_sources:
+    baomoi_chungkhoan:      "https://baomoi.com/the-thao/chung-khoan.epi"
+    vietstock_en:           "https://en.vietstock.vn/"
+    google_news_vnindex:    "https://www.google.com/search?q=VN-Index+today&tbm=nws"
+    google_news_vn_macro:   "https://www.google.com/search?q=Vietnam+stock+market+today&tbm=nws"
+    reuters_asia:           "https://www.reuters.com/markets/asia/"
+    bloomberg_markets:      "https://www.bloomberg.com/markets"

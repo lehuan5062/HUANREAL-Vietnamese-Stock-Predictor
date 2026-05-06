@@ -1,0 +1,108 @@
+@echo off
+title Vietnamese T+N Predictor - GEMINI mode
+cd /d "%~dp0"
+
+echo.
+echo === Vietnamese T+N Stock Predictor (GEMINI mode) ===
+echo Step 1: ML stage runs locally and writes a prompt file.
+echo Step 2: You paste the prompt into Gemini Chat (web, with browsing).
+echo Step 3: Save Gemini's JSON response, then re-run this .bat to finalize.
+echo.
+
+if not exist ".venv\Scripts\python.exe" (
+  echo ERROR: virtual environment not found at .venv
+  echo Run setup first: py -3.13 -m venv .venv ^&^& .venv\Scripts\pip install -e ".[dev,llm]"
+  pause
+  exit /b 1
+)
+
+:menu
+echo Choose:
+echo   1) Run ML stage and emit Gemini prompt (step 1)
+echo   2) Finalize with Gemini's saved response (step 3)
+set /p CHOICE=Enter 1 or 2:
+if "%CHOICE%"=="1" goto step1
+if "%CHOICE%"=="2" goto step3
+echo Invalid choice.
+goto menu
+
+:step1
+set /p DURATION=Time budget in minutes, or 'full' for entire universe [full]:
+if "%DURATION%"=="" set DURATION=full
+
+set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [2]:
+if "%DAYS%"=="" set DAYS=2
+
+rem When days=earliest, ask for the starting T+N of the search.
+rem Ignored otherwise.
+set EARLIEST_START_FLAG=
+if /I "%DAYS%"=="earliest" goto ask_earliest_start
+goto skip_earliest_start
+
+:ask_earliest_start
+set /p EARLIEST_START=Earliest-start: T+N to begin the search (min 2) [2]:
+if "%EARLIEST_START%"=="" set EARLIEST_START=2
+set EARLIEST_START_FLAG=--earliest-start %EARLIEST_START%
+
+:skip_earliest_start
+set /p UNITS=Units per pick (min 100, multiple of 100) [100]:
+if "%UNITS%"=="" set UNITS=100
+
+set HOSE_FLAG=
+set /p HOSE=HOSE-only (exclude HNX/UPCOM)? y/n [n]:
+if /I "%HOSE%"=="y" set HOSE_FLAG=--hose-only
+if "%HOSE%"=="" set HOSE=n
+
+rem Warm-only -- three modes:
+rem   y (default) = smart lazy fetch (skip warm, fetch stale + cold)
+rem   a / always  = pure offline (use cached only, no API calls EVER)
+rem   n           = force full re-fetch of every symbol (slow, rare)
+set WARM_VALUE=yes
+set /p WARM=Warm-only? [y]es lazy fetch / [a]lways offline / [n]o full refetch [y]:
+if /I "%WARM%"=="n" set WARM_VALUE=no
+if /I "%WARM%"=="a" set WARM_VALUE=always
+if /I "%WARM%"=="always" set WARM_VALUE=always
+if "%WARM%"=="" set WARM=y
+set WARM_FLAG=--warm-only %WARM_VALUE%
+
+echo.
+echo Running ML stage: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  warm-only=%WARM_VALUE%
+echo.
+
+.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %WARM_FLAG% --mode gemini
+
+echo.
+echo Opening today's prompt file in Notepad.
+echo.
+echo NEXT:
+echo   1. Copy the prompt's contents into Gemini Chat (gemini.google.com).
+echo   2. Make sure Gemini has browsing enabled so it can search the web.
+echo   3. Save Gemini's JSON response to:
+echo      reports\gemini_response_YYYY-MM-DD.json   (same date as the prompt)
+echo   4. Re-run this .bat and choose option 2 to finalize.
+echo.
+
+for /f %%f in ('dir /b /o:-d reports\gemini_prompt_*.txt 2^>nul') do (
+  start notepad "reports\%%f"
+  goto step1_done
+)
+:step1_done
+pause
+exit /b 0
+
+:step3
+echo.
+for /f %%f in ('dir /b /o:-d reports\gemini_prompt_*.txt 2^>nul') do (
+  set "PROMPT_FILE=reports\%%f"
+  goto found_prompt
+)
+echo No prompt file found in reports\ -- run step 1 first.
+pause
+exit /b 1
+
+:found_prompt
+echo Using prompt: %PROMPT_FILE%
+.venv\Scripts\python.exe -m stockpredict.cli gemini-finalize "%PROMPT_FILE%"
+echo.
+echo === Done. Final picks (with explanations) shown above. ===
+pause

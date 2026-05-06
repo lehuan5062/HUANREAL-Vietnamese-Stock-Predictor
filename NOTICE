@@ -1,0 +1,79 @@
+================================================================================
+Vietnamese T+N Stock Predictor — swing-trade screener for HOSE/HNX/UPCOM
+Copyright (C) 2026  Lê Vương Gia Huân
+================================================================================
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public License in the
+LICENSE file for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY DEPENDENCIES — DOWNSTREAM RESTRICTIONS THE AGPL DOES NOT OVERRIDE
+--------------------------------------------------------------------------------
+
+This program depends on `vnstock` (https://pypi.org/project/vnstock/) at
+runtime. vnstock is NOT open source. Per its PyPI metadata:
+
+    "Custom: Personal, research, non-commercial; contact
+     support@vnstocks.com for other use"
+
+Anyone who installs vnstock — directly or as a transitive dependency of this
+program — is bound by vnstock's non-commercial terms regardless of the AGPL
+license that covers this program's source code. Specifically:
+
+  * Personal and research use: permitted under both AGPL (this code) and
+    vnstock's custom license.
+  * Commercial / institutional use: NOT permitted under vnstock's license
+    without contacting `support@vnstocks.com` for commercial terms. This
+    is a separate negotiation that the AGPL on this code does not address.
+
+If you intend to deploy this program — or any derivative of it — for any
+commercial purpose, you are responsible for obtaining a commercial license
+from vnstock's author independently. The copyright holder of this program
+makes no representation that such a license has been or will be granted.
+
+--------------------------------------------------------------------------------
+DUAL-LICENSING RESERVATION
+--------------------------------------------------------------------------------
+
+The copyright holder of this program (Lê Vương Gia Huân) reserves the right
+to offer this software under additional or different license terms, including
+proprietary or commercial terms, separately from the AGPL-3.0 grant above.
+
+The AGPL grant in `LICENSE` applies to the public copy of this software; it
+does NOT prevent the copyright holder from issuing private commercial
+licenses to specific parties under separate, negotiated terms.
+
+Contributions accepted under the DCO (see CONTRIBUTING.md) remain under the
+AGPL-3.0 only. The maintainer may request a separate Contributor License
+Agreement for substantial contributions if a future commercial offering
+requires re-licensing rights.
+
+--------------------------------------------------------------------------------
+OTHER RUNTIME DEPENDENCIES (no additional restrictions beyond their own
+licenses; included here for transparency)
+--------------------------------------------------------------------------------
+
+  * pandas         — BSD-3-Clause
+  * numpy          — BSD-3-Clause
+  * pyarrow        — Apache-2.0
+  * lightgbm       — MIT
+  * scikit-learn   — BSD-3-Clause
+  * pyyaml         — MIT
+  * click          — BSD-3-Clause
+  * matplotlib     — Matplotlib License (BSD-style, PSF-derived)
+  * tqdm           — MPL-2.0 + MIT (dual)
+  * anthropic      — MIT  (only with the [llm] optional extra)
+
+None of the above add restrictions that conflict with the AGPL-3.0 grant on
+this code. The vnstock restriction above is the only material non-OSI
+constraint a downstream user must satisfy separately.
