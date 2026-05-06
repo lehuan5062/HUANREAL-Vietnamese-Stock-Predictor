@@ -132,7 +132,7 @@ backfill, run with `--warm-only` to ignore them, or wait it out.
 | `--warm-only` | warm cached | stale cached | cold (no parquet) | use when |
 | ------------- | ----------- | ------------ | ----------------- | -------- |
 | **`yes`** (default) — smart lazy fetch | skip | **fetch new bar** | **fetch full history** | every-day usage |
-| **`always`** — pure offline | skip | drop | drop | guaranteed zero API calls; rate-limit panic; airplane / weekend with no fresh data needed |
+| **`always`** — pure offline | keep | keep | drop | guaranteed zero API calls; rate-limit panic; airplane / weekend (use whatever parquet is on disk) |
 | **`no`** — force full re-fetch | refetch full | refetch full | refetch full | backfill, broker corrections, suspect cache rot |
 
 How it plays out across the trading week with default `yes`:
@@ -191,15 +191,14 @@ cache audit (expected bar = 2026-05-06):
    1304 cached and current  ->  no API call
      12 cached but stale    ->  incremental fetch
     220 missing             ->  full-history fetch
-  --warm-only: dropping 220 uncached ticker(s); keeping 1316 cached
-               (1304 current + 12 stale, no API calls)
+  --warm-only=always: dropping 220 cold ticker(s) (no parquet); running on 1316 cached symbols (1304 current + 12 stale)
 
-skipping data refresh (--warm-only)
+skipping data refresh (--warm-only=always)
 ```
 
-If the cache is **completely empty** (brand-new install), `--warm-only`
+If the cache is **completely empty** (brand-new install), `--warm-only always`
 errors out — there's nothing to predict on. Run once normally to seed
-the cache, then `--warm-only` works forever after.
+the cache, then `--warm-only always` works forever after.
 
 ## Smart cache freshness — no API calls outside trading hours
 

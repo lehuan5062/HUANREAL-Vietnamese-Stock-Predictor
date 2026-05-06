@@ -10,6 +10,16 @@ import pandas as pd
 
 from .config import load_config
 
+# Force UTF-8 on stdout/stderr so Vietnamese text in plans/picks doesn't crash
+# the default Windows cp1252 console codec.
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
 
 @click.group()
 def cli() -> None:
@@ -325,8 +335,9 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
                    "only stale (newly-published bar) + cold (no parquet). "
                    "When a new trading day closes, stale auto-refreshes "
                    "on the next run, then back to zero API calls. "
-                   "`always` = never fetch, drop tickers that aren't "
-                   "already cached or are stale. Pure offline mode. "
+                   "`always` = never fetch; run on whatever parquet is "
+                   "already on disk (warm + stale). Only cold tickers "
+                   "(no parquet at all) are dropped. Pure offline mode. "
                    "`no` = force full re-fetch of every selected symbol "
                    "(slow, rate-limited; use only for backfill).")
 @click.option("--skip-train", is_flag=True,
@@ -461,22 +472,29 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
 
     warm_mode = warm_only.lower()
     if warm_mode == "always":
-        # Pure offline: drop everything that isn't already cached AND current.
+        # Pure offline: run on whatever parquet is already on disk.
+        # Warm (current) + stale (cached but missing latest bar) both count
+        # as available. Only cold tickers (no parquet) are dropped.
         # Zero API calls, guaranteed.
-        if stale or cold:
-            dropped = len(stale) + len(cold)
-            click.echo(f"  --warm-only=always: dropping {dropped} "
-                       f"non-warm ticker(s) ({len(stale)} stale + "
-                       f"{len(cold)} cold); running on {len(warm)} "
-                       f"current symbols only")
-            syms = warm
+        available = warm + stale
+        if cold:
+            click.echo(f"  --warm-only=always: dropping {len(cold)} cold "
+                       f"ticker(s) (no parquet); running on {len(available)} "
+                       f"cached symbols ({len(warm)} current + "
+                       f"{len(stale)} stale)")
+        elif stale:
+            click.echo(f"  --warm-only=always: running on {len(available)} "
+                       f"cached symbols ({len(warm)} current + "
+                       f"{len(stale)} stale); no API calls will be made")
         else:
             click.echo(f"  --warm-only=always: all {len(warm)} symbols current, "
                        "no API calls will be made")
+        syms = available
         if not syms:
-            click.echo("ERROR: --warm-only=always but no warm symbols; "
-                       "either populate the cache (run with --warm-only=yes "
-                       "first) or relax the flag.", err=True)
+            click.echo("ERROR: --warm-only=always but no cached symbols; "
+                       "populate the cache first by running with "
+                       "--warm-only=yes (or --warm-only=no for a full "
+                       "backfill).", err=True)
             sys.exit(1)
     elif warm_mode == "yes":
         # Smart lazy fetch: skip warm, fetch only stale + cold via update_many.
