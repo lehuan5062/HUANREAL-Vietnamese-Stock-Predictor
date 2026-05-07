@@ -372,7 +372,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
 @click.option("--duration", type=str, default="full", show_default=True,
               help="Minutes available, or 'full' for the entire universe with no time cap.")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
-@click.option("--days", type=str, default="2",
+@click.option("--days", type=str, default="earliest", show_default=True,
               help="T+N exit window. Integer (min 2 — Vietnamese T+2 settlement); "
                    "or 'end' = last trading day of the month (rolling to next "
                    "month if today is too close to month-end); "

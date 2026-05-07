@@ -75,7 +75,7 @@ power users who want a fully scripted workflow without Claude Desktop.
 | flag | meaning | default |
 | ---- | ------- | ------- |
 | `--duration <int>` or `--duration full` | minutes of budget, or `full` for entire universe with no time cap | `full` |
-| `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `2` |
+| `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
 | `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
 | `--units N` | Position size in shares. Min 100 (ACBS minimum lot rule). Rounds down to nearest 100. | `100` |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
@@ -788,6 +788,26 @@ as NaN on read; rows are filled retroactively the next time
 
 Gemini mode is prompt-only. The Gemini Chat web UI cannot read the local
 ledger or update it, so Gemini does not receive past-performance feedback.
+
+### Manual program-level self-correction
+
+Everything above is **passive** self-correction: feedback is injected into
+the prompt and Claude adjusts scoring *within a single run*. The program
+itself — `claude_prompt.md`, `config.yaml`, source code — never changes.
+
+For an **active** loop that mutates the program based on a chosen report,
+use [`self_correct_prompt.md`](self_correct_prompt.md). Open Claude Code
+(or Cowork) in `D:\stock`, paste the file's contents, and supply a
+`reports\picks_claude_<date>_<sig>.json` whose target date has fully
+elapsed. Claude Code cross-references the picks with the ledger's realized
+returns, diagnoses systematic errors (≥3 on-report or ≥5 in the pooled
+ledger), and proposes narrowly-scoped edits to `claude_prompt.md` and
+`config.yaml`. Every diff is shown and applied only after explicit
+per-file approval — nothing is mutated silently. Output lands at
+`reports\self_correction_<date>_<sig>.md`.
+
+This is intentionally Claude-Code-only: the work needs `Read` + `Edit` on
+local files, which the prompt-only Gemini path can't do.
 
 ## Setup (one-time)
 

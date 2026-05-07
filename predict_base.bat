@@ -17,8 +17,8 @@ if not exist ".venv\Scripts\python.exe" (
 set /p DURATION=Time budget in minutes, or 'full' for entire universe [full]:
 if "%DURATION%"=="" set DURATION=full
 
-set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [2]:
-if "%DAYS%"=="" set DAYS=2
+set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [earliest]:
+if "%DAYS%"=="" set DAYS=earliest
 
 rem When days=earliest, ask for the starting T+N of the search.
 rem Ignored otherwise.

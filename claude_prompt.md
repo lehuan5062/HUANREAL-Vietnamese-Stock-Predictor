@@ -22,11 +22,11 @@ three are collected, summarise back and start the run.
 1. **Duration** (time budget). Default `full` if the user says nothing. Accept either:
    - a positive integer N (minutes; e.g. `30`), or
    - the literal string `full` (run the entire HOSE / HNX / UPCOM universe with no time cap; expect ~75 min on the first run, much faster on warm cache).
-2. **Days** (T+N exit horizon). Accept any of:
+2. **Days** (T+N exit horizon). Default `earliest` if the user says nothing. Accept any of:
    - an integer ≥ 2 (Vietnamese T+2 settlement minimum), or
    - the literal string `end` (last trading day of the current month, rolling to next month if today is too close to month-end to satisfy T+2), or
    - the literal string `earliest` (the program iterates T+N, T+N+1, T+N+2, …, training a fresh model at each horizon, and stops at the first one that yields ≥1 `actionable` pick. **No upper cap** — runs until an actionable pick is found, user can Ctrl+C to abort. Slow — roughly 20-30s per horizon × the number tried — but useful when the user wants the *shortest* hold period that crosses the cost gate).
-   - **If the user picks `earliest`, ask a follow-up: `earliest-start` (T+N to begin the search, integer ≥ 2, default 2)**. Pass it to the CLI as `--earliest-start <N>`. Skip this follow-up for any other `--days` value.
+   - **If the user picks `earliest` (or accepts the default), ask a follow-up: `earliest-start` (T+N to begin the search, integer ≥ 2, default 2)**. Pass it to the CLI as `--earliest-start <N>`. Skip this follow-up for any other `--days` value.
 3. **Units** (position size in shares). Integer, multiple of 100, minimum 100 (ACBS rule). Default `100` if user says nothing.
 4. **HOSE-only?** y/n. Default `n`. If yes, restrict the universe to HOSE-listed tickers (excludes HNX and UPCOM).
 5. **Warm-only?** Three values: `yes` / `always` / `no`. **Default `yes`.**
