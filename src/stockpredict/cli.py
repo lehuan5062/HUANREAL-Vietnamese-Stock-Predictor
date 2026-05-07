@@ -206,7 +206,10 @@ def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
 def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None:
     """Refresh the OHLCV parquet cache from vnstock."""
     from .data.fetcher import update_many
+    from .data.intro import introduce
     from .data.universe import filter_exchanges, load_universe
+
+    introduce()
 
     if symbols:
         syms = [s.upper() for s in symbols]

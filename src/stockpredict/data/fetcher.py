@@ -112,6 +112,11 @@ def quiet_vnstock_logger() -> None:
     """Vnstock spams ERROR-level logs for transient API issues that we
     already handle via fallback. Bump it to CRITICAL so it stops cluttering
     the console during long full-universe runs."""
+    # Introduce ourselves to vnstock BEFORE silencing its loggers — the
+    # intro line goes through `stockpredict.intro` (a separate logger),
+    # so it survives the CRITICAL bump below.
+    from .intro import introduce
+    introduce()
     for name in ("vnstock", "vnstock.core.utils.client", "vnstock.explorer"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
