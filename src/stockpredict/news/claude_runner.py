@@ -39,8 +39,28 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     from .company_info import enrich
     candidates = enrich(candidates)
 
-    from ..tracking import feedback_block
+    from ..tracking import _next_trading_offset, feedback_block
     from .research_dimensions import REFERENCE_MD
+
+    # Sell-day reminder: when current_horizon is known, quote a concrete
+    # target sell day so the in-session Claude can offer to schedule a
+    # reminder once the picks are finalized.
+    if current_horizon is not None:
+        target_date = _next_trading_offset(pd.Timestamp(on),
+                                           int(current_horizon)).date()
+        if int(current_horizon) == 2:
+            sell_window = ("13:00–14:30 ICT (afternoon session, "
+                           "after T+2 settlement at noon)")
+            suggested_time = "13:00 ICT"
+        else:
+            sell_window = "09:00–14:30 ICT (any time during the trading day)"
+            suggested_time = "09:00 ICT"
+        target_iso = target_date.isoformat()
+    else:
+        target_iso = "(unknown — fall back to picks_*.json target_date)"
+        sell_window = "afternoon session ICT"
+        suggested_time = "13:00 ICT"
+
     lines = [
         f"# Claude news re-rank plan — {on.isoformat()}",
         "",
@@ -90,6 +110,23 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "",
         "When done, fill the score table at the bottom and run:",
         f"  `python -m stockpredict.cli claude-finalize reports/{path.name}`",
+        "",
+        "## Step 7 — Sell-day reminder (after finalize)",
+        "",
+        f"Once `claude-finalize` finishes, it prints the explained top-K and a",
+        f"`==> SELL-REMINDER:` block. **If at least one finalized pick is",
+        f"`actionable: True`**, ask the user — in plain conversation — whether",
+        f"they would like a reminder scheduled to **sell on {target_iso}**",
+        f"({sell_window}), in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)**.",
+        f"Suggested reminder time: {target_iso} {suggested_time}.",
+        "",
+        "If the user says yes, use whatever scheduling tool you have available",
+        "(Claude Code's scheduled-tasks / cron / `at` / Windows `schtasks`),",
+        "or — if no scheduler is available — give the user a paste-ready ICS",
+        "calendar event with `TZID=Asia/Ho_Chi_Minh`. Do NOT silently set the",
+        "reminder; always confirm date, time, tickers, and method first.",
+        "",
+        "Skip Step 7 entirely when no pick is actionable.",
         "",
         "## Global / macro context (read once)",
         "",

@@ -157,6 +157,37 @@ Show the explained top-5 with these fields per pick:
 Then a one-line **bottom line**: which (if any) picks are actionable today,
 or "no high-conviction trade today" if none clear the cost gate.
 
+### 7. Offer to schedule a sell reminder
+
+After step 6, **if at least one of the finalized picks is `actionable: True`**,
+ask the user in plain conversation whether they would like a reminder
+scheduled to **sell on the target day** in **GMT+7 (Asia/Ho_Chi_Minh,
+Vietnamese ICT)**.
+
+How to find the target day:
+
+- The `claude-finalize` console output contains a `==> SELL-REMINDER:` block
+  with the exact date and suggested time. Use that date verbatim.
+- Equivalently, read `reports\picks_claude_<DATE>_<sig>.json` — `as_of` plus
+  `exit_offset_days` resolve to the target trading day. (For T+2, sell only
+  in the afternoon session 13:00–14:30 ICT after settlement at noon. For
+  T+>2, any time during 09:00–14:30 ICT works.)
+- In `--days earliest` mode, the actionable horizon is whatever `T+N` the
+  search stopped at — already baked into `exit_offset_days`.
+
+If the user accepts:
+
+- Use whatever scheduler you have (Claude Code's scheduled-tasks tool, cron,
+  Windows `schtasks /create`, etc.) and confirm the resulting trigger time
+  in GMT+7.
+- If no scheduler is available, hand the user a copy-pasteable ICS event
+  with `TZID=Asia/Ho_Chi_Minh` so they can drop it into Google Calendar /
+  Outlook / their phone.
+- Always re-state date, time, tickers, and method before scheduling — never
+  schedule silently.
+
+Skip step 7 entirely when no pick is actionable.
+
 ## What NOT to do
 
 - Don't lock yourself to a fixed list of dimensions; derive per-ticker.

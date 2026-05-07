@@ -155,6 +155,47 @@ def _has_best_badges(picks) -> bool:
     return bool(picks[cols].any().any())
 
 
+def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
+    """If at least one pick is actionable, surface a structured sell-reminder
+    block. Both the LLM (Claude / Gemini) running in the surrounding session
+    and the user reading the terminal can act on this: schedule a reminder
+    for the target sell day, in GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)."""
+    if picks is None or len(picks) == 0:
+        return
+    if "actionable" not in picks.columns:
+        return
+    actionable_mask = picks["actionable"].fillna(False).astype(bool)
+    n_actionable = int(actionable_mask.sum())
+    if n_actionable == 0:
+        return
+    if exit_offset_days is None:
+        return
+    from .tracking import _next_trading_offset, effective_today_for_trading
+
+    as_of_ts = (pd.Timestamp(as_of) if as_of is not None
+                else effective_today_for_trading())
+    n = int(exit_offset_days)
+    target_date = _next_trading_offset(as_of_ts, n)
+    if n == 2:
+        sell_window = ("13:00–14:30 ICT  (afternoon session, "
+                       "after T+2 settlement at noon)")
+        suggested_time = "13:00 ICT"
+    else:
+        sell_window = "09:00–14:30 ICT  (any time during the trading day)"
+        suggested_time = "09:00 ICT"
+    sym_list = ", ".join(picks[actionable_mask]["symbol"].astype(str).tolist())
+    click.echo("")
+    click.echo("==> SELL-REMINDER (GMT+7, Asia/Ho_Chi_Minh — Vietnamese ICT):")
+    click.echo(f"    {n_actionable} actionable pick(s): {sym_list}")
+    click.echo(f"    Plan to sell on {target_date.strftime('%Y-%m-%d (%A)')} "
+               f"({sell_window}).")
+    click.echo(f"    Suggested reminder time: {target_date.strftime('%Y-%m-%d')} "
+               f"{suggested_time}.")
+    if mode_label in ("claude", "gemini"):
+        click.echo(f"    {mode_label.title()}: ask the user whether they want a "
+                   f"reminder scheduled for that day/time in GMT+7.")
+
+
 # ---------------------------- data -----------------------------------------
 
 
@@ -259,6 +300,11 @@ def predict_cmd(mode: str, top: int, days: int, units: int, on: str | None) -> N
         click.echo(f"\nsaved -> {out}  (path: {tag})")
         if tag == "interactive":
             click.echo("Next: ask Claude to fill the plan, then run claude-finalize.")
+        else:
+            # Interactive Claude doesn't have actionable flags filled until
+            # finalize; only the autonomous path has the final picks here.
+            _print_sell_reminder(result, as_of=on, exit_offset_days=days,
+                                 mode_label="claude")
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(top_k_final=top, on=on, units=units, exit_offset_days=days)
@@ -282,6 +328,16 @@ def claude_finalize_cmd(plan_path: str, top: int) -> None:
         click.echo("")
         click.echo(_format_picks_explained(picks))
     click.echo(f"\nsaved -> {out}")
+    # Recover horizon from the saved picks JSON so the reminder lands on
+    # the correct sell day. The CLI never re-derives it here — the
+    # finalize() path already wrote it next to the picks.
+    try:
+        payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        _print_sell_reminder(picks, as_of=payload.get("as_of"),
+                             exit_offset_days=payload.get("exit_offset_days"),
+                             mode_label="claude")
+    except Exception:
+        pass
 
 
 @cli.command("gemini-finalize")
@@ -300,6 +356,13 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
         click.echo("")
         click.echo(_format_picks_explained(picks))
     click.echo(f"\nsaved -> {out}")
+    try:
+        payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        _print_sell_reminder(picks, as_of=payload.get("as_of"),
+                             exit_offset_days=payload.get("exit_offset_days"),
+                             mode_label="gemini")
+    except Exception:
+        pass
 
 
 # ---------------------------- one-shot run --------------------------------
@@ -684,6 +747,11 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
             click.echo("    2. Then run:")
             click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
             click.echo("    Tip: set ANTHROPIC_API_KEY in .env to skip this manual step.")
+        else:
+            # Autonomous path already has actionable flags; interactive path
+            # only fills them at finalize-time (see claude-finalize command).
+            _print_sell_reminder(result, as_of=None, exit_offset_days=days,
+                                 mode_label="claude")
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(top_k_final=top, units=units,

@@ -62,7 +62,7 @@ def emit_prompt(on: str | None = None,
                         units=eff_units, hose_only=hose_only)
 
     # write_prompt currently uses the date in the filename; we suffix with sig.
-    path = write_prompt(candidates, on=on_date)
+    path = write_prompt(candidates, on=on_date, exit_offset_days=eff_horizon)
     # Rename to include the signature so distinct same-day runs coexist.
     sig_path = path.with_name(path.stem + f"_{sig}" + path.suffix)
     if sig_path != path:

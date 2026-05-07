@@ -562,8 +562,8 @@ The same fields are also stored in the saved picks JSON
 | mode | how it runs | source of explanation |
 | ---- | ----------- | --------------------- |
 | **base** | `predict_base.bat` or CLI | None — pure ML, no narrative. Compact table only. |
-| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. Optionally autonomous via `ANTHROPIC_API_KEY` for power users. |
-| **gemini** | `predict_gemini.bat` (two-step) | `predict --mode gemini` writes a prompt; you paste into Gemini Chat (web with browsing); save Gemini's JSON response to `reports/gemini_response_<date>.json`; run `gemini-finalize` to merge it into explained picks. |
+| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. After finalize, **Claude offers to schedule a sell reminder for the target day in GMT+7 (Vietnamese ICT).** Optionally autonomous via `ANTHROPIC_API_KEY` for power users. |
+| **gemini** | `predict_gemini.bat` (two-step) | `predict --mode gemini` writes a prompt; you paste into Gemini Chat (web with browsing); save Gemini's JSON response to `reports/gemini_response_<date>.json`; run `gemini-finalize` to merge it into explained picks. After finalize, **you receive a `SELL-REMINDER` block with the target exit day in GMT+7 (Vietnamese ICT), and Gemini prompts you about scheduling a reminder.** |
 
 ### Gemini two-step flow
 

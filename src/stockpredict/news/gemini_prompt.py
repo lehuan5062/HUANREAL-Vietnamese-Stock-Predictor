@@ -11,10 +11,25 @@ from ..config import load_config, reports_dir
 from .sources import global_urls, vn_urls
 
 
-def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None) -> str:
+def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
+                 exit_offset_days: int | None = None) -> str:
     on = on or dt.date.today()
     cfg = load_config().modes["gemini"]
     weight = cfg["news_weight"]
+    horizon = int(exit_offset_days) if exit_offset_days is not None else int(
+        load_config().target["exit_offset_days"]
+    )
+    # Compute the target sell day in Vietnamese trading-day space so the prompt
+    # can quote a concrete date back at Gemini, who can then ask the user
+    # about scheduling a reminder for it.
+    from ..tracking import _next_trading_offset
+    target_date = _next_trading_offset(pd.Timestamp(on), horizon).date()
+    if horizon == 2:
+        sell_window = "13:00–14:30 ICT (afternoon session, after T+2 settlement)"
+        suggested_time = "13:00 ICT"
+    else:
+        sell_window = "09:00–14:30 ICT (any time during the trading day)"
+        suggested_time = "09:00 ICT"
 
     from .company_info import enrich
     candidates = enrich(candidates)
@@ -135,12 +150,39 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None) -> str:
     parts.append("}")
     parts.append("```")
     parts.append("Top 5 picks, sorted by `adjusted` descending.")
+    parts.append("")
+    parts.append("## Final step — sell reminder (after the JSON, in chat)")
+    parts.append("")
+    parts.append(
+        f"After you output the JSON, look at how many of your top-5 picks "
+        f"are `actionable: yes` in the candidates table above (or, if you "
+        f"have re-ranked them with news, would still pass the rr/net cost "
+        f"gate)."
+    )
+    parts.append("")
+    parts.append(
+        f"**If at least one pick is actionable**, ask the user — in plain "
+        f"text after the JSON, NOT inside the JSON — whether they would "
+        f"like to schedule a reminder to **sell on {target_date.isoformat()} "
+        f"({sell_window})**, in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)**. "
+        f"Suggested reminder time: {target_date.isoformat()} {suggested_time}."
+    )
+    parts.append("")
+    parts.append(
+        "Suggest concrete options: a Google Calendar event, a phone alarm, "
+        "or whatever the user prefers. If the user says yes, give them an "
+        "ICS-style summary they can paste in: `BEGIN:VEVENT … DTSTART;TZID="
+        "Asia/Ho_Chi_Minh:…`."
+    )
+    parts.append("")
+    parts.append("If no pick is actionable, skip this question entirely.")
     return "\n".join(parts)
 
 
-def write_prompt(candidates: pd.DataFrame, on: dt.date | None = None) -> Path:
+def write_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
+                 exit_offset_days: int | None = None) -> Path:
     on = on or dt.date.today()
-    text = build_prompt(candidates, on=on)
+    text = build_prompt(candidates, on=on, exit_offset_days=exit_offset_days)
     path = reports_dir() / f"gemini_prompt_{on.isoformat()}.txt"
     path.write_text(text, encoding="utf-8")
     return path
