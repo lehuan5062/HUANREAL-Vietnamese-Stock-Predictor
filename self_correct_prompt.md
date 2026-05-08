@@ -6,9 +6,12 @@ report you choose: cross-reference the predictions with what actually happened,
 diagnose systematic errors, and propose program-level edits to
 `claude_prompt.md` and `config.yaml` so future runs do better.
 
-This is the **active** counterpart to the passive feedback-block loop already
-baked into `claude_prompt.md`. The passive loop adjusts scoring *within a
-single run*; this prompt mutates the program itself.
+This is **the only self-correction path** in the system. Day-to-day Claude
+runs (driven by `claude_prompt.md`) do **not** see past-performance feedback
+— each run scores tickers purely on today's research evidence. To act on
+accumulated history, you run this prompt manually on a chosen past picks
+file. The output is targeted edits to the program (config knobs, prompt
+text), not nudges to individual scores.
 
 ## Two stages
 

@@ -39,7 +39,7 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     from .company_info import enrich
     candidates = enrich(candidates)
 
-    from ..tracking import _next_trading_offset, feedback_block
+    from ..tracking import _next_trading_offset
     from .research_dimensions import REFERENCE_MD
 
     # Sell-day reminder: when current_horizon is known, quote a concrete
@@ -90,10 +90,6 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "   alone = 0.",
         "",
         REFERENCE_MD,
-        "",
-        feedback_block(window_days=90, mode="claude",
-                       current_horizon=current_horizon,
-                       current_signature=current_signature or run_signature),
         "",
         "Score key:",
         "  +1 = material bullish development (earnings beat, sector tailwind,",

@@ -194,9 +194,11 @@ def test_record_no_pred_low_leaves_limit_nan(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_evaluate_pending_stamps_t0_fill_before_target_date(monkeypatch, tmp_path):
-    """The buy day closes (May 6) but T+N (May 8) hasn't elapsed yet.
-    evaluate_pending should stamp t0_evaluated + entry_limit_filled while
-    leaving evaluated=False."""
+    """The buy day closes (May 6 = as_of) but T+N (May 8) hasn't elapsed
+    yet. evaluate_pending should stamp t0_evaluated + entry_limit_filled
+    while leaving evaluated=False. Under the corrected semantic, ``as_of``
+    IS the buy day; ``entry_price`` is the close from the data anchor
+    (May 5)."""
     df_ohlcv = pd.DataFrame({
         "open":  [10.0,  9.8],
         "high":  [10.2, 10.0],
@@ -204,8 +206,8 @@ def test_evaluate_pending_stamps_t0_fill_before_target_date(monkeypatch, tmp_pat
         "close": [10.0,  9.9],
         "volume":[1000, 1100],
     }, index=pd.DatetimeIndex([
-        pd.Timestamp("2026-05-05"),  # as_of
-        pd.Timestamp("2026-05-06"),  # buy day
+        pd.Timestamp("2026-05-05"),  # data anchor (as_of - 1)
+        pd.Timestamp("2026-05-06"),  # buy day = as_of
     ], name="date"))
     monkeypatch.setattr(cache_mod, "read_ohlcv", lambda s: df_ohlcv)
     monkeypatch.setattr(tracking, "read_ohlcv", lambda s: df_ohlcv)
@@ -213,8 +215,8 @@ def test_evaluate_pending_stamps_t0_fill_before_target_date(monkeypatch, tmp_pat
                         lambda: tmp_path / "predictions.parquet")
 
     pending = pd.DataFrame([{
-        "run_id": "20260505_claude_d2_u100", "signature": "claude_d2_u100",
-        "as_of": pd.Timestamp("2026-05-05"),
+        "run_id": "20260506_claude_d2_u100", "signature": "claude_d2_u100",
+        "as_of": pd.Timestamp("2026-05-06"),       # buy day = as_of
         "target_date": pd.Timestamp("2026-05-08"),  # T+N hasn't elapsed
         "exit_offset_days": 2, "mode": "claude", "symbol": "AAA", "rank": 1,
         "pred_mean": 0.05, "news_score": 0, "adjusted": 0.05,
@@ -242,16 +244,18 @@ def test_evaluate_pending_stamps_t0_fill_before_target_date(monkeypatch, tmp_pat
 
 
 def test_evaluate_pending_marks_unfilled_limit(monkeypatch, tmp_path):
-    """Buy day's low is ABOVE the quoted limit → entry_limit_filled=False."""
+    """Buy day's low is ABOVE the quoted limit → entry_limit_filled=False.
+    Buy day = as_of (May 6); its low 10.8 is above the 9.88 limit, so the
+    limit-buy never executes."""
     df_ohlcv = pd.DataFrame({
         "open":  [10.0, 11.0],
         "high":  [10.2, 11.5],
-        "low":   [ 9.9, 10.8],   # buy-day low 10.8 > limit 9.88 → no fill
+        "low":   [ 9.9, 10.8],   # May 6 (= as_of) low 10.8 > limit 9.88 → no fill
         "close": [10.0, 11.4],
         "volume":[1000, 1100],
     }, index=pd.DatetimeIndex([
-        pd.Timestamp("2026-05-05"),
-        pd.Timestamp("2026-05-06"),
+        pd.Timestamp("2026-05-05"),  # data anchor
+        pd.Timestamp("2026-05-06"),  # buy day = as_of (gap-up)
     ], name="date"))
     monkeypatch.setattr(cache_mod, "read_ohlcv", lambda s: df_ohlcv)
     monkeypatch.setattr(tracking, "read_ohlcv", lambda s: df_ohlcv)
@@ -259,8 +263,8 @@ def test_evaluate_pending_marks_unfilled_limit(monkeypatch, tmp_path):
                         lambda: tmp_path / "predictions.parquet")
 
     pending = pd.DataFrame([{
-        "run_id": "20260505_claude_d2_u100", "signature": "claude_d2_u100",
-        "as_of": pd.Timestamp("2026-05-05"),
+        "run_id": "20260506_claude_d2_u100", "signature": "claude_d2_u100",
+        "as_of": pd.Timestamp("2026-05-06"),  # buy day = as_of
         "target_date": pd.Timestamp("2026-05-08"),
         "exit_offset_days": 2, "mode": "claude", "symbol": "AAA", "rank": 1,
         "pred_mean": 0.05, "news_score": 0, "adjusted": 0.05,
@@ -288,8 +292,8 @@ def test_evaluate_pending_handles_both_stages_in_one_pass(monkeypatch, tmp_path)
         "close": [10.0,  9.9, 10.4, 10.5],
         "volume":[1000, 1100, 1200, 1300],
     }, index=pd.DatetimeIndex([
-        pd.Timestamp("2026-05-05"),
-        pd.Timestamp("2026-05-06"),  # buy day
+        pd.Timestamp("2026-05-05"),  # data anchor
+        pd.Timestamp("2026-05-06"),  # buy day = as_of
         pd.Timestamp("2026-05-07"),
         pd.Timestamp("2026-05-08"),  # target_date
     ], name="date"))
@@ -299,8 +303,8 @@ def test_evaluate_pending_handles_both_stages_in_one_pass(monkeypatch, tmp_path)
                         lambda: tmp_path / "predictions.parquet")
 
     pending = pd.DataFrame([{
-        "run_id": "20260505_claude_d2_u100", "signature": "claude_d2_u100",
-        "as_of": pd.Timestamp("2026-05-05"),
+        "run_id": "20260506_claude_d2_u100", "signature": "claude_d2_u100",
+        "as_of": pd.Timestamp("2026-05-06"),  # buy day = as_of
         "target_date": pd.Timestamp("2026-05-08"),
         "exit_offset_days": 2, "mode": "claude", "symbol": "AAA", "rank": 1,
         "pred_mean": 0.05, "news_score": 0, "adjusted": 0.05,

@@ -34,7 +34,9 @@ _LEDGER_COLUMNS = [
     "pred_mean", "news_score", "adjusted", "entry_price",
     "actual_exit", "realized_return", "evaluated",
     # Execution-quality fields, stamped by evaluate_pending from the bar at
-    # `as_of + 1 trading day` (the actual buy day). entry_slippage measures
+    # `as_of` itself (the buy day — `effective_today_for_trading` rolls
+    # `as_of` forward past the 14:30 cutoff so the recorded date is always
+    # the day the user is supposed to buy). entry_slippage measures
     # whether the predicted entry_price was achievable: negative means the
     # day's low was BELOW predicted entry (we could have bought cheaper),
     # positive means the day's low was ABOVE predicted entry (the entry
@@ -503,7 +505,7 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
             "realized_return": np.nan,
             "evaluated": False,
             # Execution-quality fields filled by evaluate_pending once the
-            # buy-day bar (as_of + 1 trading day) lands in the cache.
+            # buy-day bar (the bar at `as_of` itself) lands in the cache.
             "t0_open": np.nan,
             "t0_low": np.nan,
             "t0_close": np.nan,
@@ -536,7 +538,7 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
     Two evaluation stages run independently:
 
     1. **T+0 limit-fill stage** (``t0_evaluated``): triggers as soon as the
-       buy-day bar (``as_of + 1 trading day``) lands in the OHLCV cache.
+       buy-day bar (the bar at ``as_of`` itself) lands in the OHLCV cache.
        Stamps ``t0_open / t0_low / t0_close``, ``entry_slippage`` (vs the
        close-anchored ``entry_price``), and — if ``entry_limit_price`` was
        quoted — ``entry_limit_filled`` (True iff ``t0_low <=
@@ -560,7 +562,7 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
 
     # Union of: rows needing T+0 stamping AND rows needing T+N stamping.
     # A row may need either, both, or neither on any given pass.
-    t0_pending_mask = (~df["t0_evaluated"]) & (df["as_of"] < today_ts)
+    t0_pending_mask = (~df["t0_evaluated"]) & (df["as_of"] <= today_ts)
     tN_pending_mask = (~df["evaluated"]) & (df["target_date"] <= today_ts)
     pending = df[t0_pending_mask | tN_pending_mask]
     if pending.empty:
@@ -576,12 +578,18 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
         changed = False
 
         # --- Stage 1: T+0 limit-fill stamping ---------------------------
-        # The user is supposed to BUY on `as_of + 1 trading day` (the
-        # "T+0" buy day). Stamp that bar's OHLC + slippage + limit-fill
-        # outcome as soon as it's available in cache.
+        # The user is supposed to BUY on `as_of` itself (the "T+0" buy
+        # day — `effective_today_for_trading` rolled `as_of` forward past
+        # the 14:30 cutoff at record time, so this is always the day the
+        # user could actually trade). Stamp that bar's OHLC + slippage +
+        # limit-fill outcome as soon as it's available in cache. Use
+        # `index >= as_of` rather than `==` so weekend/holiday rolls
+        # (where the buy day might land on a non-trading calendar date
+        # because the cache calendar lags) still pick the next available
+        # bar.
         needs_t0 = not bool(row["t0_evaluated"])
         if needs_t0:
-            buy_day_bars = ohlcv[ohlcv.index > as_of]
+            buy_day_bars = ohlcv[ohlcv.index >= as_of]
             if not buy_day_bars.empty:
                 bar = buy_day_bars.iloc[0]
                 t0_open = float(bar["open"]) if "open" in bar and pd.notna(bar["open"]) else np.nan
@@ -1020,11 +1028,13 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
             "",
             "### Entry-execution sanity check",
             "",
-            "We record the predicted `entry_price` (= close at as_of) and",
-            "later compare it against the OHLC of the actual buy day",
-            "(`as_of + 1 trading day`). This measures whether the entry",
-            "we quoted was actually fillable, not just whether the model",
-            "got the direction right.",
+            "We record the predicted `entry_price` (the close on the data",
+            "bar that fed the model) and later compare it against the OHLC",
+            "of the actual buy day, which IS `as_of` (`effective_today_for_trading`",
+            "rolls `as_of` forward past 14:30 so it always names the day the",
+            "user is supposed to trade). This measures whether the entry we",
+            "quoted was actually fillable, not just whether the model got",
+            "the direction right.",
             "",
             f"- **n picks with buy-day data**: {slip['n']}",
             f"- **mean entry_slippage** (t0_low vs entry_price): "

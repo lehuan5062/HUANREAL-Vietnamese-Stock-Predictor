@@ -91,13 +91,17 @@ def fake_ohlcv(monkeypatch):
 
 def test_evaluate_pending_stamps_buy_day_bar(monkeypatch, tmp_path, fake_ohlcv):
     """A pending row evaluates to (a) realized_return based on entry_price
-    -> actual_exit, AND (b) the T+0 OHLC from the buy day."""
+    -> actual_exit, AND (b) the T+0 OHLC from the buy day. Under the
+    corrected semantic, ``as_of`` IS the buy day — `effective_today_for_trading`
+    rolls it forward past 14:30, so the OHLCV row at ``as_of`` itself is
+    the row to stamp. ``entry_price`` is the close from the data anchor,
+    which is the trading day BEFORE ``as_of`` (May 5 in this fixture)."""
     monkeypatch.setattr(tracking, "ledger_path",
                         lambda: tmp_path / "predictions.parquet")
     pending = pd.DataFrame([{
-        "run_id": "20260505_claude_d2_u100",
+        "run_id": "20260506_claude_d2_u100",
         "signature": "claude_d2_u100",
-        "as_of": pd.Timestamp("2026-05-05"),
+        "as_of": pd.Timestamp("2026-05-06"),  # buy day = as_of
         "target_date": pd.Timestamp("2026-05-08"),
         "exit_offset_days": 2,
         "mode": "claude",
@@ -106,7 +110,7 @@ def test_evaluate_pending_stamps_buy_day_bar(monkeypatch, tmp_path, fake_ohlcv):
         "pred_mean": 0.05,
         "news_score": 0,
         "adjusted": 0.05,
-        "entry_price": 10.0,        # predicted entry = May 5 close
+        "entry_price": 10.0,        # close at May 5 (data anchor, day before as_of)
         "actual_exit": np.nan,
         "realized_return": np.nan,
         "evaluated": False,
@@ -152,8 +156,8 @@ def test_evaluate_pending_marks_unreachable_entry(monkeypatch, tmp_path):
                         lambda: tmp_path / "predictions.parquet")
 
     pending = pd.DataFrame([{
-        "run_id": "20260505_claude_d2_u100", "signature": "claude_d2_u100",
-        "as_of": pd.Timestamp("2026-05-05"),
+        "run_id": "20260506_claude_d2_u100", "signature": "claude_d2_u100",
+        "as_of": pd.Timestamp("2026-05-06"),  # buy day = as_of
         "target_date": pd.Timestamp("2026-05-08"),
         "exit_offset_days": 2, "mode": "claude", "symbol": "AAA", "rank": 1,
         "pred_mean": 0.05, "news_score": 0, "adjusted": 0.05,

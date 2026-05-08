@@ -56,8 +56,6 @@ SYSTEM = (
 USER_TEMPLATE = """Today is {date}. Score these {n} candidates for a Vietnamese T+2 swing trade
 (buy at today's close, sell on T+2 afternoon after settlement).
 
-{feedback}
-
 Candidates (with company names):
 {table}
 
@@ -76,7 +74,6 @@ Return JSON exactly:
 {{
   "as_of": "{date}",
   "global_summary": "1-2 sentences on macro drivers relevant to VN-Index today",
-  "lessons_learned": "what the past-performance feedback above tells you about how to score today",
   "scores": [
     {{"symbol": "XYZ",
       "business": "1-line description of what the company does",
@@ -147,16 +144,12 @@ def score(candidates: pd.DataFrame, date: str,
         raise RuntimeError(
             "`anthropic` SDK not installed. Run: pip install anthropic"
         ) from e
-    from ..tracking import feedback_block
 
     client = anthropic.Anthropic(api_key=api_key)
     user_msg = USER_TEMPLATE.format(
         date=date,
         n=len(candidates),
         table=_candidates_table(candidates),
-        feedback=feedback_block(window_days=90, mode="claude",
-                                 current_horizon=current_horizon,
-                                 current_signature=current_signature),
     )
     # Use the latest Claude with web_search server tool. The tool is invoked
     # automatically by Claude as it researches each ticker.

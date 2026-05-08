@@ -204,7 +204,11 @@ Skip step 7 entirely when no pick is actionable.
 - The system records every pick in a ledger (`cache/predictions.parquet`)
   with target_date = the actual T+N trading day (weekends + Vietnamese
   holidays excluded). When the user runs again later, past predictions are
-  auto-evaluated and the past-performance feedback is fed into your prompt
-  for the next run, so the system self-corrects over time.
+  auto-evaluated, but **scoring this run is NOT influenced by past
+  performance** — score each ticker purely on the news/research evidence
+  you find today. To act on accumulated history, the user runs the manual
+  self-correction prompt (`self_correct_prompt.md`) on a specific past
+  picks file; that flow proposes targeted edits to this prompt /
+  `config.yaml` instead of nudging individual scores.
 
 Now, ask the user for the three parameters and begin.
