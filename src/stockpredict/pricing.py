@@ -5,6 +5,21 @@ vnstock prices are in **thousand VND** (e.g. close=15.35 means 15,350 VND).
 We expose all suggestion columns in absolute VND (integer) since that's how
 Vietnamese traders enter orders in their broker app.
 
+Two entries are surfaced:
+
+* ``entry_vnd`` — the **limit-buy** price the user should place. When a
+  ``pred_low`` column is present (produced by the quantile low head),
+  it equals ``close * (1 + pred_low) * 1000`` (clipped so we never quote
+  a limit above today's close). When ``pred_low`` is absent, this falls
+  back to ``close * 1000`` so legacy installs still work.
+* ``close_vnd`` — today's close in VND, kept as a reference column so
+  the user can compare quoted entry against the close even when the
+  limit-prediction shifts ``entry_vnd`` below it.
+
+All position sizing, risk-reward, fees, and the ``actionable`` gate use
+``entry_vnd`` (the realistic limit price), so what the user sees is
+exactly the trade they'd place if the limit fills.
+
 ACBS fee model (default — override in config.yaml):
   buy  cost = trade_value * commission_pct * (1 + vat_pct/100)
   sell cost = trade_value * commission_pct * (1 + vat_pct/100) + trade_value * pit_pct
@@ -48,21 +63,32 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
 
     Required input columns (already produced by the feature pipeline):
         close      — today's close in thousand VND
-        pred_mean  — predicted T+2 return (e.g. +0.0017 = +0.17%)
+        pred_mean  — predicted forward return (e.g. +0.0017 = +0.17%)
         pred_std   — model dispersion across the seed ensemble
         atr_14     — 14-day ATR in thousand VND
 
+    Optional input column:
+        pred_low   — quantile prediction of ``low[T+1]/close[T] - 1``
+                     (typically negative). When present, ``entry_vnd``
+                     becomes the limit-buy price at that predicted dip
+                     and the stop is anchored on the limit (so the
+                     stop_atr_mult * ATR risk distance is exact). When
+                     absent, ``entry_vnd = close * 1000`` (legacy).
+
     Output columns appended (all VND, integer where applicable):
         position_units, position_value_vnd
-        entry_vnd, target_vnd, target_low_vnd, target_high_vnd, stop_vnd
-        gross_reward_vnd      target - entry, scaled by position_units
-        max_loss_vnd          entry - stop, scaled by position_units
-        fees_round_trip_vnd   buy commission+VAT + sell commission+VAT + sell PIT
-        net_reward_vnd        gross_reward - fees   (the headline number)
-        net_loss_vnd          max_loss + fees       (worst-case if stopped out)
-        rr_ratio              net_reward / net_loss
-        breakeven_pct         price move needed just to cover fees
-        actionable            net_reward > 0 AND rr_ratio >= min_rr_ratio
+        entry_vnd                limit-buy price (= close*(1+pred_low) when present)
+        close_vnd                reference: today's close in VND
+        entry_limit_pct          predicted dip relative to close (clipped <= 0)
+        target_vnd, target_low_vnd, target_high_vnd, stop_vnd
+        gross_reward_vnd         target - entry, scaled by position_units
+        max_loss_vnd             entry - stop, scaled by position_units
+        fees_round_trip_vnd      buy commission+VAT + sell commission+VAT + sell PIT
+        net_reward_vnd           gross_reward - fees   (the headline number)
+        net_loss_vnd             max_loss + fees       (worst-case if stopped out)
+        rr_ratio                 net_reward / net_loss
+        breakeven_pct            price move needed just to cover fees
+        actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
     """
     if df is None or len(df) == 0:
         return df
@@ -86,12 +112,27 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     pred_std = out.get("pred_std", pd.Series(0.0, index=out.index)).astype(float)
     atr_k = out.get("atr_14", pd.Series(np.nan, index=out.index)).astype(float)
 
-    # Per-share prices in VND
-    entry_v = (close_k * 1000.0).round(0)
+    # Predicted next-day low return. Default to 0 (entry == close) so the
+    # legacy code path — feature frames without a low model — keeps the
+    # original behavior. Clip at 0 so we never quote an entry ABOVE close
+    # (placing a limit above the market would just buy at market on open
+    # and defeats the purpose of a limit-buy).
+    pred_low = out.get("pred_low", pd.Series(0.0, index=out.index)).astype(float)
+    pred_low_eff = pred_low.fillna(0.0).clip(upper=0.0)
+
+    # Per-share prices in VND. ``entry_v`` is the limit price (= close at
+    # the configured dip); ``close_v`` keeps the close-in-VND for display.
+    close_v = (close_k * 1000.0).round(0)
+    entry_v = (close_k * (1.0 + pred_low_eff) * 1000.0).round(0)
     target_v = (close_k * (1.0 + pred) * 1000.0).round(0)
     target_low_v = (close_k * (1.0 + pred - pred_std) * 1000.0).round(0)
     target_high_v = (close_k * (1.0 + pred + pred_std) * 1000.0).round(0)
-    stop_v = ((close_k - stop_mult * atr_k) * 1000.0).round(0)
+    # Stop is anchored on the LIMIT entry (not on close), so the risk
+    # distance is exactly ``stop_atr_mult * ATR`` regardless of where the
+    # entry lands. Without this, a deep-dip limit could put the stop
+    # ABOVE the entry on rare configs.
+    entry_k = entry_v / 1000.0
+    stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
 
     # Position-level P&L (sized at pos_units)
     position_v = entry_v * pos_units
@@ -114,6 +155,8 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     out["position_units"] = pos_units
     out["position_value_vnd"] = position_v.round(0).astype("Int64")
     out["entry_vnd"] = entry_v.astype("Int64")
+    out["close_vnd"] = close_v.astype("Int64")
+    out["entry_limit_pct"] = pred_low_eff.round(6)
     out["target_vnd"] = target_v.astype("Int64")
     out["target_low_vnd"] = target_low_v.astype("Int64")
     out["target_high_vnd"] = target_high_v.astype("Int64")

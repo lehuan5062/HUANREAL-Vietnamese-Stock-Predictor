@@ -33,7 +33,7 @@ def _format_picks(picks) -> str:
     if picks is None or len(picks) == 0:
         return "(no picks)"
     show_cols = [c for c in [
-        "symbol", "entry_vnd", "target_vnd", "stop_vnd",
+        "symbol", "close_vnd", "entry_vnd", "target_vnd", "stop_vnd",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
         "rr_ratio", "actionable",
         "pred_mean", "news_score", "adjusted",
@@ -42,7 +42,7 @@ def _format_picks(picks) -> str:
         return picks.to_string(index=False)
     fmt = picks[show_cols].copy()
     money_cols = [
-        "entry_vnd", "target_vnd", "stop_vnd",
+        "close_vnd", "entry_vnd", "target_vnd", "stop_vnd",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
     ]
     for c in money_cols:
@@ -89,7 +89,18 @@ def _format_picks_explained(picks) -> str:
             rr = r.get("rr_ratio", float("nan"))
             actionable = bool(r.get("actionable", False))
             verdict = "ACTIONABLE" if actionable else "skip (rr/net too low)"
-            parts.append(f"  Trade: buy {pos} @ {entry:,} VND  |  target {tgt:,}  |  stop {stop:,}")
+            close_v = r.get("close_vnd", None)
+            dip_pct = r.get("entry_limit_pct", None)
+            if close_v is not None and pd.notna(close_v) and dip_pct is not None and pd.notna(dip_pct) and float(dip_pct) < 0:
+                # Entry sits below close — surface the predicted dip so the
+                # user knows the limit isn't a market order at close.
+                parts.append(
+                    f"  Trade: LIMIT-buy {pos} @ {entry:,} VND "
+                    f"(close {int(close_v):,}, dip {float(dip_pct):+.2%})  "
+                    f"|  target {tgt:,}  |  stop {stop:,}"
+                )
+            else:
+                parts.append(f"  Trade: buy {pos} @ {entry:,} VND  |  target {tgt:,}  |  stop {stop:,}")
             parts.append(f"  P&L (after ACBS fees {fees:,}): net {net:+,}  rr {rr:.2f}  -> {verdict}")
 
         ml_pred = r.get("pred_mean", None)
@@ -237,20 +248,47 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
 @cli.command("train")
 @click.option("--start", default=None)
 @click.option("--end", default=None)
-def train_cmd(start: str | None, end: str | None) -> None:
-    """Build the panel and fit a fresh model. Saves to models/latest.pkl."""
+@click.option("--skip-low/--no-skip-low", default=False, show_default=True,
+              help="Skip the low-quantile head (entry-limit predictor). "
+                   "When skipped, predictions fall back to entry = close.")
+def train_cmd(start: str | None, end: str | None, skip_low: bool) -> None:
+    """Build the panel and fit fresh mean + low models.
+
+    Saves the mean head to ``models/latest.pkl`` and the low-quantile head
+    to ``models/low_latest.pkl`` (unless ``--skip-low`` is set)."""
     from .dataset import build_panel
-    from .model.train import save_latest, train
+    from .model.train import save_latest, save_latest_low, train, train_quantile
 
     click.echo("building panel...")
-    panel = build_panel(start=start, end=end, require_target=True)
+    # require_target=False so target_low rows survive; we drop NaN per-head.
+    panel = build_panel(start=start, end=end, require_target=False)
     click.echo(f"panel: {len(panel):,} rows across {panel['symbol'].nunique()} symbols")
     if panel.empty:
         click.echo("no data — run update-data first.", err=True)
         sys.exit(1)
-    model = train(panel)
+
+    panel_mean = panel.dropna(subset=["target"])
+    click.echo(f"  mean head: {len(panel_mean):,} rows with target")
+    model = train(panel_mean)
     path = save_latest(model)
-    click.echo(f"trained {len(model.boosters)} boosters; saved -> {path}")
+    click.echo(f"  trained {len(model.boosters)} boosters; saved -> {path}")
+
+    if skip_low:
+        click.echo("  skipping low head (--skip-low).")
+        return
+    if "target_low" not in panel.columns:
+        click.echo("  no target_low column — OHLCV cache may lack 'low' "
+                   "(re-run update-data). Skipping low head.")
+        return
+    panel_low = panel.dropna(subset=["target_low"])
+    if panel_low.empty:
+        click.echo("  no rows with target_low — skipping low head.")
+        return
+    click.echo(f"  low head: {len(panel_low):,} rows with target_low")
+    low_model = train_quantile(panel_low)
+    low_path = save_latest_low(low_model)
+    click.echo(f"  trained {len(low_model.boosters)} quantile boosters "
+               f"(alpha={low_model.alpha:.2f}); saved -> {low_path}")
 
 
 # ---------------------------- backtest -------------------------------------
@@ -425,7 +463,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     from .data.cache import cached_symbols
     from .data.fetcher import update_many
     from .dataset import build_panel
-    from .model.train import save_latest, train as train_model
+    from .model.train import (save_latest, save_latest_low,
+                              train as train_model, train_quantile)
     from .selector import select as select_symbols
 
     # ---- input validation ----
@@ -672,9 +711,12 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         EMPTY_PANEL_LIMIT = 60  # ~3 trading months of horizons with no labels
         while True:
             click.echo(f"  T+{n}...", nl=False)
-            panel_n = build_panel(symbols=syms, require_target=True,
+            # Build with require_target=False so target_low rows survive
+            # for the low head; drop NaN per-head separately.
+            panel_n = build_panel(symbols=syms, require_target=False,
                                   exit_offset_days=n)
-            if panel_n.empty:
+            panel_n_mean = panel_n.dropna(subset=["target"]) if not panel_n.empty else panel_n
+            if panel_n_mean.empty:
                 click.echo(" no rows; skip")
                 consecutive_empty += 1
                 if consecutive_empty >= EMPTY_PANEL_LIMIT:
@@ -687,8 +729,17 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
                 n += 1
                 continue
             consecutive_empty = 0
-            m = train_model(panel_n)
+            m = train_model(panel_n_mean)
             save_latest(m)
+            # Train the low head on the same panel (target_low doesn't
+            # depend on horizon, so we could reuse a single low model
+            # across iterations; we still rebuild here for simplicity
+            # and to keep both heads' train_end aligned).
+            if "target_low" in panel_n.columns:
+                panel_n_low = panel_n.dropna(subset=["target_low"])
+                if not panel_n_low.empty:
+                    low_m = train_quantile(panel_n_low)
+                    save_latest_low(low_m)
             picks_n = rank_today(top_k=top, units=units,
                                  exit_offset_days=n,
                                  symbols=pred_syms)
@@ -711,14 +762,32 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         click.echo("")
     elif not skip_train:
         click.echo(f"training (horizon T+{days})...")
-        panel = build_panel(symbols=syms, require_target=True, exit_offset_days=days)
-        if panel.empty:
+        # Build once with require_target=False so both heads can see all
+        # rows; drop NaN per-head before fitting.
+        panel = build_panel(symbols=syms, require_target=False,
+                            exit_offset_days=days)
+        panel_mean = panel.dropna(subset=["target"]) if not panel.empty else panel
+        if panel_mean.empty:
             click.echo("no training rows. aborting.", err=True)
             sys.exit(1)
-        click.echo(f"  panel: {len(panel):,} rows / {panel['symbol'].nunique()} symbols")
-        model = train_model(panel)
+        click.echo(f"  mean head: {len(panel_mean):,} rows / "
+                   f"{panel_mean['symbol'].nunique()} symbols")
+        model = train_model(panel_mean)
         save_latest(model)
-        click.echo("  model saved.")
+        click.echo("  mean model saved.")
+
+        # Low head: same panel, dropna on target_low. Independent of
+        # exit_offset_days (target_low only looks at next-day low).
+        if "target_low" in panel.columns:
+            panel_low = panel.dropna(subset=["target_low"])
+            if not panel_low.empty:
+                click.echo(f"  low head: {len(panel_low):,} rows / "
+                           f"{panel_low['symbol'].nunique()} symbols")
+                low_model = train_quantile(panel_low)
+                save_latest_low(low_model)
+                click.echo(f"  low model saved (alpha={low_model.alpha:.2f}).")
+            else:
+                click.echo("  low head: no rows with target_low — skipped.")
         click.echo("")
 
     click.echo(f"predicting (mode={mode})...")
@@ -778,6 +847,43 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
 # ---------------------------- evaluate / track ----------------------------
 
 
+@cli.command("evaluate-fills")
+@click.option("--refresh-data/--no-refresh-data", default=True,
+              help="Run incremental fetch on tickers with un-stamped T+0 fills first.")
+def evaluate_fills_cmd(refresh_data: bool) -> None:
+    """Stamp T+0 limit-fill outcomes for picks whose buy day has closed.
+
+    Independent of T+N realized-return evaluation: this runs the moment
+    the next trading day's bar lands in cache. After it succeeds, the
+    Claude self-correction prompt can diagnose limit-fill calibration
+    issues (fill rate, dip-quoted vs dip-actual) without waiting for
+    T+N. Internally calls the same ``evaluate_pending`` — the function
+    handles both stages, this command just makes the early-stage trigger
+    explicit in the CLI surface.
+    """
+    from .data.fetcher import update_many
+    from .tracking import _read, evaluate_pending
+
+    if refresh_data:
+        df = _read()
+        if not df.empty:
+            pending_syms = sorted(df[~df["t0_evaluated"]]["symbol"].unique().tolist())
+            if pending_syms:
+                click.echo(f"refreshing data for {len(pending_syms)} symbols "
+                           f"with un-stamped T+0 fills...")
+                update_many(pending_syms, full=False, workers=2)
+
+    updated = evaluate_pending()
+    click.echo(f"newly stamped: {len(updated)}")
+    if not updated.empty:
+        cols = [c for c in ["as_of", "target_date", "mode", "symbol", "rank",
+                            "entry_price", "entry_limit_price", "t0_low",
+                            "entry_limit_filled", "entry_slippage",
+                            "evaluated", "realized_return"]
+                if c in updated.columns]
+        click.echo(updated[cols].to_string(index=False))
+
+
 @cli.command("evaluate")
 @click.option("--refresh-data/--no-refresh-data", default=True,
               help="Run incremental fetch on tickers in pending evaluations first.")
@@ -795,11 +901,13 @@ def evaluate_cmd(refresh_data: bool) -> None:
                 update_many(pending_syms, full=False, workers=2)
 
     updated = evaluate_pending()
-    click.echo(f"newly evaluated: {len(updated)}")
+    click.echo(f"newly evaluated (T+0 limit-fill or T+N realized): {len(updated)}")
     if not updated.empty:
-        cols = ["as_of", "target_date", "mode", "symbol", "rank",
-                "pred_mean", "news_score", "entry_price", "actual_exit",
-                "realized_return"]
+        cols = [c for c in ["as_of", "target_date", "mode", "symbol", "rank",
+                            "pred_mean", "news_score", "entry_price",
+                            "entry_limit_price", "entry_limit_filled",
+                            "actual_exit", "realized_return"]
+                if c in updated.columns]
         click.echo(updated[cols].to_string(index=False))
 
     click.echo("\n=== recent performance (last 90 days) ===")
@@ -828,9 +936,11 @@ def track_cmd(mode: str | None, limit: int) -> None:
     if mode:
         df = df[df["mode"] == mode]
     df = df.sort_values(["as_of", "rank"], ascending=[False, True]).head(limit)
-    cols = ["as_of", "target_date", "mode", "symbol", "rank",
-            "pred_mean", "news_score", "entry_price",
-            "realized_return", "evaluated"]
+    cols = [c for c in ["as_of", "target_date", "mode", "symbol", "rank",
+                        "pred_mean", "news_score", "entry_price",
+                        "entry_limit_price", "entry_limit_filled",
+                        "realized_return", "evaluated"]
+            if c in df.columns]
     click.echo(df[cols].to_string(index=False))
 
 
@@ -848,7 +958,19 @@ def status_cmd() -> None:
     if syms:
         click.echo(f"  example: {syms[:5]}")
     m = models_dir() / "latest.pkl"
-    click.echo(f"latest model: {'present' if m.exists() else 'missing'}  ({m})")
+    click.echo(f"latest mean model: {'present' if m.exists() else 'missing'}  ({m})")
+    lm = models_dir() / "low_latest.pkl"
+    if lm.exists():
+        try:
+            from .model.train import LowQuantileModel
+            low = LowQuantileModel.load(lm)
+            click.echo(f"latest low model:  present  ({lm})  alpha={low.alpha:.2f}  "
+                       f"trained_on={low.train_rows:,} rows")
+        except Exception as e:
+            click.echo(f"latest low model:  present but unreadable ({e})")
+    else:
+        click.echo(f"latest low model:  missing  ({lm}) "
+                   f"— predictions fall back to entry = close")
 
 
 def main() -> None:

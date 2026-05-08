@@ -160,8 +160,13 @@ def test_read_backfills_missing_dimensions_cited(monkeypatch, tmp_path):
     dimensions_cited = '' for every legacy row."""
     monkeypatch.setattr(tracking, "ledger_path",
                         lambda: tmp_path / "predictions.parquet")
-    legacy_cols = [c for c in tracking._LEDGER_COLUMNS
-                   if c not in tracking._NEW_STRING_COLUMNS]
+    # Exclude every later-added column so the legacy frame represents a
+    # ledger written BEFORE the dimensions_cited release (and any later
+    # release like low-prediction). _read should backfill them all.
+    later_added = (set(tracking._NEW_STRING_COLUMNS)
+                   | set(tracking._NEW_BOOL_COLUMNS)
+                   | {"pred_low", "entry_limit_price", "t0_evaluated"})
+    legacy_cols = [c for c in tracking._LEDGER_COLUMNS if c not in later_added]
     today = pd.Timestamp.today().normalize()
     legacy = pd.DataFrame([{
         "run_id": "20260420_claude_d2_u100",

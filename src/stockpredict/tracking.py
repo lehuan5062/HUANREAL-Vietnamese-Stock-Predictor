@@ -48,13 +48,31 @@ _LEDGER_COLUMNS = [
     # dimensions cited (e.g. base/gemini mode picks, or a Claude pick with
     # no Step 4 findings at all).
     "dimensions_cited",
+    # Low-prediction fields. ``pred_low`` is the model's predicted next-
+    # day low return (negative typically); ``entry_limit_price`` is the
+    # actual quoted limit-buy price (= close * (1 + pred_low)) the user
+    # was supposed to place. ``entry_limit_filled`` is set by
+    # evaluate_pending once the buy-day bar lands: True when t0_low <=
+    # entry_limit_price (the limit would have filled), False otherwise.
+    # ``t0_evaluated`` flips True once the buy-day bar is in cache and
+    # the limit-fill outcome has been stamped — independent of T+N
+    # evaluation, so a Claude self-correction can be triggered the very
+    # next trading day instead of waiting for the realized return.
+    "pred_low", "entry_limit_price", "entry_limit_filled", "t0_evaluated",
 ]
 
 
 # Columns that may be missing from old ledger files; _read backfills them
 # with NaN so the file stays readable across schema changes.
-_NEW_FLOAT_COLUMNS = ("t0_open", "t0_low", "t0_close", "entry_slippage")
+_NEW_FLOAT_COLUMNS = ("t0_open", "t0_low", "t0_close", "entry_slippage",
+                      "pred_low", "entry_limit_price")
 _NEW_STRING_COLUMNS = ("dimensions_cited",)
+# Boolean columns added in the low-prediction release. Default for legacy
+# rows: ``entry_limit_filled`` is False (no limit was placed); for
+# ``t0_evaluated`` the backfill is "True if evaluated else False" because
+# pre-existing evaluated rows already had their t0 bar stamped during
+# the original evaluate_pending pass.
+_NEW_BOOL_COLUMNS = ("entry_limit_filled",)
 
 
 def _normalize_dimensions(value) -> str:
@@ -115,6 +133,19 @@ def _read() -> pd.DataFrame:
     for col in _NEW_STRING_COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    # Backfill boolean columns added in the low-prediction release.
+    for col in _NEW_BOOL_COLUMNS:
+        if col not in df.columns:
+            df[col] = False
+    # ``t0_evaluated`` — separate fill rule: legacy rows that were already
+    # evaluated for T+N had their buy-day bar stamped at that time, so we
+    # treat them as "T+0 already done". Unevaluated legacy rows start as
+    # False and get picked up by the next evaluate_pending pass.
+    if "t0_evaluated" not in df.columns:
+        if "evaluated" in df.columns:
+            df["t0_evaluated"] = df["evaluated"].astype(bool)
+        else:
+            df["t0_evaluated"] = False
     return df
 
 
@@ -437,6 +468,24 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
     rows = []
     for i, r in picks.reset_index(drop=True).iterrows():
         sym = str(r["symbol"]).upper()
+        # Low-prediction fields. ``pred_low`` is the predicted next-day
+        # low return; ``entry_limit_price`` is the limit-buy price the
+        # user was supposed to place (in thousand-VND, same scale as
+        # ``entry_price``). When the low head wasn't trained, both are
+        # NaN and evaluate_pending later treats the row as having no
+        # limit (entry_limit_filled stays False).
+        pred_low_val = (float(r["pred_low"])
+                        if "pred_low" in r and pd.notna(r["pred_low"])
+                        else np.nan)
+        # Prefer the explicit close-price column when available; otherwise
+        # fall back to ``entry_price`` (= close in the legacy ledger).
+        close_for_limit = float(r["close"]) if "close" in r and pd.notna(r["close"]) else np.nan
+        if not np.isnan(pred_low_val) and not np.isnan(close_for_limit):
+            # ``pred_low`` is clipped at 0 in pricing; we mirror that
+            # here so the recorded limit price is never above close.
+            limit_price = close_for_limit * (1.0 + min(pred_low_val, 0.0))
+        else:
+            limit_price = np.nan
         rows.append({
             "run_id": rid,
             "signature": sig,
@@ -463,6 +512,11 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
             # Comma-separated string; empty for non-claude modes or rows
             # where Step 4 was left blank.
             "dimensions_cited": _normalize_dimensions(r.get("dimensions_cited")),
+            # Low-head outputs (NaN when low model isn't trained yet).
+            "pred_low": pred_low_val,
+            "entry_limit_price": limit_price,
+            "entry_limit_filled": False,
+            "t0_evaluated": False,
         })
     add = pd.DataFrame(rows)
     df = _read()
@@ -477,16 +531,38 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
 
 
 def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
-    """Fill realized returns for any pending row whose target_date <= today AND
-    whose ticker has cached OHLCV through the target date. Returns the rows
-    that were updated."""
+    """Fill realized outcomes for any pending row whose data is now in cache.
+
+    Two evaluation stages run independently:
+
+    1. **T+0 limit-fill stage** (``t0_evaluated``): triggers as soon as the
+       buy-day bar (``as_of + 1 trading day``) lands in the OHLCV cache.
+       Stamps ``t0_open / t0_low / t0_close``, ``entry_slippage`` (vs the
+       close-anchored ``entry_price``), and — if ``entry_limit_price`` was
+       quoted — ``entry_limit_filled`` (True iff ``t0_low <=
+       entry_limit_price``). This stage lets the user / Claude run
+       limit-fill self-correction the very next trading day, before T+N
+       has elapsed.
+
+    2. **T+N realized stage** (``evaluated``): existing logic — once
+       ``target_date <= today`` AND OHLCV is cached through that day,
+       fills ``actual_exit`` and ``realized_return`` (computed against
+       the close-anchored ``entry_price``).
+
+    Both flags are set independently. Returns the rows that were updated
+    by either stage.
+    """
     df = _read()
     if df.empty:
         return df
     today = today or dt.date.today()
     today_ts = pd.Timestamp(today).normalize()
 
-    pending = df[(~df["evaluated"]) & (df["target_date"] <= today_ts)]
+    # Union of: rows needing T+0 stamping AND rows needing T+N stamping.
+    # A row may need either, both, or neither on any given pass.
+    t0_pending_mask = (~df["t0_evaluated"]) & (df["as_of"] < today_ts)
+    tN_pending_mask = (~df["evaluated"]) & (df["target_date"] <= today_ts)
+    pending = df[t0_pending_mask | tN_pending_mask]
     if pending.empty:
         return pending
 
@@ -496,49 +572,68 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
         ohlcv = read_ohlcv(sym)
         if ohlcv.empty:
             continue
-        target = pd.Timestamp(row["target_date"]).normalize()
         as_of = pd.Timestamp(row["as_of"]).normalize()
-        # Use the first available trading day at or after target_date
-        on_or_after = ohlcv[ohlcv.index >= target]
-        if on_or_after.empty:
-            continue
-        actual_exit = float(on_or_after.iloc[0]["close"])
-        entry = row["entry_price"]
-        if pd.isna(entry):
-            # fall back: read entry close from cached OHLCV at as_of
-            on_at = ohlcv[ohlcv.index <= as_of]
-            if on_at.empty:
-                continue
-            entry = float(on_at.iloc[-1]["close"])
-            df.at[idx, "entry_price"] = entry
-        realized = actual_exit / entry - 1.0
-        df.at[idx, "actual_exit"] = actual_exit
-        df.at[idx, "realized_return"] = realized
-        df.at[idx, "evaluated"] = True
+        changed = False
 
-        # Execution-quality measurement: the predicted entry_price is the
-        # close at as_of (the day before the actual trade). The user is
-        # supposed to BUY on `as_of + 1 trading day` ("T+0" in the user's
-        # frame, the buy day). Pull that bar's open/low/close to measure
-        # whether the predicted entry was actually achievable. We tolerate
-        # missing fields (open/low/close) so a partial OHLCV row still
-        # records what we can.
-        buy_day_bars = ohlcv[ohlcv.index > as_of]
-        if not buy_day_bars.empty:
-            bar = buy_day_bars.iloc[0]
-            t0_open = float(bar["open"]) if "open" in bar and pd.notna(bar["open"]) else np.nan
-            t0_low = float(bar["low"]) if "low" in bar and pd.notna(bar["low"]) else np.nan
-            t0_close = float(bar["close"]) if "close" in bar and pd.notna(bar["close"]) else np.nan
-            df.at[idx, "t0_open"] = t0_open
-            df.at[idx, "t0_low"] = t0_low
-            df.at[idx, "t0_close"] = t0_close
-            # Slippage to the day's low. Negative => market dipped below
-            # predicted entry (we could have bought cheaper); positive =>
-            # the day's low was ABOVE predicted entry, so the entry was
-            # unreachable and the realized_return on that row is fictional.
-            if pd.notna(t0_low) and entry > 0:
-                df.at[idx, "entry_slippage"] = (t0_low - entry) / entry
-        updated_rows.append(idx)
+        # --- Stage 1: T+0 limit-fill stamping ---------------------------
+        # The user is supposed to BUY on `as_of + 1 trading day` (the
+        # "T+0" buy day). Stamp that bar's OHLC + slippage + limit-fill
+        # outcome as soon as it's available in cache.
+        needs_t0 = not bool(row["t0_evaluated"])
+        if needs_t0:
+            buy_day_bars = ohlcv[ohlcv.index > as_of]
+            if not buy_day_bars.empty:
+                bar = buy_day_bars.iloc[0]
+                t0_open = float(bar["open"]) if "open" in bar and pd.notna(bar["open"]) else np.nan
+                t0_low = float(bar["low"]) if "low" in bar and pd.notna(bar["low"]) else np.nan
+                t0_close = float(bar["close"]) if "close" in bar and pd.notna(bar["close"]) else np.nan
+                df.at[idx, "t0_open"] = t0_open
+                df.at[idx, "t0_low"] = t0_low
+                df.at[idx, "t0_close"] = t0_close
+
+                # Slippage to the day's low, measured vs. the close-anchored
+                # ``entry_price`` (preserved for backward compat with
+                # legacy ledgers). Negative => market dipped below
+                # ``entry_price``; positive => unreachable at that price.
+                entry_close = row["entry_price"]
+                if pd.notna(t0_low) and pd.notna(entry_close) and float(entry_close) > 0:
+                    df.at[idx, "entry_slippage"] = (t0_low - float(entry_close)) / float(entry_close)
+
+                # Limit-fill check: if the row recorded an
+                # ``entry_limit_price``, the limit-buy filled iff the
+                # day's low touched/breached it.
+                limit_price = row["entry_limit_price"]
+                if pd.notna(t0_low) and pd.notna(limit_price):
+                    df.at[idx, "entry_limit_filled"] = bool(t0_low <= float(limit_price))
+                else:
+                    df.at[idx, "entry_limit_filled"] = False
+
+                df.at[idx, "t0_evaluated"] = True
+                changed = True
+
+        # --- Stage 2: T+N realized-return stamping ----------------------
+        needs_tN = (not bool(row["evaluated"])
+                    and pd.Timestamp(row["target_date"]).normalize() <= today_ts)
+        if needs_tN:
+            target = pd.Timestamp(row["target_date"]).normalize()
+            on_or_after = ohlcv[ohlcv.index >= target]
+            if not on_or_after.empty:
+                actual_exit = float(on_or_after.iloc[0]["close"])
+                entry = row["entry_price"]
+                if pd.isna(entry):
+                    on_at = ohlcv[ohlcv.index <= as_of]
+                    if not on_at.empty:
+                        entry = float(on_at.iloc[-1]["close"])
+                        df.at[idx, "entry_price"] = entry
+                if pd.notna(entry) and float(entry) > 0:
+                    realized = actual_exit / float(entry) - 1.0
+                    df.at[idx, "actual_exit"] = actual_exit
+                    df.at[idx, "realized_return"] = realized
+                    df.at[idx, "evaluated"] = True
+                    changed = True
+
+        if changed:
+            updated_rows.append(idx)
 
     _write(df)
     return df.loc[updated_rows]
@@ -578,8 +673,61 @@ def recent_performance(window_days: int = 90,
         "recent_5": _recent_picks_sample(df, n=5),
         "entry_slippage": _entry_slippage_stats(df),
         "by_dimension": _by_dimension(df),
+        "limit_fill": _limit_fill_stats(df),
     }
     return out
+
+
+def _limit_fill_stats(df: pd.DataFrame) -> dict | None:
+    """Stats on whether the limit-buy entry quoted by the low head actually
+    filled. Returns ``None`` when no row has a recorded ``entry_limit_price``
+    (e.g. ledgers from before the low-prediction release, or runs where
+    ``models/low_latest.pkl`` didn't exist).
+
+    Keys:
+      - ``n`` — rows with a non-null ``entry_limit_price`` AND a stamped
+        ``t0_evaluated=True`` (the buy-day bar has landed)
+      - ``fill_rate`` — fraction of those where the limit actually filled
+        (``t0_low <= entry_limit_price``)
+      - ``mean_dip_quoted`` — average predicted dip relative to close
+        (``pred_low``); negative numbers mean we asked for a dip below close
+      - ``mean_dip_actual`` — average actual dip ``(t0_low - close) / close``
+        on the buy day, conditional on ``t0_low`` being available
+      - ``calibration`` — ``mean_dip_actual - mean_dip_quoted``: positive
+        means actual dips were SHALLOWER than quoted (we set the limit
+        too low and missed fills); negative means dips were DEEPER than
+        quoted (we could have set the limit lower and still filled)
+    """
+    if "entry_limit_price" not in df.columns:
+        return None
+    sub = df[df["entry_limit_price"].notna() & df["t0_evaluated"].astype(bool)]
+    if sub.empty:
+        return None
+
+    filled = sub["entry_limit_filled"].astype(bool)
+    pred_low = sub["pred_low"].astype(float)
+    # Actual dip relative to entry_price (= close at as_of). Skip rows
+    # missing either side.
+    has_dip = sub["t0_low"].notna() & sub["entry_price"].notna() & (sub["entry_price"] > 0)
+    if has_dip.any():
+        dip_actual = ((sub.loc[has_dip, "t0_low"].astype(float)
+                       - sub.loc[has_dip, "entry_price"].astype(float))
+                      / sub.loc[has_dip, "entry_price"].astype(float))
+        mean_dip_actual = float(dip_actual.mean())
+    else:
+        mean_dip_actual = float("nan")
+    mean_dip_quoted = float(pred_low.dropna().mean()) if pred_low.notna().any() else float("nan")
+    calibration = (mean_dip_actual - mean_dip_quoted
+                   if not (pd.isna(mean_dip_actual) or pd.isna(mean_dip_quoted))
+                   else float("nan"))
+
+    return {
+        "n": int(len(sub)),
+        "fill_rate": float(filled.mean()),
+        "mean_dip_quoted": mean_dip_quoted,
+        "mean_dip_actual": mean_dip_actual,
+        "calibration": calibration,
+    }
 
 
 def _by_dimension(df: pd.DataFrame) -> dict:
@@ -832,6 +980,39 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
                     f"{s['mean_return']:+.4f} | {s['median_return']:+.4f} |"
                 )
             lines.append("")
+
+    fill = perf.get("limit_fill")
+    if fill is not None:
+        lines += [
+            "",
+            "### Limit-buy fill calibration (low head)",
+            "",
+            "When the low head was trained at run time, picks recorded an",
+            "``entry_limit_price`` (= close × (1 + predicted dip)). After the",
+            "buy day closes we mark each row's ``entry_limit_filled`` based",
+            "on whether ``t0_low <= entry_limit_price``. This says nothing",
+            "about whether the trade was profitable — just whether the limit",
+            "order would have actually executed.",
+            "",
+            f"- **n picks with low-head limits**: {fill['n']}",
+            f"- **fill_rate** (% of limits the market actually touched): "
+            f"{fill['fill_rate']:.1%}",
+            f"- **mean dip QUOTED** (pred_low): "
+            f"{fill['mean_dip_quoted']:+.4f}",
+            f"- **mean dip ACTUAL** ((t0_low − close)/close): "
+            f"{fill['mean_dip_actual']:+.4f}",
+            f"- **calibration** (actual − quoted, sign convention: positive "
+            f"= dips were shallower than we quoted, so we missed fills): "
+            f"{fill['calibration']:+.4f}",
+            "",
+            "Interpret: target fill_rate should track ``pricing.entry_low_alpha``",
+            "(default 0.5 → ~50% of limits fill). If fill_rate is much lower",
+            "than alpha, the low head is too bearish on dips and limits never",
+            "trigger — raise alpha or retrain. If fill_rate is much higher,",
+            "limits fill almost every day but the dip captured is tiny —",
+            "lower alpha to find a deeper, cheaper entry.",
+            "",
+        ]
 
     slip = perf.get("entry_slippage")
     if slip is not None:

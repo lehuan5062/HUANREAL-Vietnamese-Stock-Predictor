@@ -83,6 +83,15 @@ pricing:
   # Minimum required net risk-reward (after fees) to flag a pick as actionable.
   # The CLI shows `actionable: True/False` based on this gate.
   min_rr_ratio: 0.8
+  # Quantile alpha used by the "low" head to predict the next-day dip
+  # the user can place as a limit-buy. P(fill) ≈ alpha when the limit
+  # equals the alpha-th quantile of next-day low.
+  #   0.25 = aggressive (deeper dip, ~25% fill, cheaper when filled)
+  #   0.50 = median (default — fills ~half the time)
+  #   0.75 = conservative (shallow dip, ~75% fill)
+  # When no `models/low_latest.pkl` is present, the program falls back
+  # to entry = today's close (the legacy behavior).
+  entry_low_alpha: 0.5
 
 modes:
   base:

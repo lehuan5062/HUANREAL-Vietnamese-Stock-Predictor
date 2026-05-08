@@ -1,4 +1,13 @@
-"""Score the latest cross-section of features and rank tickers by predicted T+2 return."""
+"""Score the latest cross-section of features and rank tickers by predicted T+2 return.
+
+Two heads are loaded when available:
+
+* ``models/latest.pkl`` — mean head (decides ranking via ``pred_mean``).
+* ``models/low_latest.pkl`` — quantile head (predicts ``pred_low``, used
+  by ``add_price_suggestions`` to anchor the limit-buy entry below today's
+  close). When the low model is missing, ``pred_low`` is omitted from
+  the candidates frame and pricing falls back to entry = today's close.
+"""
 from __future__ import annotations
 
 import pandas as pd
@@ -6,7 +15,12 @@ import pandas as pd
 from ..dataset import FEATURE_COLS, build_panel
 from ..filters import liquidity_mask
 from ..pricing import add_price_suggestions
-from .train import TrainedModel, latest_model_path
+from .train import (
+    LowQuantileModel,
+    TrainedModel,
+    latest_low_model_path,
+    latest_model_path,
+)
 
 
 def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -23,17 +37,36 @@ def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) ->
     return last
 
 
+def _try_load_low_model() -> LowQuantileModel | None:
+    """Return the cached low-quantile model, or None if it hasn't been
+    trained yet. Missing pickle is a soft fallback — the caller produces
+    candidates without a ``pred_low`` column and pricing reverts to the
+    close-anchored entry."""
+    p = latest_low_model_path()
+    if not p.exists():
+        return None
+    try:
+        return LowQuantileModel.load(p)
+    except Exception:
+        # Corrupt pickle (interrupted save, schema mismatch) — treat as
+        # missing rather than crashing the whole rank pass.
+        return None
+
+
 def rank_today(model: TrainedModel | None = None,
                on: str | pd.Timestamp | None = None,
                top_k: int = 5,
                panel: pd.DataFrame | None = None,
                units: int | None = None,
                exit_offset_days: int | None = None,
-               symbols: list[str] | None = None) -> pd.DataFrame:
+               symbols: list[str] | None = None,
+               low_model: LowQuantileModel | None = None) -> pd.DataFrame:
     """Compute predicted return for every eligible symbol on the given date,
     apply the liquidity filter, and return the top_k as a DataFrame."""
     if model is None:
         model = TrainedModel.load(latest_model_path())
+    if low_model is None:
+        low_model = _try_load_low_model()
     if panel is None:
         # require_target=False so we keep the most recent rows even without a known target
         panel = build_panel(symbols=symbols, require_target=False,
@@ -55,16 +88,23 @@ def rank_today(model: TrainedModel | None = None,
 
     preds = model.predict(snap)
     snap = snap.assign(**preds)
+    if low_model is not None:
+        # ``pred_low`` is the predicted ``low[T+1]/close[T] - 1`` at the
+        # configured quantile alpha. add_price_suggestions consumes this
+        # to derive entry_vnd; if absent, it falls back to entry = close.
+        snap["pred_low"] = low_model.predict(snap)
+        snap["pred_low_alpha"] = float(low_model.alpha)
     snap["rank"] = snap["pred_mean"].rank(ascending=False, method="dense").astype(int)
     out = snap.sort_values("pred_mean", ascending=False).head(top_k)
     out = add_price_suggestions(out, units=units)
     cols = ["symbol", "close",
             "position_units", "position_value_vnd",
-            "entry_vnd", "target_vnd", "target_low_vnd", "target_high_vnd",
+            "entry_vnd", "close_vnd", "entry_limit_pct",
+            "target_vnd", "target_low_vnd", "target_high_vnd",
             "stop_vnd", "gross_reward_vnd", "max_loss_vnd",
             "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
             "rr_ratio", "breakeven_pct", "actionable",
-            "pred_mean", "pred_std", "rank",
+            "pred_mean", "pred_std", "pred_low", "pred_low_alpha", "rank",
             "rsi_14", "mom_5", "mom_20", "vol_z_20", "adv_vnd_20", "atr_14"]
     cols = [c for c in cols if c in out.columns]
     return out[cols].reset_index().rename(columns={"date": "as_of"})

@@ -22,11 +22,14 @@ def test_read_backfills_missing_slippage_columns(monkeypatch, tmp_path):
     """An old ledger written before the entry-slippage release must be
     readable, with the four new columns appended as NaN."""
     monkeypatch.setattr(tracking, "ledger_path", lambda: tmp_path / "predictions.parquet")
-    # Write an "old" ledger missing every later-added column (both the
-    # entry-slippage floats AND the dimensions_cited string).
-    legacy_cols = [c for c in tracking._LEDGER_COLUMNS
-                   if c not in tracking._NEW_FLOAT_COLUMNS
-                   and c not in tracking._NEW_STRING_COLUMNS]
+    # Write an "old" ledger missing every later-added column (entry-
+    # slippage floats, dimensions_cited string, low-prediction
+    # floats/bool, and t0_evaluated).
+    later_added = (set(tracking._NEW_FLOAT_COLUMNS)
+                   | set(tracking._NEW_STRING_COLUMNS)
+                   | set(tracking._NEW_BOOL_COLUMNS)
+                   | {"t0_evaluated"})
+    legacy_cols = [c for c in tracking._LEDGER_COLUMNS if c not in later_added]
     today = pd.Timestamp("2026-05-05").normalize()
     legacy = pd.DataFrame([{
         "run_id": "20260505_claude_d2_u100",

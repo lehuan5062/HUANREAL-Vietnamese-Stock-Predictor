@@ -14,3 +14,7 @@ __pycache__/
 cache/
 models/
 reports/
+
+# user-captured terminal output (e.g. `cli run > run.log`)
+run.log
+*.log
