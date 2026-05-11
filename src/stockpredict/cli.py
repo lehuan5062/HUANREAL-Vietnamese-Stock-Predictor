@@ -187,21 +187,26 @@ def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
                 else effective_today_for_trading())
     n = int(exit_offset_days)
     target_date = _next_trading_offset(as_of_ts, n)
+    # Reminder fires AFTER market close on T+(N-1) — the trading day before
+    # the sell day — so the user has the evening to prepare and can place
+    # orders at the next morning's open. VN market closes at 14:30 ICT;
+    # 15:00 gives a 30-min buffer for the close to settle.
+    reminder_date = _next_trading_offset(as_of_ts, max(n - 1, 0))
+    reminder_time = "15:00 ICT"
     if n == 2:
         sell_window = ("13:00–14:30 ICT  (afternoon session, "
                        "after T+2 settlement at noon)")
-        suggested_time = "13:00 ICT"
     else:
         sell_window = "09:00–14:30 ICT  (any time during the trading day)"
-        suggested_time = "09:00 ICT"
     sym_list = ", ".join(picks[actionable_mask]["symbol"].astype(str).tolist())
     click.echo("")
     click.echo("==> SELL-REMINDER (GMT+7, Asia/Ho_Chi_Minh — Vietnamese ICT):")
     click.echo(f"    {n_actionable} actionable pick(s): {sym_list}")
-    click.echo(f"    Plan to sell on {target_date.strftime('%Y-%m-%d (%A)')} "
+    click.echo(f"    Sell day: {target_date.strftime('%Y-%m-%d (%A)')} "
                f"({sell_window}).")
-    click.echo(f"    Suggested reminder time: {target_date.strftime('%Y-%m-%d')} "
-               f"{suggested_time}.")
+    click.echo(f"    Suggested reminder: "
+               f"{reminder_date.strftime('%Y-%m-%d (%A)')} {reminder_time} "
+               f"(after T+{n-1} market close).")
     if mode_label in ("claude", "gemini"):
         click.echo(f"    {mode_label.title()}: ask the user whether they want a "
                    f"reminder scheduled for that day/time in GMT+7.")

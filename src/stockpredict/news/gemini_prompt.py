@@ -21,15 +21,17 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     )
     # Compute the target sell day in Vietnamese trading-day space so the prompt
     # can quote a concrete date back at Gemini, who can then ask the user
-    # about scheduling a reminder for it.
+    # about scheduling a reminder. Reminder fires the trading day BEFORE the
+    # sell day, after market close (15:00 ICT — VN closes at 14:30).
     from ..tracking import _next_trading_offset
     target_date = _next_trading_offset(pd.Timestamp(on), horizon).date()
+    reminder_date = _next_trading_offset(pd.Timestamp(on),
+                                         max(horizon - 1, 0)).date()
     if horizon == 2:
         sell_window = "13:00–14:30 ICT (afternoon session, after T+2 settlement)"
-        suggested_time = "13:00 ICT"
     else:
         sell_window = "09:00–14:30 ICT (any time during the trading day)"
-        suggested_time = "09:00 ICT"
+    suggested_time = "15:00 ICT"
 
     from .company_info import enrich
     candidates = enrich(candidates)
@@ -163,9 +165,13 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append(
         f"**If at least one pick is actionable**, ask the user — in plain "
         f"text after the JSON, NOT inside the JSON — whether they would "
-        f"like to schedule a reminder to **sell on {target_date.isoformat()} "
-        f"({sell_window})**, in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)**. "
-        f"Suggested reminder time: {target_date.isoformat()} {suggested_time}."
+        f"like to schedule a reminder in **GMT+7 (Asia/Ho_Chi_Minh, "
+        f"Vietnamese ICT)** to prepare the exit.\n"
+        f"- Sell day: {target_date.isoformat()} ({sell_window}).\n"
+        f"- Reminder fires: {reminder_date.isoformat()} {suggested_time} — "
+        f"AFTER market close on T+{horizon-1} (VN closes 14:30 ICT). "
+        f"This gives the user the evening to plan and queue orders for the "
+        f"next-day open."
     )
     parts.append("")
     parts.append(

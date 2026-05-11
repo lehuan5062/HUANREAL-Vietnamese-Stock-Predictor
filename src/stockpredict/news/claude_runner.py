@@ -44,22 +44,28 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
 
     # Sell-day reminder: when current_horizon is known, quote a concrete
     # target sell day so the in-session Claude can offer to schedule a
-    # reminder once the picks are finalized.
+    # reminder once the picks are finalized. The reminder fires AFTER
+    # market close on T+(N-1) — the trading day BEFORE the sell day —
+    # giving the user the evening to plan and place orders at next-day
+    # open. VN market closes at 14:30 ICT; 15:00 = post-close buffer.
     if current_horizon is not None:
-        target_date = _next_trading_offset(pd.Timestamp(on),
-                                           int(current_horizon)).date()
-        if int(current_horizon) == 2:
+        n = int(current_horizon)
+        target_date = _next_trading_offset(pd.Timestamp(on), n).date()
+        reminder_date = _next_trading_offset(pd.Timestamp(on),
+                                             max(n - 1, 0)).date()
+        if n == 2:
             sell_window = ("13:00–14:30 ICT (afternoon session, "
                            "after T+2 settlement at noon)")
-            suggested_time = "13:00 ICT"
         else:
             sell_window = "09:00–14:30 ICT (any time during the trading day)"
-            suggested_time = "09:00 ICT"
+        suggested_time = "15:00 ICT"
         target_iso = target_date.isoformat()
+        reminder_iso = reminder_date.isoformat()
     else:
         target_iso = "(unknown — fall back to picks_*.json target_date)"
+        reminder_iso = "(unknown — one trading day before the sell day)"
         sell_window = "afternoon session ICT"
-        suggested_time = "13:00 ICT"
+        suggested_time = "15:00 ICT"
 
     lines = [
         f"# Claude news re-rank plan — {on.isoformat()}",
@@ -112,15 +118,21 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         f"Once `claude-finalize` finishes, it prints the explained top-K and a",
         f"`==> SELL-REMINDER:` block. **If at least one finalized pick is",
         f"`actionable: True`**, ask the user — in plain conversation — whether",
-        f"they would like a reminder scheduled to **sell on {target_iso}**",
-        f"({sell_window}), in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)**.",
-        f"Suggested reminder time: {target_iso} {suggested_time}.",
+        f"they would like a reminder scheduled in **GMT+7 (Asia/Ho_Chi_Minh,",
+        f"Vietnamese ICT)** to prepare the exit.",
+        "",
+        f"- **Sell day** (the actual trade): {target_iso} ({sell_window}).",
+        f"- **Reminder fires**: {reminder_iso} {suggested_time} — i.e. AFTER",
+        f"  market close on T+{int(current_horizon)-1 if current_horizon else 'N-1'}",
+        f"  (VN market closes 14:30 ICT). This gives the user the evening to",
+        f"  review and queue orders for the next-day open.",
         "",
         "If the user says yes, use whatever scheduling tool you have available",
         "(Claude Code's scheduled-tasks / cron / `at` / Windows `schtasks`),",
         "or — if no scheduler is available — give the user a paste-ready ICS",
         "calendar event with `TZID=Asia/Ho_Chi_Minh`. Do NOT silently set the",
-        "reminder; always confirm date, time, tickers, and method first.",
+        "reminder; always confirm reminder date+time, sell day, tickers, and",
+        "method first.",
         "",
         "Skip Step 7 entirely when no pick is actionable.",
         "",

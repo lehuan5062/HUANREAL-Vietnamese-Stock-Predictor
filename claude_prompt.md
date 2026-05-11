@@ -161,30 +161,42 @@ or "no high-conviction trade today" if none clear the cost gate.
 
 After step 6, **if at least one of the finalized picks is `actionable: True`**,
 ask the user in plain conversation whether they would like a reminder
-scheduled to **sell on the target day** in **GMT+7 (Asia/Ho_Chi_Minh,
-Vietnamese ICT)**.
+scheduled in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the
+exit.
 
-How to find the target day:
+**Two distinct dates** — keep them straight:
 
-- The `claude-finalize` console output contains a `==> SELL-REMINDER:` block
-  with the exact date and suggested time. Use that date verbatim.
-- Equivalently, read `reports\picks_claude_<DATE>_<sig>.json` — `as_of` plus
-  `exit_offset_days` resolve to the target trading day. (For T+2, sell only
-  in the afternoon session 13:00–14:30 ICT after settlement at noon. For
-  T+>2, any time during 09:00–14:30 ICT works.)
+- **Sell day** = T+N, the actual trading day on which the position is sold.
+  (For T+2, sell only in the afternoon session 13:00–14:30 ICT after noon
+  settlement. For T+>2, any time 09:00–14:30 ICT works.)
+- **Reminder day** = T+(N-1), the trading day BEFORE the sell day. The
+  reminder fires at **15:00 ICT** — i.e. AFTER the Vietnamese market closes
+  at 14:30 ICT — so the user has the evening to review and queue exit
+  orders for the next-day open. **This is what you schedule, not the sell
+  day itself.**
+
+How to find both dates:
+
+- The `claude-finalize` console output contains a `==> SELL-REMINDER:`
+  block listing both `Sell day:` and `Suggested reminder:` lines. Use the
+  reminder line verbatim when scheduling.
+- Equivalently, read `reports\picks_claude_<DATE>_<sig>.json` — `as_of`
+  plus `exit_offset_days` resolve to the sell day; subtract one trading
+  day (skip weekends + VN holidays) to get the reminder day.
 - In `--days earliest` mode, the actionable horizon is whatever `T+N` the
   search stopped at — already baked into `exit_offset_days`.
 
 If the user accepts:
 
-- Use whatever scheduler you have (Claude Code's scheduled-tasks tool, cron,
-  Windows `schtasks /create`, etc.) and confirm the resulting trigger time
-  in GMT+7.
+- Schedule the reminder for **T+(N-1) at 15:00 ICT**, NOT for the sell day
+  morning. Use whatever scheduler you have (Claude Code's scheduled-tasks
+  tool, cron, Windows `schtasks /create`, etc.) and confirm the resulting
+  trigger time in GMT+7.
 - If no scheduler is available, hand the user a copy-pasteable ICS event
   with `TZID=Asia/Ho_Chi_Minh` so they can drop it into Google Calendar /
   Outlook / their phone.
-- Always re-state date, time, tickers, and method before scheduling — never
-  schedule silently.
+- Always re-state both dates (reminder + sell), the time, tickers, and
+  method before scheduling — never schedule silently.
 
 Skip step 7 entirely when no pick is actionable.
 
