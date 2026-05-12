@@ -52,19 +52,74 @@ went right), and propose narrowly scoped edits to the program. Show every
 diff and wait for explicit approval before applying — never silently
 mutate files.
 
-## Step 1 — Ask the user for the report and stage
+## Step 1 — Scan ledger for eligibility, then ask
 
-Ask in plain conversation, one question at a time:
+This prompt is most often invoked **right after market close**: the user
+just saw the buy day close and wants to know whether their entry limits
+filled sensibly. The natural Stage-1 candidate at that moment is the
+report whose `as_of` is the **previous trading day** (so today = T+0 =
+buy day, which just closed). The natural Stage-2 candidate is any
+report whose `target_date` = today.
 
-1. **Picks JSON path** (required). Absolute path to a finalized picks file,
-   typically `D:\stock\reports\picks_claude_<YYYY-MM-DD>_<sig>.json`. List the
-   available reports first if the user is unsure:
-   ```
-   D:\stock\.venv\Scripts\python.exe -c "import os, glob; [print(p) for p in sorted(glob.glob(r'D:\stock\reports\picks_claude_*.json'))]"
-   ```
+**Before asking the user anything**, do an eligibility scan: pair each
+recent picks JSON on disk with its ledger rows and classify each by
+stage readiness. Don't just `ls reports/` and dump the list — the user
+shouldn't have to compute eligibility in their head.
+
+```
+D:\stock\.venv\Scripts\python.exe -c "import glob, json, os, pandas as pd; df = pd.read_parquet(r'D:\stock\cache\predictions.parquet')
+for p in sorted(glob.glob(r'D:\stock\reports\picks_claude_*.json'))[-8:]:
+    d = json.load(open(p, encoding='utf-8')); rid = d['as_of'].replace('-','') + '_' + d['run_signature']; sub = df[df['run_id'] == rid]
+    if len(sub) == 0: print(os.path.basename(p), 'as_of=' + d['as_of'], 'no ledger rows'); continue
+    n = len(sub); t0 = int(sub['t0_evaluated'].sum()); ev = int(sub['evaluated'].sum())
+    print(os.path.basename(p), 'as_of=' + d['as_of'], 'target=' + str(sub['target_date'].iloc[0]), 't0=' + str(t0) + '/' + str(n), 'eval=' + str(ev) + '/' + str(n))"
+```
+
+**Get the wall clock first.** The harness only injects today's date,
+not the time. Run `date` (or `D:\stock\.venv\Scripts\python.exe -c
+"import pandas as pd; print(pd.Timestamp.now(tz='Asia/Ho_Chi_Minh'))"`)
+and pin `now_vn`. HOSE closes 15:00 Asia/Ho_Chi_Minh. T+0 (buy day) =
+`as_of` itself (see `tracking.py:581`), so a report's buy day has
+closed iff `now_vn > 15:00` on its `as_of` date — independent of any
+ledger flag. The `t0_evaluated` flag tells you what's been STAMPED,
+not what has HAPPENED in the market; don't read `t0_evaluated=False`
+as "buy day hasn't closed."
+
+Classify each row:
+
+- All `evaluated=True` → **Stage-2 ready**.
+- All `t0_evaluated=True` (some `evaluated=False`) → **Stage-1 ready**.
+- Most-but-not-all `t0_evaluated=True` (e.g. 4/5) on a report whose buy
+  day has clearly passed → **Stage-1 with stragglers** — offer to run
+  `evaluate-fills` first to backfill; usually a transient lag, not a
+  real exclusion.
+- All `t0_evaluated=False`:
+  - Buy day has closed (`now_vn > 15:00` on `as_of`) → **Stage-1 ready
+    after ingest + evaluate-fills**. Today's OHLC bars likely not yet
+    in `cache/ohlcv/<sym>.parquet`; offer to refresh data and stamp.
+  - Buy day hasn't closed yet → not yet; ask the user to come back
+    after 15:00 Asia/Ho_Chi_Minh on the buy day.
+
+**Default-recommend** the freshest Stage-1-ready (or Stage-1-with-
+stragglers, or Stage-2-ready) report, in that priority order. Phrase
+question 1 as a confirmation, not an open-ended pick-from-list.
+
+Then ask in plain conversation, one question at a time:
+
+1. **Picks JSON path** (required). Default to the suggested report from
+   the eligibility scan and frame as a confirmation, e.g.:
+
+   > Today is the buy day for `picks_claude_<date>_<sig>.json` (4/5
+   > rows already have `t0_evaluated=True`; I can backfill the 1
+   > straggler with `evaluate-fills`). Run Stage 1 on that? (y / or
+   > paste a different path)
+
+   Only show the full list if the user declines the default or no
+   report is currently stage-eligible.
+
 2. **Stage** (optional). Either `1` (limit-fill only) or `2` (full
    T+N realized). If the user doesn't specify, infer from the ledger
-   (Step 3) and tell them what you decided.
+   classification above and tell them what you decided.
 3. **Extra context** (optional). Anything the user wants weighted into the
    diagnosis (e.g. "ignore VNM, it was a known data issue", "I executed only
    3 of the 5 picks"). Default empty.
@@ -123,6 +178,15 @@ Where `<RUN_ID>` is `<YYYYMMDD>_<run_signature>` — e.g.
 
   Don't proceed past this gate even if the user pushes — the diagnosis
   would be hallucinated.
+
+- **Partial-gate with stragglers** (e.g. 4/5 `t0_evaluated=True` on a
+  report whose buy day has passed): don't declare the gate failed yet.
+  Run `evaluate-fills` to try to backfill the missing row, then
+  re-check. If it backfills, proceed with Stage 1. If the straggler
+  persists (e.g. ticker had no trades that day, was halted, or data
+  feed is broken), tell the user and ask whether to (a) exclude that
+  row and proceed with n-1, or (b) wait for the data. Don't silently
+  drop rows.
 
 If Stage 2 passes, present a per-pick table showing:
 
@@ -338,6 +402,10 @@ D:\stock\.venv\Scripts\python.exe -m stockpredict.cli train
 
 ## What NOT to do
 
+- Don't ask the user to blindly pick from a list of all reports. Run
+  the eligibility scan (Step 1) first, classify each recent report by
+  stage readiness, and default-suggest the right one. The user should
+  confirm, not compute.
 - Don't propose edits from a single losing or unfilled pick. Evidence
   threshold = ≥3 on-report or ≥5 in pooled ledger.
 - Don't auto-apply. Always show the diff and wait for per-file approval.
