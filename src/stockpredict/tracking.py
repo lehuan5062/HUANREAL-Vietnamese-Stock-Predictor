@@ -656,16 +656,19 @@ def recent_performance(window_days: int = 90,
     df = _read()
     if df.empty:
         return {"n": 0, "note": "no predictions recorded yet"}
-    df = df[df["evaluated"]]
     if mode:
         df = df[df["mode"] == mode]
-    if df.empty:
-        return {"n": 0, "note": "no evaluated predictions yet (need at least one T+N to elapse)"}
-
     cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=window_days)
     df = df[df["as_of"] >= cutoff]
+
+    # limit_fill stats need only t0_evaluated (buy day closed), not full
+    # T+N evaluation. Compute on the mode+window slice before pruning to
+    # evaluated=True, so newly-stamped buy days are visible before T+N.
+    limit_fill = _limit_fill_stats(df)
+
+    df = df[df["evaluated"]]
     if df.empty:
-        return {"n": 0, "note": f"no evaluated predictions in last {window_days} days"}
+        return {"n": 0, "note": f"no evaluated predictions in last {window_days} days", "limit_fill": limit_fill}
 
     rets = df["realized_return"].astype(float)
     out = {
@@ -681,7 +684,7 @@ def recent_performance(window_days: int = 90,
         "recent_5": _recent_picks_sample(df, n=5),
         "entry_slippage": _entry_slippage_stats(df),
         "by_dimension": _by_dimension(df),
-        "limit_fill": _limit_fill_stats(df),
+        "limit_fill": limit_fill,
     }
     return out
 

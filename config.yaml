@@ -91,7 +91,7 @@ pricing:
   #   0.75 = conservative (shallow dip, ~75% fill)
   # When no `models/low_latest.pkl` is present, the program falls back
   # to entry = today's close (the legacy behavior).
-  entry_low_alpha: 0.35
+  entry_low_alpha: 0.25
 
 modes:
   base:

@@ -188,21 +188,60 @@ Where `<RUN_ID>` is `<YYYYMMDD>_<run_signature>` — e.g.
   row and proceed with n-1, or (b) wait for the data. Don't silently
   drop rows.
 
-If Stage 2 passes, present a per-pick table showing:
+Hold the per-pick data and stage-appropriate summary stats as working
+evidence — they're inputs to findings, not output. Quote specific
+numbers inside findings instead of emitting standalone tables or
+summary blocks.
 
-| symbol | pred_mean | news_score | adjusted | realized_return | entry_limit_filled | dimensions_cited | entry_slippage |
+**Filter to `actionable: True` picks only.** Read the `actionable`
+field from the picks JSON (the ledger doesn't carry it). Non-actionable
+picks fail `pricing.min_rr_ratio` and never get a real entry limit
+placed by the user — their `fill_margin` (Stage 1) or `realized_return`
+(Stage 2) is theoretical noise, not signal. State `n_total` vs
+`n_actionable` in the report header so the exclusion is visible. Thin
+`n_actionable` (say ≤2) only closes the **on-report** path of the
+evidence threshold; the pooled-ledger path (n≥5) is still open and is
+the normal way to proceed when actionables are thin. Don't bail at
+low `n_actionable` alone — bail only if both paths fail. The
+2026-05-12 session is the canonical example: n=1 actionable on the
+report, but pooled n=35 cleared the threshold.
 
-If only Stage 1 passes, present:
+Per-pick columns to keep handy. `entry_limit_price` (the actual price
+paid if filled) is **mandatory** in both stages — never omit it, and
+never substitute the close anchor. Stage-1 calibration is judged on
+`entry_limit_price` vs `t0_low` (the realized intraday low) directly,
+never via the close.
 
-| symbol | pred_mean | pred_low | entry_limit_price | t0_low | entry_limit_filled | entry_slippage |
+- Stage 2: `symbol, pred_mean, news_score, adjusted, entry_limit_price,
+  t0_low, entry_limit_filled, fill_margin, realized_return,
+  dimensions_cited`.
+- Stage 1: `symbol, pred_mean, pred_low, entry_limit_price, t0_low,
+  entry_limit_filled, fill_margin`.
 
-Plus a one-line summary appropriate to the stage:
+Define `fill_margin = (entry_limit_price − t0_low) / entry_limit_price`.
+Sign convention: **positive = filled with that much slack below the
+limit (money left on the table); negative = unreachable, missed by that
+much.** Use this column to read calibration at a glance — large
+positive on filled rows means "limits too generous"; small negative on
+unfilled rows means "limits just barely missed"; large negative means
+"limits unreachable, too bearish." Always quote both the % form and
+the VND form (limit − low in absolute price) for the user's executed
+picks.
 
-- Stage 2: n picks, hit-rate on this run, mean realized, mean(predicted)
-  vs mean(realized) gap, **fill_rate**, **mean(pred_low) vs
-  mean(actual_dip)**.
-- Stage 1: n picks, fill_rate, mean(pred_low) (quoted dip), mean(actual
-  dip = (t0_low − entry_price) / entry_price), calibration gap.
+`entry_slippage` (close-anchored legacy "buy at close" metric) is
+informational only — do not anchor Stage-1 findings on it.
+
+Summary stats to compute:
+- Stage 2: n picks, hit-rate, mean realized, mean(predicted) vs
+  mean(realized) gap, fill_rate, mean(fill_margin), and — when scoring
+  signals are in question — break-down by news_score / dimension on
+  realized return.
+- Stage 1: n picks, fill_rate, mean(fill_margin) across all evaluable
+  rows, mean filled-slack (mean fill_margin over filled rows only,
+  n_filled), mean miss-margin (mean fill_margin over unfilled rows only,
+  n_unfilled). All three margins answer the same question — was the
+  limit reachable at the realized low — so all three must anchor on
+  `entry_limit_price` vs `t0_low`, never on the close.
 
 ## Step 4 — Cross-reference with the broader ledger
 
@@ -212,6 +251,26 @@ based solely on one report. Use the existing helper:
 ```
 D:\stock\.venv\Scripts\python.exe -c "from stockpredict.tracking import recent_performance; import json; print(json.dumps(recent_performance(window_days=90, mode='claude'), indent=2, default=str))"
 ```
+
+**Fallback if `limit_fill` returns null.** The `recent_performance`
+helper was patched on 2026-05-13 to compute `limit_fill` on the
+t0-eligible slice (not the fully-evaluated slice), so this should
+populate as long as t0-stamped rows exist. If a future regression
+returns `null` again, compute pool fill stats directly from the
+parquet:
+
+```
+D:\stock\.venv\Scripts\python.exe -c "import pandas as pd
+df = pd.read_parquet(r'D:\stock\cache\predictions.parquet')
+pool = df[df['t0_evaluated'] & df['entry_limit_price'].notna()].copy()
+pool['fill_margin'] = (pool['entry_limit_price'] - pool['t0_low']) / pool['entry_limit_price']
+print('n=' + str(len(pool)), 'fill_rate=' + str(round(pool['entry_limit_filled'].mean(), 3)), 'mean_fm=' + str(round(pool['fill_margin'].mean(), 4)))
+print('fm_filled=' + str(round(pool.loc[pool['entry_limit_filled'], 'fill_margin'].mean(), 4)), 'n_filled=' + str(int(pool['entry_limit_filled'].sum())))
+print('fm_unfilled=' + str(round(pool.loc[~pool['entry_limit_filled'], 'fill_margin'].mean(), 4)), 'n_unfilled=' + str(int((~pool['entry_limit_filled']).sum())))"
+```
+
+These pooled stats count all t0-stamped rows (NOT filtered to
+actionable) — actionable filtering applies to on-report stats only.
 
 Compare:
 
@@ -244,20 +303,28 @@ Compare:
 
 ## Step 5 — Diagnose
 
-Write findings as a numbered list with **evidence threshold**: each finding
-must cite ≥3 same-direction misses on this report, **or** the report's
-pattern echoes an n≥5 pattern in the broader ledger. Single-pick findings
-get logged but do **not** drive proposed edits.
+Write findings as a numbered list. **Every finding must drive at least
+one proposed edit in Step 6.** If a pattern doesn't suggest a concrete
+edit, skip it — don't write it down as an interesting observation.
+
+**Evidence threshold**: each finding must cite ≥3 same-direction misses
+on this report, **or** the report's pattern echoes an n≥5 pattern in
+the broader ledger. Single-pick patterns don't clear the threshold and
+should be skipped, not logged.
 
 For each finding, name the failure mode plainly. Stage-1 examples:
 
-- "0 of 5 limits filled. Mean `pred_low` was −1.2% (median dip predicted)
-  but actual median dip was −0.3%. The low head is too bearish on dips
-  for this signature; pooled fill_rate at the same alpha (0.5) is 48%
-  (n=87), so today's report sat in a one-sided up-day."
-- "All 5 limits filled but mean dip-actual was −2.1% vs quoted −0.8%.
-  We could have set the limit ~1.3% lower and still filled — money on
-  the table. The low head is too conservative on dips; lower
+- "0 of 5 limits filled. Mean `fill_margin` was −1.0% (every
+  `entry_limit_price` sat ~100bp ABOVE the realized `t0_low`; limits
+  would have needed to be ~100bp deeper to reach the low). The low
+  head is too bearish on dips for this signature; pooled fill_rate at
+  the same alpha (0.5) is 48% (n=87), so today's report sat in a
+  one-sided up-day."
+- "All 5 limits filled with mean `fill_margin` +2.5% (every
+  `entry_limit_price` was ~250bp above `t0_low` — limits could have
+  been ~2.5% lower per pick and still filled at the realized low,
+  meaning ~2.5% × position_value of cost basis was left on the table
+  per pick). The low head is too conservative on dips; lower
   `pricing.entry_low_alpha` (or retrain at lower alpha)."
 
 Stage-2 examples (in addition to all stage-1 examples):
@@ -282,22 +349,13 @@ outcome — say "no systemic pattern found" and stop, don't manufacture one.
 Write the diagnosis and proposals to
 `D:\stock\reports\self_correction_<YYYY-MM-DD>_<sig>_stage<N>.md` (use the
 picks report's `as_of` and `run_signature`, plus the stage you ran, so
-naming aligns and re-runs at a different stage don't clobber). Structure:
+naming aligns and re-runs at a different stage don't clobber). Keep the
+report lean — findings + proposed edits + applied tracking only. Don't
+inline metadata blocks, per-pick tables, or summary-stat blocks; the
+filename identifies the report and the ledger holds the data. Structure:
 
 ```
 # Self-correction — picks_claude_<date>_<sig>  (Stage <N>)
-
-## Inputs
-- Picks: <path>
-- Plan: <path or "none — autonomous mode">
-- Run id: <run_id>
-- Stage: <1 = limit-fill only / 2 = full T+N>
-- n picks, n with t0_evaluated, n evaluated
-- (stage 2) hit-rate, mean realized
-- fill_rate, mean(pred_low), mean(actual dip), calibration gap
-
-## Per-pick table
-<the table from Step 3>
 
 ## Findings
 1. <finding with evidence cite>
@@ -339,10 +397,13 @@ naming aligns and re-runs at a different stage don't clobber). Structure:
    - `pricing.stop_atr_mult` (current 1.5), `pricing.min_rr_ratio`
      (current 0.8) — for entry/exit rule mismatches.
    - **`pricing.entry_low_alpha` (current 0.5) — raise toward 0.75 if
-     fill_rate is consistently below alpha (we're too bearish on
-     dips); lower toward 0.25 if fills are happening at quoted dip
-     much smaller than actual dip (we're leaving money on the table).
-     This is the primary knob for stage-1 findings.**
+     fill_rate is consistently below alpha AND `fill_margin` on
+     unfilled rows is consistently small-negative (we're too bearish
+     on dips, but only just); lower toward 0.25 if `fill_margin` on
+     filled rows is consistently large-positive (we're filling with
+     lots of slack — money on the table). Both signals must anchor on
+     `entry_limit_price` vs `t0_low`, never on the close. This is the
+     primary knob for stage-1 findings.**
 3. Source files (e.g. `src/stockpredict/news/claude_runner.py`,
    `src/stockpredict/tracking.py`, `src/stockpredict/model/train.py`)
    — **only** when there's a concrete structural defect (parser bug,
@@ -400,6 +461,11 @@ need to **retrain the low head** before the new alpha takes effect:
 D:\stock\.venv\Scripts\python.exe -m stockpredict.cli train
 ```
 
+Remind the user: one report ≠ a backtest — a knob tweak that helps
+this report can hurt the next one. Suggest re-running self-correction
+on a different report after a few days of new picks land before
+treating any change as confirmed.
+
 ## What NOT to do
 
 - Don't ask the user to blindly pick from a list of all reports. Run
@@ -408,6 +474,11 @@ D:\stock\.venv\Scripts\python.exe -m stockpredict.cli train
   confirm, not compute.
 - Don't propose edits from a single losing or unfilled pick. Evidence
   threshold = ≥3 on-report or ≥5 in pooled ledger.
+- Don't include non-actionable picks in Stage-1 (or Stage-2) calibration.
+  They fail `pricing.min_rr_ratio`, never get a real entry limit placed,
+  and their `fill_margin` / `realized_return` is hypothetical. Read
+  `actionable` from the picks JSON and exclude `False` rows before
+  computing fill stats or fill_margin distributions.
 - Don't auto-apply. Always show the diff and wait for per-file approval.
 - Don't touch source files when a `config.yaml` knob would do.
 - Don't rewrite `claude_prompt.md` wholesale. Additive, narrowly-scoped
@@ -420,35 +491,15 @@ D:\stock\.venv\Scripts\python.exe -m stockpredict.cli train
   cluster of issues is `entry_limit_filled=False` AND `pred_low` was
   too bearish, that's a low-head calibration problem, not a scoring
   problem.
+- Don't anchor Stage-1 calibration on the close. The whole point of
+  the limit-order regime is "was my `entry_limit_price` reachable at
+  the realized `t0_low`" — answered by `fill_margin =
+  (entry_limit_price − t0_low) / entry_limit_price`, NOT by comparing
+  to `t0_close` or to yesterday's close. `entry_slippage` is the
+  legacy close-anchored metric and is diagnostic only — never lead a
+  Stage-1 finding with it. Likewise, `entry_limit_price` must appear
+  in every per-pick table you present; do not silently omit it.
 - Don't propose changes to `dimensions_cited` parsing or the ledger
   schema unless you've shown a concrete bug, not a stylistic preference.
-
-## Caveats to note in the produced report
-
-- **Stage 1 has limited diagnostic power.** You can only tell whether
-  the limit was reachable, not whether the trade would have been
-  profitable. A pick that filled at a great limit price can still tank
-  on the realized return; a pick that didn't fill avoided a potential
-  loss. Stage 1 is *purely* about entry calibration.
-- **Realized return assumes the entry was fillable.** Always inspect
-  `entry_limit_filled` and `entry_slippage` before drawing scoring
-  conclusions — a pick can show a great `realized_return` while never
-  filling at the quoted limit, in which case the win is fictional and
-  tweaking scoring won't reproduce it.
-- **Autonomous-mode picks lack a plan MD.** Research-mode improvement
-  suggestions for those reports are necessarily shallower; you can
-  diagnose scoring patterns but not the research process behind them.
-- **One report ≠ a backtest.** A knob tweak that helps this report can
-  hurt the next one. Recommend the user re-run self-correction on a
-  different report after a few days of new picks land before treating
-  any change as confirmed.
-- **News scoring is at most ±5% (the `news_weight`).** If `realized_return`
-  is dominated by ML signal accuracy, scoring tweaks have limited
-  upside — flag the user toward `python -m stockpredict.cli backtest`
-  for ML-side problems.
-- **`pricing.entry_low_alpha` is sticky.** Changing alpha doesn't
-  retroactively re-quote past limits — it only affects the next train
-  + predict. The user must rerun `train` before stage-1 calibration
-  improvements take effect.
 
 Now, ask the user for the picks path and begin.
