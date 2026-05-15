@@ -193,19 +193,6 @@ evidence — they're inputs to findings, not output. Quote specific
 numbers inside findings instead of emitting standalone tables or
 summary blocks.
 
-**Filter to `actionable: True` picks only.** Read the `actionable`
-field from the picks JSON (the ledger doesn't carry it). Non-actionable
-picks fail `pricing.min_rr_ratio` and never get a real entry limit
-placed by the user — their `fill_margin` (Stage 1) or `realized_return`
-(Stage 2) is theoretical noise, not signal. State `n_total` vs
-`n_actionable` in the report header so the exclusion is visible. Thin
-`n_actionable` (say ≤2) only closes the **on-report** path of the
-evidence threshold; the pooled-ledger path (n≥5) is still open and is
-the normal way to proceed when actionables are thin. Don't bail at
-low `n_actionable` alone — bail only if both paths fail. The
-2026-05-12 session is the canonical example: n=1 actionable on the
-report, but pooled n=35 cleared the threshold.
-
 Per-pick columns to keep handy. `entry_limit_price` (the actual price
 paid if filled) is **mandatory** in both stages — never omit it, and
 never substitute the close anchor. Stage-1 calibration is judged on
@@ -268,9 +255,6 @@ print('n=' + str(len(pool)), 'fill_rate=' + str(round(pool['entry_limit_filled']
 print('fm_filled=' + str(round(pool.loc[pool['entry_limit_filled'], 'fill_margin'].mean(), 4)), 'n_filled=' + str(int(pool['entry_limit_filled'].sum())))
 print('fm_unfilled=' + str(round(pool.loc[~pool['entry_limit_filled'], 'fill_margin'].mean(), 4)), 'n_unfilled=' + str(int((~pool['entry_limit_filled']).sum())))"
 ```
-
-These pooled stats count all t0-stamped rows (NOT filtered to
-actionable) — actionable filtering applies to on-report stats only.
 
 Compare:
 
@@ -474,11 +458,6 @@ treating any change as confirmed.
   confirm, not compute.
 - Don't propose edits from a single losing or unfilled pick. Evidence
   threshold = ≥3 on-report or ≥5 in pooled ledger.
-- Don't include non-actionable picks in Stage-1 (or Stage-2) calibration.
-  They fail `pricing.min_rr_ratio`, never get a real entry limit placed,
-  and their `fill_margin` / `realized_return` is hypothetical. Read
-  `actionable` from the picks JSON and exclude `False` rows before
-  computing fill stats or fill_margin distributions.
 - Don't auto-apply. Always show the diff and wait for per-file approval.
 - Don't touch source files when a `config.yaml` knob would do.
 - Don't rewrite `claude_prompt.md` wholesale. Additive, narrowly-scoped

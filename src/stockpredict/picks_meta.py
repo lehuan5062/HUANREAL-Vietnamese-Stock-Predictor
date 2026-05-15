@@ -66,3 +66,20 @@ def annotate_best(picks: pd.DataFrame) -> pd.DataFrame:
         out.loc[leader_idx, "best_composite"] = True
 
     return out
+
+
+def actionable_suffix(picks: pd.DataFrame) -> str:
+    """Filename suffix listing the actionable tickers in DataFrame order:
+    ``"_HII-MSB-HNG"``. Empty string when no rows are actionable, the
+    ``actionable`` column is missing, or the frame is empty. Used so a
+    directory listing of ``reports/`` surfaces which tickers are tradable
+    on each report at a glance."""
+    if picks is None or len(picks) == 0:
+        return ""
+    if "actionable" not in picks.columns or "symbol" not in picks.columns:
+        return ""
+    mask = picks["actionable"].fillna(False).astype(bool)
+    tickers = picks.loc[mask, "symbol"].astype(str).tolist()
+    if not tickers:
+        return ""
+    return "_" + "-".join(tickers)

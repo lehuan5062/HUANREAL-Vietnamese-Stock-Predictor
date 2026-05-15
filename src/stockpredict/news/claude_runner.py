@@ -32,10 +32,12 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     on = on or dt.date.today()
     cfg = load_config().modes["claude"]
     out_dir = reports_dir()
+    from ..picks_meta import actionable_suffix
+    act_suffix = actionable_suffix(candidates)
     if run_signature:
-        path = out_dir / f"claude_news_plan_{on.isoformat()}_{run_signature}.md"
+        path = out_dir / f"claude_news_plan_{on.isoformat()}_{run_signature}{act_suffix}.md"
     else:
-        path = out_dir / f"claude_news_plan_{on.isoformat()}.md"
+        path = out_dir / f"claude_news_plan_{on.isoformat()}{act_suffix}.md"
     from .company_info import enrich
     candidates = enrich(candidates)
 

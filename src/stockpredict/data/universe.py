@@ -47,6 +47,12 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
                 df["fetched_at"] = dt.datetime.utcnow().isoformat()
                 df["source"] = src
                 return df
+            except SystemExit as e:
+                # See fetcher._disable_vnstock_hard_exit — vnstock's
+                # CleanErrorContext sys.exit()s on rate-limit. Treat as 429.
+                last_err = e
+                _limiter().pause(65.0, reason=f"{src} Listing hard-exit")
+                continue
             except Exception as e:  # network / API drift / rate limit
                 last_err = e
                 if _looks_like_rate_limit(e):

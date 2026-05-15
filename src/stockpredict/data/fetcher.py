@@ -108,6 +108,30 @@ def _limiter() -> _RateLimiter:
     return _LIMITER
 
 
+def _disable_vnstock_hard_exit() -> None:
+    """vnstock's ``vnai.beam.quota.CleanErrorContext.__exit__`` calls
+    ``sys.exit("... Process terminated.")`` whenever its rate-limit guardian
+    fires. That raises ``SystemExit`` (a ``BaseException``, not ``Exception``),
+    which slips past our retry loop in ``fetch_history`` and kills the whole
+    batch — bypassing the limiter pause we already coded for the 429 path.
+    Replace it with a return-False so the underlying ``RateLimitExceeded``
+    propagates normally; ``_looks_like_rate_limit`` then matches it and the
+    existing pause/retry runs as intended."""
+    try:
+        from vnai.beam import quota  # type: ignore
+    except Exception:
+        return
+    cec = getattr(quota, "CleanErrorContext", None)
+    if cec is None or getattr(cec, "_stockpredict_no_hard_exit", False):
+        return
+
+    def _patched_exit(self, exc_type, exc_val, exc_tb):  # noqa: D401
+        return False  # let RateLimitExceeded bubble out instead of sys.exit
+
+    cec.__exit__ = _patched_exit
+    cec._stockpredict_no_hard_exit = True
+
+
 def quiet_vnstock_logger() -> None:
     """Vnstock spams ERROR-level logs for transient API issues that we
     already handle via fallback. Bump it to CRITICAL so it stops cluttering
@@ -117,6 +141,7 @@ def quiet_vnstock_logger() -> None:
     # so it survives the CRITICAL bump below.
     from .intro import introduce
     introduce()
+    _disable_vnstock_hard_exit()
     for name in ("vnstock", "vnstock.core.utils.client", "vnstock.explorer"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
@@ -155,6 +180,17 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                     if df is None or len(df) == 0:
                         break  # try next interval
                     return _normalize_ohlcv(df)
+                except SystemExit as e:
+                    # vnstock's CleanErrorContext calls sys.exit() on rate
+                    # limits. We monkey-patch that away in
+                    # _disable_vnstock_hard_exit, but keep this defensive
+                    # catch in case the patch ever fails to land — a hard
+                    # exit mid-batch would lose ~hours of cache progress.
+                    last_err = e
+                    _limiter().pause(65.0, reason=f"{src} hard-exit on {symbol}")
+                    if attempt == 0:
+                        continue
+                    break
                 except Exception as e:
                     last_err = e
                     if _looks_like_rate_limit(e):

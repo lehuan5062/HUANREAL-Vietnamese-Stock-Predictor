@@ -98,7 +98,7 @@ modes:
     top_k: 5
   claude:
     candidate_pool: 20      # ML narrows to 20, news re-ranks to 5
-    news_weight: 0.05
+    news_weight: 0.10
   gemini:
     candidate_pool: 20
     news_weight: 0.05

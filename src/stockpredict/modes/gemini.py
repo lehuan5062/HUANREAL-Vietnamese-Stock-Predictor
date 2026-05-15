@@ -21,7 +21,7 @@ from ..config import load_config, reports_dir
 from ..model.predict import rank_today
 from ..news.gemini_prompt import write_prompt
 from ..news.gemini_response import merge_response, parse_response
-from ..picks_meta import annotate_best
+from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, run_signature
 
 
@@ -61,10 +61,11 @@ def emit_prompt(on: str | None = None,
     sig = run_signature(mode="gemini", exit_offset_days=eff_horizon,
                         units=eff_units, hose_only=hose_only)
 
-    # write_prompt currently uses the date in the filename; we suffix with sig.
+    # write_prompt currently uses the date in the filename; we suffix with sig
+    # and the actionable tickers so a directory listing surfaces them at a glance.
     path = write_prompt(candidates, on=on_date, exit_offset_days=eff_horizon)
-    # Rename to include the signature so distinct same-day runs coexist.
-    sig_path = path.with_name(path.stem + f"_{sig}" + path.suffix)
+    full_suffix = f"_{sig}{actionable_suffix(candidates)}"
+    sig_path = path.with_name(path.stem + full_suffix + path.suffix)
     if sig_path != path:
         path.replace(sig_path)
         path = sig_path
@@ -159,7 +160,7 @@ def finalize(prompt_path: str | Path,
 
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
-    out = reports_dir() / f"picks_gemini_{today}_{sig}.json"
+    out = reports_dir() / f"picks_gemini_{today}_{sig}{actionable_suffix(merged)}.json"
     payload = {
         "as_of": today,
         "mode": "gemini",

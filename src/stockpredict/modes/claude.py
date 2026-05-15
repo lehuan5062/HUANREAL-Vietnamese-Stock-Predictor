@@ -20,7 +20,7 @@ from ..config import load_config, reports_dir
 from ..envfile import load as load_env
 from ..model.predict import rank_today
 from ..news.claude_runner import parse_plan, write_plan
-from ..picks_meta import annotate_best
+from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, run_signature
 
 
@@ -133,7 +133,7 @@ def _run_autonomous(top_k_final: int, on: str | None,
     merged = claude_api.merge(candidates, scored).head(top_k_final)
     merged = annotate_best(merged)
 
-    out = reports_dir() / f"picks_claude_{today}_{sig}.json"
+    out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
     payload = {
         "as_of": today,
         "mode": "claude_autonomous",
@@ -210,7 +210,7 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
 
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
-    out = reports_dir() / f"picks_claude_{today}_{sig}.json"
+    out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
     payload = {
         "as_of": today,
         "mode": "claude",

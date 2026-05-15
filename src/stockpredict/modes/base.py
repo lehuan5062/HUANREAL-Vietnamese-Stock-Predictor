@@ -9,7 +9,7 @@ import pandas as pd
 
 from ..config import load_config, reports_dir
 from ..model.predict import rank_today
-from ..picks_meta import annotate_best
+from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, record, run_signature
 
 
@@ -36,7 +36,7 @@ def run(top_k: int = 5, on: str | None = None,
     )
     sig = run_signature(mode="base", exit_offset_days=eff_horizon,
                         units=eff_units, hose_only=hose_only)
-    out = reports_dir() / f"picks_{today}_{sig}.json"
+    out = reports_dir() / f"picks_{today}_{sig}{actionable_suffix(picks)}.json"
     payload = {
         "as_of": today,
         "mode": "base",
