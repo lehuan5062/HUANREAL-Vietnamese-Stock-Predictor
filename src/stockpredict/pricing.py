@@ -98,14 +98,23 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
 
     pos_units = int(units) if units is not None else int(broker.get("default_position_units", 100))
-    lot = int(broker.get("lot_size", 100))
-    # ACBS / VN exchange rule: minimum order is one lot (100 shares).
-    # Round down to nearest whole lot, but never below `lot`.
-    pos_units = max(lot, (pos_units // lot) * lot)
+    default_lot = int(broker.get("lot_size", 100))
+    etf_lot = int(broker.get("etf_lot_size", 10))
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
 
     out = df.copy()
+
+    # Per-row lot size: HOSE ETFs trade in lots of 10, stocks in lots of 100.
+    # We use the cached universe's instrument_type when available and fall
+    # back to the symbol-shape regex (FUE* / E1VFVN30 -> ETF).
+    from .data.universe import is_etf
+    row_lots = out["symbol"].astype(str).map(
+        lambda s: etf_lot if is_etf(s) else default_lot
+    ).astype(int)
+    # ACBS / VN exchange rule: minimum order is one lot. Round each row's
+    # requested ``pos_units`` down to a whole-lot multiple, never below one lot.
+    row_pos_units = ((pos_units // row_lots) * row_lots).clip(lower=row_lots).astype(int)
 
     close_k = out["close"].astype(float)
     pred = out["pred_mean"].astype(float)
@@ -134,11 +143,12 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     entry_k = entry_v / 1000.0
     stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
 
-    # Position-level P&L (sized at pos_units)
-    position_v = entry_v * pos_units
-    target_position_v = target_v * pos_units
-    gross_reward = (target_v - entry_v) * pos_units
-    max_loss_units = (entry_v - stop_v) * pos_units
+    # Position-level P&L (sized per row using row_pos_units, which differs
+    # for ETFs vs stocks due to the different lot sizes).
+    position_v = entry_v * row_pos_units
+    target_position_v = target_v * row_pos_units
+    gross_reward = (target_v - entry_v) * row_pos_units
+    max_loss_units = (entry_v - stop_v) * row_pos_units
 
     buy_fee, sell_fee, fees_total, _ = _broker_costs(position_v, target_position_v, broker)
     net_reward = gross_reward - fees_total
@@ -152,7 +162,7 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     breakeven_pct = (fees_total / position_v).round(4)
     actionable = (net_reward > 0) & (rr >= min_rr) & valid
 
-    out["position_units"] = pos_units
+    out["position_units"] = row_pos_units.astype("Int64")
     out["position_value_vnd"] = position_v.round(0).astype("Int64")
     out["entry_vnd"] = entry_v.astype("Int64")
     out["close_vnd"] = close_v.astype("Int64")

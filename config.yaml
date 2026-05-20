@@ -70,7 +70,8 @@ broker:
   vat_pct: 10                 # VAT on commission (10% in VN)
   pit_pct: 0.10               # personal income tax on the SELL transaction value
   min_fee_vnd: 0              # per-order minimum (ACBS online has none)
-  lot_size: 100               # HOSE/HNX/UPCOM minimum lot
+  lot_size: 100               # HOSE/HNX/UPCOM minimum lot for stocks
+  etf_lot_size: 10            # HOSE ETFs trade in lots of 10 (not 100)
   default_position_units: 100 # how many units a typical retail buy is
   # The pipeline sizes every pick at default_position_units so the user sees
   # absolute VND fees and net P&L for the trade they would actually place.

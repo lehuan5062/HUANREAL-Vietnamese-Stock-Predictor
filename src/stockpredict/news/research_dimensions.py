@@ -90,6 +90,61 @@ often matter more than any category above — surface those when they
 exist. If a category above is irrelevant for this ticker, skip it."""
 
 
+ETF_GUIDANCE_MD = """\
+**ETF candidates** (rows where `instrument_type == "ETF"`, e.g. FUEVFVND,
+E1VFVN30, FUESSV30, FUEMAV30) are passive baskets, NOT companies. The
+"identify the business" step does not apply — skip it. Switch the research
+rubric for ETF rows to:
+
+1. **Identify the underlying index** from the ticker and `organ_name`
+   (DCVFM/SSIAM/Mirae Asset/KIM/MAFM/VinaCapital are fund managers; the
+   index name is the actual driver):
+   - FUEVFVND → VN Diamond
+   - E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30 → VN30
+   - FUEVN100, FUEIP100, FUEFCV50 → VN100
+   - FUEDCMID → VN Midcap
+   - FUESSVFL → VNFIN Lead
+2. **Research these dimensions** instead of company-specific ones:
+   - Underlying index performance over the past 5 sessions (price + breadth)
+   - Foreign-investor net flows into Vietnamese equities (the dominant
+     ETF demand driver — large foreign net-buy days lift FUE* prices)
+   - ETF creation / redemption activity if reported by VSDC
+   - NAV vs market-price premium / discount, if quoted on the fund manager
+     page (DCVFM, SSIAM, etc.)
+   - Upcoming index rebalancing dates (VN30 quarterly review, VN Diamond
+     basket reconstitution) within the T+N exit horizon
+   - Big constituent moves: if a top-3-weight constituent has a binary
+     event (earnings, FOL change, sanction) on or before the exit day, it
+     dominates the ETF's return
+3. Use `business` to surface the **underlying index name** (e.g.
+   "VN Diamond ETF managed by DCVFM"), not the fund manager's corporate
+   identity. The LLM should make the index explicit so the user knows
+   what they're really tracking.
+4. ETF return distributions are tighter than stocks; small `pred_mean`
+   magnitudes are normal. Don't penalize an ETF for a sub-stock-sized
+   ML signal — judge it on its own dispersion."""
+
+
+ETF_GUIDANCE_PLAIN = """ETF candidates (instrument_type=='ETF', e.g. FUEVFVND,
+E1VFVN30, FUESSV30) are passive baskets — NOT companies. Skip the "identify
+the business" step for these rows. Use this rubric instead:
+
+1. Identify the underlying index from the ticker (FUEVFVND -> VN Diamond;
+   E1VFVN30 / FUESSV30 / FUEMAV30 / FUEKIV30 -> VN30; FUEVN100 / FUEIP100 /
+   FUEFCV50 -> VN100; FUEDCMID -> VN Midcap; FUESSVFL -> VNFIN Lead).
+2. Research dimensions for ETFs:
+   - Underlying index performance + breadth over past 5 sessions
+   - Foreign-investor net flows into VN equities (top driver of FUE* prices)
+   - VSDC creation / redemption activity if reported
+   - NAV vs market-price premium / discount (fund manager pages)
+   - Upcoming index rebalancing dates (VN30 quarterly, VN Diamond) inside
+     the T+N exit horizon
+   - Top-3-weight constituents with binary events on/before exit day
+3. Set `business` to the underlying INDEX (not the fund manager).
+4. ETF return distributions are tighter than stocks — small pred_mean
+   magnitudes are normal; judge each ETF on its own dispersion."""
+
+
 # Backwards-compat exports — older imports use these names.
 CHECKLIST_MD = REFERENCE_MD
 CHECKLIST_PLAIN = REFERENCE_PLAIN

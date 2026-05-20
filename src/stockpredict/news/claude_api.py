@@ -17,15 +17,20 @@ import pandas as pd
 from ..config import load_config
 
 
-from .research_dimensions import REFERENCE_PLAIN
+from .research_dimensions import ETF_GUIDANCE_PLAIN, REFERENCE_PLAIN
 
 SYSTEM = (
     "You are a Vietnamese equities analyst doing thorough RESEARCH on each "
     "candidate ticker — not a sentiment scan of company news.\n\n"
+    "Inputs may include BOTH common stocks AND ETFs. Each row carries an "
+    "`instrument_type` field; switch your research rubric accordingly. "
+    "Stocks: research the company. ETFs: research the underlying index + "
+    "flows + rebalancing.\n\n"
     "For each ticker, YOU decide what to research. We do not give you a "
     "fixed checklist — different companies have different drivers, and "
     "you know better than us what matters for THIS ticker today.\n\n"
     + REFERENCE_PLAIN + "\n\n"
+    + ETF_GUIDANCE_PLAIN + "\n\n"
     "Always include in your output, per ticker:\n"
     "  - `dimensions`: the 3-7 research dimensions you derived for this "
     "ticker (your own list, may differ from the reference categories above)\n"
@@ -60,11 +65,20 @@ Candidates (with company names):
 {table}
 
 For each ticker, do thorough research:
-1. From the company name + your own knowledge, identify the business.
-2. **Derive 3-7 research dimensions yourself** for THIS ticker. They may
-   match common categories (sector, macro, policy, geopolitics, calendar)
-   or be ticker-specific (a single major customer, a peer's earnings, a
-   peg, a contract). Skip categories that don't apply, add ones that do.
+1. Identify what the ticker represents.
+   - If `type == STOCK`: identify the business from the company name + your
+     own knowledge.
+   - If `type == ETF`: identify the UNDERLYING INDEX (e.g. VN30, VN Diamond,
+     VN100, VN Midcap, VNFIN Lead) and the fund manager. ETFs are passive
+     baskets — there is no business to research; research the basket's
+     drivers per the ETF rubric in the system prompt.
+2. **Derive 3-7 research dimensions yourself** for THIS ticker. For stocks:
+   common categories (sector, macro, policy, geopolitics, calendar) or
+   ticker-specific drivers (key customer, peer earnings, peg, contract).
+   For ETFs: index performance, foreign flows, NAV premium/discount,
+   creation/redemption activity, upcoming rebalancing, top-weight
+   constituent binary events within the T+N exit horizon. Skip what
+   doesn't apply, add what does.
 3. web_search broadly across the dimensions you derived. Cross-check
    across at least 2 sources before scoring.
 4. Score -1 / 0 / +1 (or DROP for delisted / suspended) on actual
@@ -91,12 +105,13 @@ Include every input ticker."""
 def _candidates_table(candidates: pd.DataFrame) -> str:
     from .company_info import enrich
     candidates = enrich(candidates)
-    rows = ["| symbol | company | pred_mean | close | rsi_14 | mom_20 |",
-            "| --- | --- | --- | --- | --- | --- |"]
+    rows = ["| symbol | type | company | pred_mean | close | rsi_14 | mom_20 |",
+            "| --- | --- | --- | --- | --- | --- | --- |"]
     for _, r in candidates.iterrows():
         name = (r.get("organ_name") or "")[:60]
+        itype = str(r.get("instrument_type", "STOCK") or "STOCK").upper()
         rows.append(
-            f"| {r['symbol']} | {name} | {r['pred_mean']:+.4f} | "
+            f"| {r['symbol']} | {itype} | {name} | {r['pred_mean']:+.4f} | "
             f"{r.get('close', 0):.0f} | {r.get('rsi_14', 0):.1f} | "
             f"{r.get('mom_20', 0):+.4f} |"
         )

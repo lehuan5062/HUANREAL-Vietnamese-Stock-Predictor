@@ -42,7 +42,15 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     candidates = enrich(candidates)
 
     from ..tracking import _next_trading_offset
-    from .research_dimensions import REFERENCE_MD
+    from .research_dimensions import ETF_GUIDANCE_MD, REFERENCE_MD
+
+    # ETF rows need a different research rubric. Only inject the ETF guidance
+    # block when at least one ETF candidate is present so stocks-only plans
+    # keep their existing shape.
+    has_etf_candidates = bool(
+        "instrument_type" in candidates.columns
+        and (candidates["instrument_type"].astype(str).str.upper() == "ETF").any()
+    )
 
     # Sell-day reminder: when current_horizon is known, quote a concrete
     # target sell day so the in-session Claude can offer to schedule a
@@ -99,6 +107,10 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "",
         REFERENCE_MD,
         "",
+    ]
+    if has_etf_candidates:
+        lines.extend([ETF_GUIDANCE_MD, ""])
+    lines.extend([
         "Score key:",
         "  +1 = material bullish development (earnings beat, sector tailwind,",
         "       contract win, favorable policy)",
@@ -140,7 +152,7 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "",
         "## Global / macro context (read once)",
         "",
-    ]
+    ])
     for name, url in global_urls().items():
         lines.append(f"- [{name}]({url})")
     lines.append("")
@@ -150,7 +162,10 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     for _, row in candidates.iterrows():
         sym = row["symbol"]
         organ = row.get("organ_name", "") or "(name unknown — infer from ticker)"
-        lines.append(f"### {sym}  —  {organ}")
+        row_type = str(row.get("instrument_type", "STOCK") or "STOCK").upper()
+        is_etf_row = (row_type == "ETF")
+        type_tag = "  [ETF — apply ETF rubric, NOT company business]" if is_etf_row else ""
+        lines.append(f"### {sym}  —  {organ}{type_tag}")
         lines.append("")
         lines.append(f"ML signal: pred_mean={row['pred_mean']:+.4f}  "
                      f"(±{row.get('pred_std', 0):.4f})  close={row.get('close', float('nan')):.0f}  "
@@ -173,11 +188,17 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
                 f"{'ACTIONABLE' if actionable else 'skip (rr/net too low)'}"
             )
         lines.append("")
-        lines.append("**Step 1 — Business**: in one line, write what this company does and the 1-2 main revenue lines.")
+        if is_etf_row:
+            lines.append("**Step 1 — Underlying index**: name the index this ETF tracks (e.g. VN30 / VN Diamond / VN100 / VN Midcap / VNFIN Lead) and the fund manager. **Do NOT describe a company business — this is a passive basket.**")
+        else:
+            lines.append("**Step 1 — Business**: in one line, write what this company does and the 1-2 main revenue lines.")
         lines.append("")
         lines.append("- ")
         lines.append("")
-        lines.append("**Step 2 — Research dimensions**: derive 3-7 dimensions YOU think matter for THIS ticker on a T+2 horizon. Your own list — not ours. Skip categories that don't apply, add ones that do (idiosyncratic drivers like a key customer, a peer's earnings, a peg, a contract often matter more than any standard category).")
+        if is_etf_row:
+            lines.append("**Step 2 — Research dimensions (ETF)**: pick 3-5 from {index performance, foreign net flows, VSDC creation/redemption, NAV premium/discount, upcoming rebalancing, top-weight constituent binary events within the T+N exit horizon}. Skip those that don't apply, add ones we haven't listed.")
+        else:
+            lines.append("**Step 2 — Research dimensions**: derive 3-7 dimensions YOU think matter for THIS ticker on a T+2 horizon. Your own list — not ours. Skip categories that don't apply, add ones that do (idiosyncratic drivers like a key customer, a peer's earnings, a peg, a contract often matter more than any standard category).")
         lines.append("")
         lines.append("- ")
         lines.append("")

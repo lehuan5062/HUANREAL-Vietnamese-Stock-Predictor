@@ -234,6 +234,16 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
         u = load_universe(refresh=True)
         u = filter_exchanges(u, cfg.data["exchanges"])
         syms = u["symbol"].tolist()
+        # Defensive union with the curated list (which now includes HOSE_ETFS).
+        # vnstock's Listing API sometimes omits ETFs depending on source; the
+        # curated list guarantees they get fetched into the cache so the
+        # model panel can include them after training.
+        from .selector import CURATED
+        seen = {s.upper() for s in syms}
+        for s in CURATED:
+            if s.upper() not in seen:
+                syms.append(s.upper())
+                seen.add(s.upper())
     if limit:
         syms = syms[:limit]
     click.echo(f"Updating {len(syms)} symbols (full={full})...")
@@ -437,6 +447,12 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
               help="Restrict the universe to HOSE-listed tickers only "
                    "(refreshes via VCI to get exchange info; falls back to "
                    "the ~43 curated HOSE tickers if exchange info is missing).")
+@click.option("--etfs/--no-etfs", "include_etfs", default=True, show_default=True,
+              help="Include HOSE-listed ETFs (FUEVFVND, E1VFVN30, FUESSV30, …) "
+                   "in the universe. --no-etfs filters every layer (curated, "
+                   "warm cache, top-up) to stocks only. ETFs are identified "
+                   "via the cached universe's instrument_type column with a "
+                   "symbol-shape fallback (FUE* / E1VFVN30).")
 @click.option("--warm-only", default="yes", show_default=True,
               type=click.Choice(["yes", "no", "always"], case_sensitive=False),
               help="Cache strategy. "
@@ -454,8 +470,8 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
-            units: int, hose_only: bool, warm_only: str, skip_train: bool,
-            workers: int) -> None:
+            units: int, hose_only: bool, include_etfs: bool, warm_only: str,
+            skip_train: bool, workers: int) -> None:
     """End-to-end: size universe by time budget -> fetch -> train -> predict.
 
     Designed to be invoked from a double-click .bat. Enter how many minutes
@@ -547,11 +563,14 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     # Auto-evaluate any predictions that are now T+2 or later. This must run
     # AFTER the data refresh so we have closes for the target date — see below.
 
-    syms = select_symbols(target=rp.universe_target, hose_only=hose_only)
+    syms = select_symbols(target=rp.universe_target, hose_only=hose_only,
+                          include_etfs=include_etfs)
     cached = set(cached_symbols())
     n_warm = len(set(syms) & cached)
     n_cold = len(syms) - n_warm
     label = "HOSE-only" if hose_only else "all exchanges"
+    if not include_etfs:
+        label += ", stocks-only"
     click.echo(f"selected {len(syms)} tickers  (warm={n_warm}, cold={n_cold})  [{label}]")
     click.echo("")
 
@@ -691,10 +710,12 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         click.echo("")
 
     # Pass the selected symbols through so prediction is restricted to the
-    # same set we trained on (and the hose_only filter actually takes effect
-    # at predict time, not just at fetch time). Computed once and reused by
-    # both the earliest-search loop and the final mode invocation.
-    pred_syms = syms if hose_only else None
+    # same set we trained on (and the hose_only / no-etfs filters actually
+    # take effect at predict time, not just at fetch time). Computed once
+    # and reused by both the earliest-search loop and the final mode
+    # invocation. ``pred_syms=None`` lets rank_today use every cached
+    # symbol — only acceptable when the universe wasn't filtered.
+    pred_syms = syms if (hose_only or not include_etfs) else None
 
     if earliest_mode:
         # Iterative search: train at T+earliest_start, T+earliest_start+1, ...
@@ -799,7 +820,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     if mode == "base":
         from .modes import base
         picks, out = base.run(top_k=top, units=units, exit_offset_days=days,
-                              symbols=pred_syms, hose_only=hose_only)
+                              symbols=pred_syms, hose_only=hose_only,
+                              include_etfs=include_etfs)
         click.echo("")
         click.echo(_format_picks(picks))
         if _has_best_badges(picks):
@@ -810,7 +832,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         from .modes import claude
         result, out, tag = claude.run(top_k_final=top, units=units,
                                        exit_offset_days=days, symbols=pred_syms,
-                                       hose_only=hose_only)
+                                       hose_only=hose_only,
+                                       include_etfs=include_etfs)
         click.echo("")
         click.echo(_format_picks(result))
         if _has_explanations(result) or _has_best_badges(result):
@@ -833,7 +856,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         from .modes import gemini
         result, out, tag = gemini.run(top_k_final=top, units=units,
                                        exit_offset_days=days, symbols=pred_syms,
-                                       hose_only=hose_only)
+                                       hose_only=hose_only,
+                                       include_etfs=include_etfs)
         click.echo("")
         click.echo(_format_picks(result))
         if _has_explanations(result) or _has_best_badges(result):

@@ -33,19 +33,22 @@ def run(top_k_final: int = 5, on: str | None = None,
         units: int | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
-        hose_only: bool = False) -> tuple[pd.DataFrame, Path, str]:
+        hose_only: bool = False,
+        include_etfs: bool = True) -> tuple[pd.DataFrame, Path, str]:
     """Run the best-available path. Returns (picks_df, output_path, mode_tag)
     where mode_tag is 'autonomous' or 'interactive'."""
     if _autonomous_available():
         try:
             return _run_autonomous(top_k_final=top_k_final, on=on, units=units,
                                    exit_offset_days=exit_offset_days,
-                                   symbols=symbols, hose_only=hose_only)
+                                   symbols=symbols, hose_only=hose_only,
+                                   include_etfs=include_etfs)
         except Exception as e:
             print(f"[claude] autonomous mode failed ({e}); falling back to plan emit.")
     candidates, plan_path = emit_plan(top_k_final=top_k_final, on=on, units=units,
                                       exit_offset_days=exit_offset_days,
-                                      symbols=symbols, hose_only=hose_only)
+                                      symbols=symbols, hose_only=hose_only,
+                                      include_etfs=include_etfs)
     return candidates, plan_path, "interactive"
 
 
@@ -53,7 +56,8 @@ def emit_plan(top_k_final: int = 5, on: str | None = None,
               units: int | None = None,
               exit_offset_days: int | None = None,
               symbols: list[str] | None = None,
-              hose_only: bool = False) -> tuple[pd.DataFrame, Path]:
+              hose_only: bool = False,
+              include_etfs: bool = True) -> tuple[pd.DataFrame, Path]:
     cfg = load_config().modes["claude"]
     pool = int(cfg["candidate_pool"])
     candidates = rank_today(top_k=pool, on=on, units=units,
@@ -71,7 +75,8 @@ def emit_plan(top_k_final: int = 5, on: str | None = None,
         full_cfg.target["exit_offset_days"]
     )
     sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        units=eff_units, hose_only=hose_only)
+                        units=eff_units, hose_only=hose_only,
+                        include_etfs=include_etfs)
 
     plan_path = write_plan(candidates, on=on_date,
                            run_signature=sig,
@@ -81,14 +86,15 @@ def emit_plan(top_k_final: int = 5, on: str | None = None,
     # and other feature columns that aren't in the markdown score table.
     sidecar = plan_path.with_suffix(".candidates.parquet")
     candidates.to_parquet(sidecar, index=False)
-    # Sidecar metadata so `finalize` knows the horizon / units / hose-only
-    # used at emit time.
+    # Sidecar metadata so `finalize` knows the horizon / units / hose-only /
+    # include-etfs used at emit time.
     meta_path = plan_path.with_suffix(".meta.json")
     meta_path.write_text(
         json.dumps({
             "exit_offset_days": eff_horizon,
             "units": eff_units,
             "hose_only": hose_only,
+            "include_etfs": include_etfs,
             "run_signature": sig,
         }, indent=2),
         encoding="utf-8",
@@ -100,7 +106,8 @@ def _run_autonomous(top_k_final: int, on: str | None,
                     units: int | None = None,
                     exit_offset_days: int | None = None,
                     symbols: list[str] | None = None,
-                    hose_only: bool = False) -> tuple[pd.DataFrame, Path, str]:
+                    hose_only: bool = False,
+                    include_etfs: bool = True) -> tuple[pd.DataFrame, Path, str]:
     from ..news import claude_api
 
     cfg = load_config().modes["claude"]
@@ -124,7 +131,8 @@ def _run_autonomous(top_k_final: int, on: str | None,
         full_cfg.target["exit_offset_days"]
     )
     sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        units=eff_units, hose_only=hose_only)
+                        units=eff_units, hose_only=hose_only,
+                        include_etfs=include_etfs)
 
     print(f"[claude] calling Anthropic API to score {len(candidates)} candidates...")
     scored = claude_api.score(candidates, date=today,
@@ -140,6 +148,7 @@ def _run_autonomous(top_k_final: int, on: str | None,
         "exit_offset_days": eff_horizon,
         "units": eff_units,
         "hose_only": hose_only,
+        "include_etfs": include_etfs,
         "run_signature": sig,
         "global_summary": scored.get("global_summary", ""),
         "weight": float(cfg["news_weight"]),
@@ -148,7 +157,8 @@ def _run_autonomous(top_k_final: int, on: str | None,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=eff_horizon, units=eff_units, hose_only=hose_only)
+           exit_offset_days=eff_horizon, units=eff_units, hose_only=hose_only,
+           include_etfs=include_etfs)
     return merged, out, "autonomous"
 
 
@@ -201,11 +211,15 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
     exit_off = meta.get("exit_offset_days")
     eff_units = meta.get("units")
     eff_hose = bool(meta.get("hose_only", False))
+    # Legacy meta files (pre-ETF) lack `include_etfs`; default to True so
+    # the recovered signature matches what the original emit_plan produced.
+    eff_etfs = bool(meta.get("include_etfs", True))
     sig = meta.get("run_signature") or run_signature(
         mode="claude",
         exit_offset_days=int(exit_off or 2),
         units=int(eff_units or 100),
         hose_only=eff_hose,
+        include_etfs=eff_etfs,
     )
 
     today_ts = effective_today_for_trading()
@@ -217,6 +231,7 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
         "exit_offset_days": exit_off,
         "units": eff_units,
         "hose_only": eff_hose,
+        "include_etfs": eff_etfs,
         "run_signature": sig,
         "plan_file": str(plan_path),
         "weight": weight,
@@ -225,5 +240,6 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=exit_off, units=eff_units, hose_only=eff_hose)
+           exit_offset_days=exit_off, units=eff_units, hose_only=eff_hose,
+           include_etfs=eff_etfs)
     return merged, out

@@ -53,6 +53,11 @@ set /p HOSE=HOSE-only (exclude HNX/UPCOM)? y/n [n]:
 if /I "%HOSE%"=="y" set HOSE_FLAG=--hose-only
 if "%HOSE%"=="" set HOSE=n
 
+set ETF_FLAG=
+set /p ETFS=Include HOSE ETFs (FUEVFVND, E1VFVN30, ...)? y/n [y]:
+if /I "%ETFS%"=="n" set ETF_FLAG=--no-etfs
+if "%ETFS%"=="" set ETFS=y
+
 rem Warm-only -- three modes:
 rem   y (default) = smart lazy fetch (skip warm, fetch stale + cold)
 rem   a / always  = pure offline (use cached only, no API calls EVER)
@@ -66,10 +71,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running ML stage: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  warm-only=%WARM_VALUE%
+echo Running ML stage: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  etfs=%ETFS%  warm-only=%WARM_VALUE%
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %WARM_FLAG% --mode gemini
+.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %ETF_FLAG% %WARM_FLAG% --mode gemini
 
 echo.
 echo Opening today's prompt file in Notepad.

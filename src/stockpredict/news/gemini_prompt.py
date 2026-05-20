@@ -36,7 +36,15 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     from .company_info import enrich
     candidates = enrich(candidates)
 
-    from .research_dimensions import REFERENCE_MD
+    from .research_dimensions import ETF_GUIDANCE_MD, REFERENCE_MD
+
+    # Detect whether any ETF candidates are in the frame; the ETF research
+    # rubric is only appended when at least one ETF row is present so the
+    # stocks-only path keeps its existing prompt intact.
+    has_etf_candidates = bool(
+        "instrument_type" in candidates.columns
+        and (candidates["instrument_type"].astype(str).str.upper() == "ETF").any()
+    )
 
     parts: list[str] = []
     parts.append(
@@ -77,6 +85,9 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("")
     parts.append(REFERENCE_MD)
     parts.append("")
+    if has_etf_candidates:
+        parts.append(ETF_GUIDANCE_MD)
+        parts.append("")
     parts.append(
         "4. **Score** -1 / 0 / +1 based on what you actually found. Price/"
         "technical noise alone = 0."
@@ -106,10 +117,11 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
     parts.append("## Candidates")
     parts.append("")
-    parts.append("| symbol | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | actionable |")
-    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | actionable |")
+    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for _, r in candidates.iterrows():
         name = (r.get("organ_name") or "")[:50]
+        itype = str(r.get("instrument_type", "STOCK") or "STOCK").upper()
         entry = int(r["entry_vnd"]) if "entry_vnd" in r and pd.notna(r.get("entry_vnd")) else 0
         target = int(r["target_vnd"]) if "target_vnd" in r and pd.notna(r.get("target_vnd")) else 0
         stop = int(r["stop_vnd"]) if "stop_vnd" in r and pd.notna(r.get("stop_vnd")) else 0
@@ -119,11 +131,16 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         rr_str = f"{rr:.2f}" if pd.notna(rr) else "-"
         act = "yes" if r.get("actionable", False) else "no"
         parts.append(
-            f"| {r['symbol']} | {name} | {r['pred_mean']:+.4f} | "
+            f"| {r['symbol']} | {itype} | {name} | {r['pred_mean']:+.4f} | "
             f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {act} |"
         )
     parts.append("")
-    parts.append("Position is 100 units (Vietnamese minimum lot). All VND values are absolute.")
+    if has_etf_candidates:
+        parts.append("Position sizing: stock rows use 100-unit lots (HOSE/HNX/UPCOM "
+                     "minimum); ETF rows use 10-unit lots (HOSE ETF rule). All VND "
+                     "values are absolute.")
+    else:
+        parts.append("Position is 100 units (Vietnamese minimum lot). All VND values are absolute.")
     parts.append("`net_vnd` already accounts for ACBS round-trip fees (commission + VAT + PIT).")
     parts.append("")
 

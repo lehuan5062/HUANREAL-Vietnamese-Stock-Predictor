@@ -14,7 +14,7 @@ from __future__ import annotations
 import warnings
 
 from .data.cache import cached_symbols
-from .data.universe import filter_exchanges, load_universe
+from .data.universe import filter_exchanges, is_etf, load_universe
 
 
 # ---- curated bluechips (kept in code so single-file deploys still work) ----
@@ -36,12 +36,31 @@ HOSE_MID = [
     "DGC", "PNJ", "DCM", "DPM", "GMD", "VHC", "HDG", "KDH", "NLG", "DXG",
     "REE", "PVD", "DBC",
 ]
+# HOSE-listed ETFs. Curated so they always enter the panel regardless of
+# whether the broker's Listing API returns ETFs. All of these are listed
+# on HOSE (the only Vietnamese exchange that hosts ETFs today). Liquidity
+# varies — the universal liquidity filter (close >= 5k VND, ADV >= 1B VND)
+# naturally drops the thinly-traded ones.
+HOSE_ETFS = [
+    "FUEVFVND",  # DCVFM VN Diamond  — most-liquid ETF
+    "E1VFVN30",  # DCVFM VN30
+    "FUESSV30",  # SSIAM VN30
+    "FUEMAV30",  # Mirae Asset VN30
+    "FUEKIV30",  # KIM VN30
+    "FUEVN100",  # MAFM VN100
+    "FUEDCMID",  # DCVFM Midcap
+    "FUESSVFL",  # SSIAM VNFIN Lead
+    "FUEIP100",  # IPAAM VN100
+    "FUEFCV50",  # VinaCapital VN100
+]
 
-CURATED = list(dict.fromkeys(VN30 + HNX_LIQUID + UPCOM_LIQUID + HOSE_MID))
+CURATED = list(dict.fromkeys(
+    VN30 + HNX_LIQUID + UPCOM_LIQUID + HOSE_MID + HOSE_ETFS
+))
 
 # Tickers we know for certain are HOSE-listed (used as a strict fallback when
 # `--hose-only=True` and the universe API doesn't return per-ticker exchange).
-HOSE_KNOWN = set(VN30 + HOSE_MID)
+HOSE_KNOWN = set(VN30 + HOSE_MID + HOSE_ETFS)
 # Tickers we know are NOT HOSE — used for the "lenient" exclusion path if ever
 # enabled, and to keep the curated layer honest under hose_only.
 NON_HOSE_KNOWN = set(HNX_LIQUID + UPCOM_LIQUID)
@@ -50,14 +69,22 @@ NON_HOSE_KNOWN = set(HNX_LIQUID + UPCOM_LIQUID)
 def select(target: int,
            refresh_universe: bool = False,
            exchanges: list[str] | None = None,
-           hose_only: bool = False) -> list[str]:
+           hose_only: bool = False,
+           include_etfs: bool = True) -> list[str]:
     """Return up to `target` symbols, prioritized for a time-bounded run.
 
     With `hose_only=True`, the universe is restricted to HOSE listings:
     we refresh the universe via VCI (which usually returns the `exchange`
     column), filter to HOSE rows, and trim every layer (curated + cached
     + top-up) to that set. If VCI also lacks `exchange`, we fall back to
-    `HOSE_KNOWN` (VN30 + HOSE_MID, ~43 tickers) and emit a warning.
+    `HOSE_KNOWN` (VN30 + HOSE_MID + HOSE_ETFS, ~53 tickers) and emit a
+    warning.
+
+    With `include_etfs=False`, ETF tickers are filtered out of every layer
+    (curated + cached + top-up). ETFs are identified via the
+    ``data.universe.is_etf`` helper, which uses the cached universe parquet's
+    ``instrument_type`` column when available and falls back to the
+    ``FUE*`` / ``E1VFVN30`` symbol regex otherwise.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -100,13 +127,22 @@ def select(target: int,
             return syms
         return [s for s in syms if s.upper() in hose_allowed]
 
+    def _filter_etfs(syms):
+        """Drop ETF tickers when include_etfs=False; pass through otherwise."""
+        if include_etfs:
+            return syms
+        return [s for s in syms if not is_etf(s)]
+
+    def _apply_filters(syms):
+        return _filter_etfs(_filter_hose(syms))
+
     # Curated bluechip layer
-    curated_layer = _filter_hose(CURATED) if hose_only else CURATED
+    curated_layer = _apply_filters(CURATED)
     if _add_many(curated_layer):
         return out
 
     # Warm cache layer
-    cached_layer = _filter_hose(cached_symbols())
+    cached_layer = _apply_filters(cached_symbols())
     if _add_many(cached_layer):
         return out
 
@@ -118,7 +154,7 @@ def select(target: int,
             u = filter_exchanges(u, exchanges)
         if "symbol" in u.columns:
             top_up = sorted(u["symbol"].astype(str).str.upper().tolist())
-            _add_many(_filter_hose(top_up))
+            _add_many(_apply_filters(top_up))
     except Exception:
         pass
 

@@ -425,14 +425,25 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
 
 
 def run_signature(mode: str, exit_offset_days: int, units: int,
-                  hose_only: bool = False) -> str:
+                  hose_only: bool = False,
+                  include_etfs: bool = True) -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
-    Used as both the filename suffix and the ledger ``run_id`` base."""
+    Used as both the filename suffix and the ledger ``run_id`` base.
+
+    ``include_etfs`` defaults to True (the new default behavior, ETFs mixed
+    in). Only when it's False do we tag the signature with ``noETF`` — that
+    way prior stock-only artifacts (written before this flag existed) keep
+    their original filenames as a stocks-only run, and new mixed-universe
+    runs get the same signature they would have had if ETFs had always been
+    mixed in.
+    """
     parts = [mode, f"d{int(exit_offset_days)}", f"u{int(units)}"]
     if hose_only:
         parts.append("HOSE")
+    if not include_etfs:
+        parts.append("noETF")
     return "_".join(parts)
 
 
@@ -440,7 +451,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
            run_id: str | None = None,
            exit_offset_days: int | None = None,
            units: int | None = None,
-           hose_only: bool = False) -> int:
+           hose_only: bool = False,
+           include_etfs: bool = True) -> int:
     """Append one row per pick to the ledger. Returns number of rows added.
 
     `picks` is the dataframe returned by mode runs; must have at minimum:
@@ -461,7 +473,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
         if hasattr(cfg, "broker") else 100
     )
     sig = run_signature(mode=mode, exit_offset_days=exit_off,
-                        units=u, hose_only=hose_only)
+                        units=u, hose_only=hose_only,
+                        include_etfs=include_etfs)
     if run_id is None:
         rid = f"{as_of.strftime('%Y%m%d')}_{sig}"
     else:
