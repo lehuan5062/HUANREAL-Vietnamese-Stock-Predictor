@@ -17,7 +17,7 @@ pipeline. Use your `Bash`, `Read`, `Edit`, `WebFetch`, and `WebSearch` tools.
 ## Parameters to collect
 
 Ask one question at a time, accept the answer, then ask the next. After all
-three are collected, summarise back and start the run.
+are collected, summarise back and start the run.
 
 1. **Duration** (time budget). Default `full` if the user says nothing. Accept either:
    - a positive integer N (minutes; e.g. `30`), or
@@ -29,7 +29,8 @@ three are collected, summarise back and start the run.
    - **If the user picks `earliest` (or accepts the default), ask a follow-up: `earliest-start` (T+N to begin the search, integer ≥ 2, default 2)**. Pass it to the CLI as `--earliest-start <N>`. Skip this follow-up for any other `--days` value.
 3. **Units** (position size in shares). Integer, multiple of 100, minimum 100 (ACBS rule). Default `100` if user says nothing.
 4. **HOSE-only?** y/n. Default `n`. If yes, restrict the universe to HOSE-listed tickers (excludes HNX and UPCOM).
-5. **Warm-only?** Three values: `yes` / `always` / `no`. **Default `yes`.**
+5. **Include ETFs?** y/n. **Default `y`.** When yes, HOSE-listed ETFs and fund certificates (FUEVFVND, E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30, FUEVN100, FUEDCMID, FUESSVFL, FUEIP100, FUEFCV50, plus any others vnstock's `all_etf()` returns) are mixed into the universe alongside common stocks. ETF rows get the ETF research rubric (underlying index, foreign flows, NAV premium/discount, basket rebalancing) instead of company-business research, and are sized in 10-unit lots instead of 100. Say `n` to filter ETFs out of every layer (curated, warm cache, top-up) — the picks JSON's filename then gets a `_noETF` suffix. Pass `--no-etfs` to the CLI only when the user says no; omit the flag otherwise (default is ETFs included).
+6. **Warm-only?** Three values: `yes` / `always` / `no`. **Default `yes`.**
    - `yes` (default) — smart lazy fetch. Skip cache-current tickers; fetch only stale (newly-published bar) and cold (no parquet). When a new trading day closes, every ticker becomes stale → that one run auto-fetches the new bar per ticker, then subsequent runs are instant.
    - `always` — pure offline. Drop stale and cold tickers; run on whatever's cache-current. **Zero API calls, guaranteed.** Useful when the cache is already populated and you don't want any network activity.
    - `no` — force full re-fetch of every selected symbol from `data.history_start` (slow, rate-limited; only for backfill / corrections).
@@ -41,10 +42,10 @@ three are collected, summarise back and start the run.
 
 ```
 D:\stock\.venv\Scripts\python.exe -m stockpredict.cli run \
-    --duration <DURATION> --days <DAYS> [--earliest-start <N>] --units <UNITS> [--hose-only] --warm-only <VALUE> --mode claude
+    --duration <DURATION> --days <DAYS> [--earliest-start <N>] --units <UNITS> [--hose-only] [--no-etfs] --warm-only <VALUE> --mode claude
 ```
 
-Add `--hose-only` only if question 4 was yes. For question 5, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2).
+Add `--hose-only` only if question 4 was yes. Add `--no-etfs` only if question 5 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 6, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2).
 
 Working directory: `D:\stock`. The CLI writes a markdown plan at
 `D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
@@ -64,8 +65,22 @@ Step 4 fields and a `## Scores` table at the bottom.
 
 **For each of the 20 candidates:**
 
-- **Identify the business** from the `organ_name` shown in the per-ticker
-  heading (e.g. `### DXG  —  CTCP Tập đoàn Đất Xanh` → real-estate developer).
+- **First, check the heading tag.** ETF rows are marked
+  `### FUEVFVND  —  FUEVFVND  [ETF — apply ETF rubric, NOT company business]`.
+  For those rows: skip the company-business research entirely and use the
+  **ETF rubric** described in the plan's top-of-file `ETF candidates` block
+  — identify the underlying index (FUEVFVND → VN Diamond; E1VFVN30 /
+  FUESSV30 / FUEMAV30 / FUEKIV30 → VN30; FUEVN100 / FUEIP100 / FUEFCV50 →
+  VN100; FUEDCMID → VN Midcap; FUESSVFL → VNFIN Lead) and research the
+  basket's drivers (foreign-investor net flows, NAV premium/discount,
+  upcoming index rebalancing, top-weight constituent binary events). Set
+  `business` to the underlying INDEX name, not the fund manager. Tag
+  bullets with ETF-appropriate dimensions: `[index-perf]`, `[foreign-flow]`,
+  `[nav-premium]`, `[rebalance]`, `[constituent-event]`.
+
+- **For stock rows** (no `[ETF — …]` tag): identify the business from the
+  `organ_name` shown in the per-ticker heading (e.g.
+  `### DXG  —  CTCP Tập đoàn Đất Xanh` → real-estate developer).
 
 - **Derive 3-7 research dimensions yourself** for THIS specific ticker. Do not
   use a fixed checklist — different companies have different drivers. Examples
@@ -213,6 +228,11 @@ Skip step 7 entirely when no pick is actionable.
   predicted T+N return is smaller than this floor, so most picks will show
   `actionable=False`. **That's the system doing its job** — it tells you
   when not to trade, not just when to trade.
+- ETFs have materially tighter return distributions than micro-cap stocks,
+  so their `pred_mean` magnitudes are typically much smaller and they almost
+  never clear the `min_rr_ratio` actionability gate. If the user wants ETFs
+  to surface as actionable, the cleaner path is the manual self-correction
+  flow (separate gate for ETFs) rather than tweaking news scores.
 - The system records every pick in a ledger (`cache/predictions.parquet`)
   with target_date = the actual T+N trading day (weekends + Vietnamese
   holidays excluded). When the user runs again later, past predictions are
@@ -223,4 +243,4 @@ Skip step 7 entirely when no pick is actionable.
   picks file; that flow proposes targeted edits to this prompt /
   `config.yaml` instead of nudging individual scores.
 
-Now, ask the user for the three parameters and begin.
+Now, ask the user for the parameters (one at a time) and begin.
