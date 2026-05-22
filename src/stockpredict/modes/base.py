@@ -18,7 +18,8 @@ def run(top_k: int = 5, on: str | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
-        include_etfs: bool = True) -> tuple[pd.DataFrame, Path]:
+        include_etfs: bool = True,
+        exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
     picks = rank_today(top_k=top_k, on=on, units=units,
                        exit_offset_days=exit_offset_days, symbols=symbols)
     picks = annotate_best(picks)
@@ -37,8 +38,9 @@ def run(top_k: int = 5, on: str | None = None,
     )
     sig = run_signature(mode="base", exit_offset_days=eff_horizon,
                         units=eff_units, hose_only=hose_only,
-                        include_etfs=include_etfs)
+                        include_etfs=include_etfs, exclude=exclude)
     out = reports_dir() / f"picks_{today}_{sig}{actionable_suffix(picks)}.json"
+    excl_list = sorted({s.upper() for s in (exclude or [])})
     payload = {
         "as_of": today,
         "mode": "base",
@@ -46,6 +48,7 @@ def run(top_k: int = 5, on: str | None = None,
         "units": eff_units,
         "hose_only": hose_only,
         "include_etfs": include_etfs,
+        "exclude": excl_list,
         "run_signature": sig,
         "top_k": top_k,
         "picks": json.loads(picks.to_json(orient="records", date_format="iso")),
@@ -53,5 +56,5 @@ def run(top_k: int = 5, on: str | None = None,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     record(picks, mode="base", as_of=today_ts,
            exit_offset_days=eff_horizon, units=eff_units, hose_only=hose_only,
-           include_etfs=include_etfs)
+           include_etfs=include_etfs, exclude=excl_list)
     return picks, out

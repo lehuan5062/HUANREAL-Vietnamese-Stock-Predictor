@@ -35,6 +35,7 @@ are collected, summarise back and start the run.
    - `always` — pure offline. Drop stale and cold tickers; run on whatever's cache-current. **Zero API calls, guaranteed.** Useful when the cache is already populated and you don't want any network activity.
    - `no` — force full re-fetch of every selected symbol from `data.history_start` (slow, rate-limited; only for backfill / corrections).
    Most runs should be `yes`.
+7. **Exclude tickers?** Per-session ticker blacklist. Comma-separated list (e.g. `ACB,HPG`) or empty for none. **Default empty.** Use this when the user already holds a name and doesn't want it surfaced today, or wants to suppress something they're sceptical of for this one run only — it is NOT persisted to `config.yaml`. Excluded tickers are stripped from every universe layer (curated, warm cache, top-up) AND from the prediction panel, so they cannot reappear. The picks JSON filename gets a `_xACB-HPG` suffix (sorted, dash-joined) so a same-day full run isn't overwritten. Pass `--exclude TICKER` once per ticker (e.g. `--exclude ACB --exclude HPG`) or as a single comma-separated value (`--exclude ACB,HPG`). Omit the flag entirely when the user gives no excludes.
 
 ## Pipeline steps
 
@@ -42,10 +43,10 @@ are collected, summarise back and start the run.
 
 ```
 D:\stock\.venv\Scripts\python.exe -m stockpredict.cli run \
-    --duration <DURATION> --days <DAYS> [--earliest-start <N>] --units <UNITS> [--hose-only] [--no-etfs] --warm-only <VALUE> --mode claude
+    --duration <DURATION> --days <DAYS> [--earliest-start <N>] --units <UNITS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
 ```
 
-Add `--hose-only` only if question 4 was yes. Add `--no-etfs` only if question 5 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 6, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2).
+Add `--hose-only` only if question 4 was yes. Add `--no-etfs` only if question 5 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 6, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2). For question 7, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
 
 Working directory: `D:\stock`. The CLI writes a markdown plan at
 `D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet

@@ -45,6 +45,15 @@ set /p ETFS=Include HOSE ETFs (FUEVFVND, E1VFVN30, ...)? y/n [y]:
 if /I "%ETFS%"=="n" set ETF_FLAG=--no-etfs
 if "%ETFS%"=="" set ETFS=y
 
+rem Per-session ticker blacklist. Comma-separated (e.g. ACB,HPG). Empty = none.
+rem Excluded tickers are stripped from every universe layer + the prediction
+rem panel. Picks JSON name gets a _xACB-HPG suffix so it doesn't collide with
+rem a same-day full run.
+set EXCLUDE_FLAG=
+set EXCLUDE=
+set /p EXCLUDE=Exclude tickers? comma-separated, empty for none []:
+if not "%EXCLUDE%"=="" set EXCLUDE_FLAG=--exclude %EXCLUDE%
+
 rem Warm-only -- three modes:
 rem   y (default) = smart lazy fetch (skip warm, fetch stale + cold)
 rem   a / always  = pure offline (use cached only, no API calls EVER)
@@ -58,10 +67,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  etfs=%ETFS%  warm-only=%WARM_VALUE%  mode=base
+echo Running: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %ETF_FLAG% %WARM_FLAG% --mode base
+.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
 
 echo.
 echo === Done. Picks saved to reports\ ===

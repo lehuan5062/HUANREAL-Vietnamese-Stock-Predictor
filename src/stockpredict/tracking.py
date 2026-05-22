@@ -426,7 +426,8 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
 
 def run_signature(mode: str, exit_offset_days: int, units: int,
                   hose_only: bool = False,
-                  include_etfs: bool = True) -> str:
+                  include_etfs: bool = True,
+                  exclude: Iterable[str] | None = None) -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
@@ -438,12 +439,20 @@ def run_signature(mode: str, exit_offset_days: int, units: int,
     their original filenames as a stocks-only run, and new mixed-universe
     runs get the same signature they would have had if ETFs had always been
     mixed in.
+
+    ``exclude`` is the per-session blacklist of tickers. When non-empty, the
+    signature is suffixed with ``x{TICKERS}`` (sorted, dash-joined) so an
+    excluded-rerun produces a distinct picks file from the same-day full run.
     """
     parts = [mode, f"d{int(exit_offset_days)}", f"u{int(units)}"]
     if hose_only:
         parts.append("HOSE")
     if not include_etfs:
         parts.append("noETF")
+    if exclude:
+        excl_sorted = sorted({str(s).upper() for s in exclude})
+        if excl_sorted:
+            parts.append("x" + "-".join(excl_sorted))
     return "_".join(parts)
 
 
@@ -452,7 +461,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
            exit_offset_days: int | None = None,
            units: int | None = None,
            hose_only: bool = False,
-           include_etfs: bool = True) -> int:
+           include_etfs: bool = True,
+           exclude: Iterable[str] | None = None) -> int:
     """Append one row per pick to the ledger. Returns number of rows added.
 
     `picks` is the dataframe returned by mode runs; must have at minimum:
@@ -474,7 +484,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
     )
     sig = run_signature(mode=mode, exit_offset_days=exit_off,
                         units=u, hose_only=hose_only,
-                        include_etfs=include_etfs)
+                        include_etfs=include_etfs,
+                        exclude=exclude)
     if run_id is None:
         rid = f"{as_of.strftime('%Y%m%d')}_{sig}"
     else:

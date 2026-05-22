@@ -453,6 +453,14 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
                    "warm cache, top-up) to stocks only. ETFs are identified "
                    "via the cached universe's instrument_type column with a "
                    "symbol-shape fallback (FUE* / E1VFVN30).")
+@click.option("--exclude", "exclude", multiple=True,
+              help="Ticker(s) to exclude from this run. Repeatable "
+                   "(--exclude ACB --exclude HPG) or comma-separated "
+                   "(--exclude ACB,HPG). Per-session only — not persisted to "
+                   "config. Excluded tickers are stripped from every universe "
+                   "layer (curated, warm cache, top-up) and from the prediction "
+                   "panel. The run signature is suffixed with `_x{TICKERS}` so "
+                   "the picks JSON doesn't collide with a same-day full run.")
 @click.option("--warm-only", default="yes", show_default=True,
               type=click.Choice(["yes", "no", "always"], case_sensitive=False),
               help="Cache strategy. "
@@ -470,7 +478,8 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
-            units: int, hose_only: bool, include_etfs: bool, warm_only: str,
+            units: int, hose_only: bool, include_etfs: bool,
+            exclude: tuple[str, ...], warm_only: str,
             skip_train: bool, workers: int) -> None:
     """End-to-end: size universe by time budget -> fetch -> train -> predict.
 
@@ -533,6 +542,19 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         new = (units // 100) * 100
         click.echo(f"[note] --units={units} not a multiple of 100; rounding down to {new}.")
         units = new
+    # Normalize --exclude: split each value on commas so BAT-style single
+    # comma-separated input works alongside the repeatable form, uppercase,
+    # dedupe, sort for stable signature ordering.
+    exclude_set: set[str] = set()
+    for raw in exclude:
+        for tok in str(raw).split(","):
+            tok = tok.strip().upper()
+            if tok:
+                exclude_set.add(tok)
+    exclude_list: list[str] = sorted(exclude_set)
+    if exclude_list:
+        click.echo(f"[note] excluding {len(exclude_list)} ticker(s): "
+                   f"{', '.join(exclude_list)}")
     # Parse duration: int minutes or "full"
     duration_arg: int | str
     if duration.strip().lower() == "full":
@@ -564,13 +586,15 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     # AFTER the data refresh so we have closes for the target date — see below.
 
     syms = select_symbols(target=rp.universe_target, hose_only=hose_only,
-                          include_etfs=include_etfs)
+                          include_etfs=include_etfs, exclude=exclude_list)
     cached = set(cached_symbols())
     n_warm = len(set(syms) & cached)
     n_cold = len(syms) - n_warm
     label = "HOSE-only" if hose_only else "all exchanges"
     if not include_etfs:
         label += ", stocks-only"
+    if exclude_list:
+        label += f", excl={len(exclude_list)}"
     click.echo(f"selected {len(syms)} tickers  (warm={n_warm}, cold={n_cold})  [{label}]")
     click.echo("")
 
@@ -710,12 +734,12 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         click.echo("")
 
     # Pass the selected symbols through so prediction is restricted to the
-    # same set we trained on (and the hose_only / no-etfs filters actually
-    # take effect at predict time, not just at fetch time). Computed once
-    # and reused by both the earliest-search loop and the final mode
+    # same set we trained on (and the hose_only / no-etfs / exclude filters
+    # actually take effect at predict time, not just at fetch time). Computed
+    # once and reused by both the earliest-search loop and the final mode
     # invocation. ``pred_syms=None`` lets rank_today use every cached
     # symbol — only acceptable when the universe wasn't filtered.
-    pred_syms = syms if (hose_only or not include_etfs) else None
+    pred_syms = syms if (hose_only or not include_etfs or exclude_list) else None
 
     if earliest_mode:
         # Iterative search: train at T+earliest_start, T+earliest_start+1, ...
@@ -821,7 +845,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         from .modes import base
         picks, out = base.run(top_k=top, units=units, exit_offset_days=days,
                               symbols=pred_syms, hose_only=hose_only,
-                              include_etfs=include_etfs)
+                              include_etfs=include_etfs,
+                              exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(picks))
         if _has_best_badges(picks):
@@ -833,7 +858,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         result, out, tag = claude.run(top_k_final=top, units=units,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,
-                                       include_etfs=include_etfs)
+                                       include_etfs=include_etfs,
+                                       exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
         if _has_explanations(result) or _has_best_badges(result):
@@ -857,7 +883,8 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         result, out, tag = gemini.run(top_k_final=top, units=units,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,
-                                       include_etfs=include_etfs)
+                                       include_etfs=include_etfs,
+                                       exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
         if _has_explanations(result) or _has_best_badges(result):

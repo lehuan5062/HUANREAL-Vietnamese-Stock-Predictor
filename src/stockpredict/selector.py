@@ -12,6 +12,7 @@ Priority order:
 from __future__ import annotations
 
 import warnings
+from typing import Iterable
 
 from .data.cache import cached_symbols
 from .data.universe import filter_exchanges, is_etf, load_universe
@@ -70,7 +71,8 @@ def select(target: int,
            refresh_universe: bool = False,
            exchanges: list[str] | None = None,
            hose_only: bool = False,
-           include_etfs: bool = True) -> list[str]:
+           include_etfs: bool = True,
+           exclude: Iterable[str] | None = None) -> list[str]:
     """Return up to `target` symbols, prioritized for a time-bounded run.
 
     With `hose_only=True`, the universe is restricted to HOSE listings:
@@ -85,7 +87,14 @@ def select(target: int,
     ``data.universe.is_etf`` helper, which uses the cached universe parquet's
     ``instrument_type`` column when available and falls back to the
     ``FUE*`` / ``E1VFVN30`` symbol regex otherwise.
+
+    ``exclude`` is a per-session blacklist of ticker symbols (case-insensitive)
+    that are stripped from every layer before any other filter applies. Use
+    it to suppress a single name (e.g. one you already hold) without editing
+    config. Excluded tickers also feed into ``run_signature`` so the saved
+    picks file is distinguishable from a no-exclude run.
     """
+    exclude_set: set[str] = {s.upper() for s in (exclude or [])}
     out: list[str] = []
     seen: set[str] = set()
 
@@ -133,8 +142,13 @@ def select(target: int,
             return syms
         return [s for s in syms if not is_etf(s)]
 
+    def _filter_exclude(syms):
+        if not exclude_set:
+            return syms
+        return [s for s in syms if s.upper() not in exclude_set]
+
     def _apply_filters(syms):
-        return _filter_etfs(_filter_hose(syms))
+        return _filter_exclude(_filter_etfs(_filter_hose(syms)))
 
     # Curated bluechip layer
     curated_layer = _apply_filters(CURATED)

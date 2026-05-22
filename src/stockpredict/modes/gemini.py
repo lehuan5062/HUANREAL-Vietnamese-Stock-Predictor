@@ -30,12 +30,14 @@ def run(top_k_final: int = 5, on: str | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
-        include_etfs: bool = True) -> tuple[pd.DataFrame, Path, str]:
+        include_etfs: bool = True,
+        exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
     """Always emits a prompt file; returns (candidates, prompt_path, 'prompt-only')."""
     candidates, prompt_path = emit_prompt(on=on, units=units,
                                           exit_offset_days=exit_offset_days,
                                           symbols=symbols, hose_only=hose_only,
-                                          include_etfs=include_etfs)
+                                          include_etfs=include_etfs,
+                                          exclude=exclude)
     return candidates, prompt_path, "prompt-only"
 
 
@@ -44,7 +46,8 @@ def emit_prompt(on: str | None = None,
                 exit_offset_days: int | None = None,
                 symbols: list[str] | None = None,
                 hose_only: bool = False,
-                include_etfs: bool = True) -> tuple[pd.DataFrame, Path]:
+                include_etfs: bool = True,
+                exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
     cfg = load_config().modes["gemini"]
     pool = int(cfg["candidate_pool"])
     candidates = rank_today(top_k=pool, on=on, units=units,
@@ -61,9 +64,10 @@ def emit_prompt(on: str | None = None,
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         full_cfg.target["exit_offset_days"]
     )
+    excl_list = sorted({s.upper() for s in (exclude or [])})
     sig = run_signature(mode="gemini", exit_offset_days=eff_horizon,
                         units=eff_units, hose_only=hose_only,
-                        include_etfs=include_etfs)
+                        include_etfs=include_etfs, exclude=excl_list)
 
     # write_prompt currently uses the date in the filename; we suffix with sig
     # and the actionable tickers so a directory listing surfaces them at a glance.
@@ -83,6 +87,7 @@ def emit_prompt(on: str | None = None,
             "units": eff_units,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
+            "exclude": excl_list,
             "run_signature": sig,
         }, indent=2),
         encoding="utf-8",
@@ -144,12 +149,14 @@ def finalize(prompt_path: str | Path,
         except Exception:
             exit_off = None
 
-    # Pull units / hose_only / include_etfs / signature from sidecar meta if present.
+    # Pull units / hose_only / include_etfs / exclude / signature from sidecar meta if present.
     eff_units = None
     eff_hose = False
     # Legacy meta files (pre-ETF) lack `include_etfs`; default to True so
     # the recovered signature matches what the original emit_prompt produced.
     eff_etfs = True
+    # Legacy meta files (pre-exclude) lack `exclude`; default to [].
+    eff_excl: list[str] = []
     sig = None
     meta_path = prompt_path.with_suffix(".meta.json")
     if meta_path.exists():
@@ -158,6 +165,7 @@ def finalize(prompt_path: str | Path,
             eff_units = meta.get("units")
             eff_hose = bool(meta.get("hose_only", False))
             eff_etfs = bool(meta.get("include_etfs", True))
+            eff_excl = list(meta.get("exclude") or [])
             sig = meta.get("run_signature")
         except Exception:
             pass
@@ -166,7 +174,8 @@ def finalize(prompt_path: str | Path,
                             exit_offset_days=int(exit_off or 2),
                             units=int(eff_units or 100),
                             hose_only=eff_hose,
-                            include_etfs=eff_etfs)
+                            include_etfs=eff_etfs,
+                            exclude=eff_excl)
 
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
@@ -178,6 +187,7 @@ def finalize(prompt_path: str | Path,
         "units": eff_units,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
+        "exclude": eff_excl,
         "run_signature": sig,
         "prompt_file": str(prompt_path),
         "response_file": str(response_path),
@@ -189,5 +199,5 @@ def finalize(prompt_path: str | Path,
     from ..tracking import record
     record(merged, mode="gemini", as_of=today_ts,
            exit_offset_days=exit_off, units=eff_units, hose_only=eff_hose,
-           include_etfs=eff_etfs)
+           include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out
