@@ -101,7 +101,7 @@ Example budgets:
 | 30 min | 3 (base) | ~485 |
 | 60 min | 3 (base) | ~1025 |
 | 30 min | 8 (claude) | ~395 |
-| **full** | – | up to **~1,600** (all of HOSE+HNX+UPCOM) |
+| **full** | – | **entire universe, no cap** (all of HOSE+HNX+UPCOM, ~1,765 today and growing) |
 
 `--duration full` runs with no time cap. Expect ~75 minutes the first time
 (rate-limited), faster on subsequent runs since cached tickers cost 0 API
