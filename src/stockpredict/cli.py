@@ -391,9 +391,9 @@ def _print_budget_note(picks, budget: int | None = None) -> None:
                    "Mutually exclusive with --budget.")
 @click.option("--budget", type=int, default=None,
               help="Money limit per pick in VND (e.g. 2000000). Sizes each pick "
-                   "so one position costs ~this; a pick too pricey for one "
-                   "100-share lot is still shown, flagged over_budget. "
-                   "Mutually exclusive with --units.")
+                   "so the cash to enter (shares + buy fee) fits this; a pick "
+                   "too pricey for one 100-share lot is still shown, flagged "
+                   "over_budget. Mutually exclusive with --units.")
 @click.option("--date", "on", default=None, help="YYYY-MM-DD; defaults to most recent cache date")
 def predict_cmd(mode: str, top: int, days: int, units: int | None,
                 budget: int | None, on: str | None) -> None:
@@ -514,9 +514,10 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
                    "rule); default 100. Mutually exclusive with --budget.")
 @click.option("--budget", type=int, default=None,
               help="Money limit per pick in VND (e.g. 2000000). Sizes each "
-                   "pick so one position costs ~this (floored to a 100-share "
-                   "lot); a pick too pricey for one lot is still shown, "
-                   "flagged over_budget. Mutually exclusive with --units.")
+                   "pick so the cash to enter (shares + buy fee) fits this "
+                   "(floored to a 100-share lot); a pick too pricey for one "
+                   "lot is still shown, flagged over_budget. Mutually "
+                   "exclusive with --units.")
 @click.option("--hose-only/--no-hose-only", default=False, show_default=True,
               help="Restrict the universe to HOSE-listed tickers only "
                    "(refreshes via VCI to get exchange info; falls back to "

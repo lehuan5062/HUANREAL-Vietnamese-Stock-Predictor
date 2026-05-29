@@ -78,11 +78,12 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
 
     Sizing:
         ``units`` (default from config) sizes every row to that share count,
-        floored to whole lots. Pass ``budget_vnd`` instead to size each row to
-        ~that many VND — ``floor(budget_vnd / entry) `` lots — so one position
-        costs about the budget. A pick whose minimum lot already exceeds the
-        budget is kept at one lot and flagged ``over_budget`` (shown, never
-        dropped). Exactly one of ``units`` / ``budget_vnd`` is meaningful;
+        floored to whole lots. Pass ``budget_vnd`` instead to size each row so
+        the cash to enter — shares + buy-side fee — stays within the budget
+        (``floor(budget_vnd / (entry + buy fee))`` lots). A pick whose minimum
+        lot already exceeds the budget is kept at one lot and flagged
+        ``over_budget`` (shown, never dropped). Exactly one of ``units`` /
+        ``budget_vnd`` is meaningful;
         ``budget_vnd`` takes precedence if both are given.
 
     Output columns appended (all VND, integer where applicable):
@@ -99,10 +100,10 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
         rr_ratio                 net_reward / net_loss
         breakeven_pct            price move needed just to cover fees
         actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
-        over_budget              budget mode only: the sized position still
-                                 costs more than budget_vnd (only happens when
-                                 even one lot exceeds it). Always False in
-                                 unit mode.
+        over_budget              budget mode only: the cash to enter (position
+                                 value + buy-side fee) still exceeds budget_vnd
+                                 — only when even one lot doesn't fit. Always
+                                 False in unit mode.
     """
     if df is None or len(df) == 0:
         return df
@@ -116,6 +117,14 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     etf_lot = int(broker.get("etf_lot_size", 100))
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
+    # Buy-side fee rate (commission + VAT on commission) — mirrors the buy leg
+    # of ``_broker_costs``. Budget mode sizes against the cash to ENTER, i.e.
+    # shares + buy fee, so the position stays within the budget. (The sell fee
+    # comes out of proceeds at exit, not the entry budget.) ``min_fee_vnd`` is 0
+    # at ACBS; if set, the over_budget check below still catches any shortfall.
+    _commission = float(broker.get("commission_pct", 0.0)) / 100.0
+    _vat = float(broker.get("vat_pct", 0.0)) / 100.0
+    buy_fee_rate = _commission * (1.0 + _vat)
 
     out = df.copy()
 
@@ -160,12 +169,13 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
 
     # Size each row down to whole lots, never below one lot (VN exchange rule):
     #   units mode  — round the requested ``pos_units`` down.
-    #   budget mode — floor ``budget_vnd / entry`` (the limit price) down, so
-    #                 one position costs about the budget. A pick too pricey for
-    #                 even one lot is clipped UP to one lot and flagged
-    #                 ``over_budget`` below (shown, never dropped).
+    #   budget mode — floor ``budget_vnd / (entry + buy fee)`` down, so the cash
+    #                 to enter (shares + buy-side fee) stays within the budget.
+    #                 A pick too pricey for even one lot is clipped UP to one lot
+    #                 and flagged ``over_budget`` below (shown, never dropped).
     if budget_vnd is not None:
-        raw_shares = np.floor(float(budget_vnd) / entry_v.where(entry_v > 0))
+        cost_per_share = entry_v * (1.0 + buy_fee_rate)
+        raw_shares = np.floor(float(budget_vnd) / cost_per_share.where(cost_per_share > 0))
         row_pos_units = ((raw_shares.fillna(0) // row_lots) * row_lots
                          ).clip(lower=row_lots).astype(int)
     else:
@@ -190,12 +200,12 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     breakeven_pct = (fees_total / position_v).round(4)
     actionable = (net_reward > 0) & (rr >= min_rr) & valid
 
-    # Budget mode: flag picks whose sized position still costs more than the
-    # budget. That only happens when even one lot exceeds the budget (we clip
-    # up to one lot rather than drop), so the user can see a real pick they'd
-    # need a bigger budget for. False for every row in unit mode.
+    # Budget mode: flag picks whose cash-to-enter (position value + buy fee)
+    # still exceeds the budget. That only happens when even one lot doesn't fit
+    # (we clip up to one lot rather than drop), so the user can see a real pick
+    # they'd need a bigger budget for. False for every row in unit mode.
     if budget_vnd is not None:
-        over_budget = position_v > float(budget_vnd)
+        over_budget = (position_v + buy_fee) > float(budget_vnd)
     else:
         over_budget = pd.Series(False, index=out.index)
 

@@ -32,14 +32,21 @@ def test_budget_sizes_each_pick_to_whole_lots():
     assert not bool(out["over_budget"])
 
 
-def test_budget_exact_lot_boundary_is_not_over_budget():
-    """A budget that exactly equals one lot's cost fits -> over_budget False."""
+def test_budget_accounts_for_buy_fee():
+    """The budget caps the cash to ENTER (shares + buy-side fee), not just the
+    share value. close=20 -> 100 shares are 2,000,000 VND of stock, but the
+    ~0.165% ACBS buy fee pushes the cash needed above 2,000,000."""
     df = _frame([{"symbol": "AAA", "close": 20.0, "pred_mean": 0.05,
                   "pred_std": 0.005, "atr_14": 0.4}])
-    out = add_price_suggestions(df, budget_vnd=2_000_000).iloc[0]  # 100 * 20,000
-    assert int(out["position_units"]) == 100
-    assert int(out["position_value_vnd"]) == 2_000_000
-    assert not bool(out["over_budget"])
+    # Budget == the bare share value: the buy fee no longer fits -> over_budget.
+    tight = add_price_suggestions(df, budget_vnd=2_000_000).iloc[0]
+    assert int(tight["position_units"]) == 100      # min lot, not dropped
+    assert bool(tight["over_budget"]) is True
+    # A little headroom for the fee -> 100 shares fit, not over budget.
+    ok = add_price_suggestions(df, budget_vnd=2_010_000).iloc[0]
+    assert int(ok["position_units"]) == 100
+    assert int(ok["position_value_vnd"]) == 2_000_000  # shares value within budget
+    assert not bool(ok["over_budget"])
 
 
 def test_over_budget_pick_kept_at_min_lot_and_flagged():
@@ -139,7 +146,7 @@ class _FakeMeanModel:
 
 
 def test_rank_today_budget_keeps_and_flags_over_budget(monkeypatch):
-    """A cheap and a pricey ticker under a 5,000,000 VND budget: both survive
+    """A cheap and a pricey ticker under a 5,500,000 VND budget: both survive
     (nothing dropped), the cheap one is sized to budget, the pricey one is
     flagged over_budget at the 100-share minimum."""
     end = pd.Timestamp("2026-05-27")
@@ -159,11 +166,11 @@ def test_rank_today_budget_keeps_and_flags_over_budget(monkeypatch):
     monkeypatch.setattr(predict_mod, "_try_load_low_model", lambda: None)
 
     out = predict_mod.rank_today(model=_FakeMeanModel(), top_k=10,
-                                 budget_vnd=5_000_000, low_model=None)
+                                 budget_vnd=5_500_000, low_model=None)
     assert set(out["symbol"].astype(str)) == {"CHEAP", "PRICEY"}  # nothing dropped
     assert "over_budget" in out.columns
     row = out.set_index("symbol")
-    # CHEAP: 5,000,000 / 10,000 = 500 shares -> fits the budget
+    # CHEAP: ~5,500,000 / 10,000 -> 500 shares (5,000,000 + fee) fits the budget
     assert int(row.loc["CHEAP", "position_units"]) == 500
     assert not bool(row.loc["CHEAP", "over_budget"])
     # PRICEY: one lot (100 * 200,000 = 20,000,000) exceeds budget -> flagged
