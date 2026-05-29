@@ -27,9 +27,12 @@ are collected, summarise back and start the run.
    - the literal string `end` (last trading day of the current month, rolling to next month if today is too close to month-end to satisfy T+2), or
    - the literal string `earliest` (the program iterates T+N, T+N+1, T+N+2, …, training a fresh model at each horizon, and stops at the first one that yields ≥1 `actionable` pick. **No upper cap** — runs until an actionable pick is found, user can Ctrl+C to abort. Slow — roughly 20-30s per horizon × the number tried — but useful when the user wants the *shortest* hold period that crosses the cost gate).
    - **If the user picks `earliest` (or accepts the default), ask a follow-up: `earliest-start` (T+N to begin the search, integer ≥ 2, default 2)**. Pass it to the CLI as `--earliest-start <N>`. Skip this follow-up for any other `--days` value.
-3. **Units** (position size in shares). Integer, multiple of 100, minimum 100 (ACBS rule). Default `100` if user says nothing.
+3. **Position sizing.** Ask with `AskUserQuestion`, offering two options — list **Units** first and label it "(Recommended)":
+   - **Units (Recommended)** — a fixed share count per pick. Integer, multiple of 100, minimum 100 (ACBS lot rule); suggest `100` as the default. Pass `--units <N>`.
+   - **Budget** — a per-pick money limit in VND (e.g. `2000000`). Each pick is sized so one position costs about that amount (floored to a whole 100-share lot). A pick whose minimum lot already exceeds the budget is still shown — sized at the 100-share minimum and flagged `over_budget` — so the user can decide to raise the budget. Pass `--budget <VND>`.
+   Pass exactly one of `--units` / `--budget` (they are mutually exclusive); confirm the user's choice rather than assuming one by silence.
 4. **HOSE-only?** y/n. Default `n`. If yes, restrict the universe to HOSE-listed tickers (excludes HNX and UPCOM).
-5. **Include ETFs?** y/n. **Default `y`.** When yes, HOSE-listed ETFs and fund certificates (FUEVFVND, E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30, FUEVN100, FUEDCMID, FUESSVFL, FUEIP100, FUEFCV50, plus any others vnstock's `all_etf()` returns) are mixed into the universe alongside common stocks. ETF rows get the ETF research rubric (underlying index, foreign flows, NAV premium/discount, basket rebalancing) instead of company-business research, and are sized in 10-unit lots instead of 100. Say `n` to filter ETFs out of every layer (curated, warm cache, top-up) — the picks JSON's filename then gets a `_noETF` suffix. Pass `--no-etfs` to the CLI only when the user says no; omit the flag otherwise (default is ETFs included).
+5. **Include ETFs?** y/n. **Default `y`.** When yes, HOSE-listed ETFs and fund certificates (FUEVFVND, E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30, FUEVN100, FUEDCMID, FUESSVFL, FUEIP100, FUEFCV50, plus any others vnstock's `all_etf()` returns) are mixed into the universe alongside common stocks. ETF rows get the ETF research rubric (underlying index, foreign flows, NAV premium/discount, basket rebalancing) instead of company-business research, and are sized in 100-unit lots, the same as stocks. Say `n` to filter ETFs out of every layer (curated, warm cache, top-up) — the picks JSON's filename then gets a `_noETF` suffix. Pass `--no-etfs` to the CLI only when the user says no; omit the flag otherwise (default is ETFs included).
 6. **Warm-only?** Three values: `yes` / `always` / `no`. **Default `yes`.**
    - `yes` (default) — smart lazy fetch. Skip cache-current tickers; fetch only stale (newly-published bar) and cold (no parquet). When a new trading day closes, every ticker becomes stale → that one run auto-fetches the new bar per ticker, then subsequent runs are instant.
    - `always` — pure offline. Drop stale and cold tickers; run on whatever's cache-current. **Zero API calls, guaranteed.** Useful when the cache is already populated and you don't want any network activity.
@@ -43,15 +46,15 @@ are collected, summarise back and start the run.
 
 ```
 D:\stock\.venv\Scripts\python.exe -m stockpredict.cli run \
-    --duration <DURATION> --days <DAYS> [--earliest-start <N>] --units <UNITS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
+    --duration <DURATION> --days <DAYS> [--earliest-start <N>] (--units <UNITS> | --budget <VND>) [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
 ```
 
-Add `--hose-only` only if question 4 was yes. Add `--no-etfs` only if question 5 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 6, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2). For question 7, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
+For question 3, pass exactly one of `--units <UNITS>` or `--budget <VND>` (mutually exclusive — never both). Add `--hose-only` only if question 4 was yes. Add `--no-etfs` only if question 5 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 6, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2). For question 7, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
 
 Working directory: `D:\stock`. The CLI writes a markdown plan at
 `D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
 sidecar. The console output also lists the top 20 candidates with
-entry/target/stop/fees per 100-unit lot.
+entry/target/stop/fees at the chosen sizing (a fixed share count, or each pick sized to your per-pick budget).
 
 If the CLI prints `[claude] DROP override:` or any error, surface it to the
 user verbatim before continuing.

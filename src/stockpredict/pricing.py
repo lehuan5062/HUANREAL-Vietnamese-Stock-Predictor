@@ -58,7 +58,8 @@ def _broker_costs(buy_value: pd.Series, sell_value: pd.Series, broker: dict
     return buy_fee, sell_fee, total, sell_pit  # last is just for audit if needed
 
 
-def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.DataFrame:
+def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
+                          budget_vnd: int | None = None) -> pd.DataFrame:
     """Append entry / target / stop / fees / net P&L columns to a candidates frame.
 
     Required input columns (already produced by the feature pipeline):
@@ -75,6 +76,15 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
                      stop_atr_mult * ATR risk distance is exact). When
                      absent, ``entry_vnd = close * 1000`` (legacy).
 
+    Sizing:
+        ``units`` (default from config) sizes every row to that share count,
+        floored to whole lots. Pass ``budget_vnd`` instead to size each row to
+        ~that many VND — ``floor(budget_vnd / entry) `` lots — so one position
+        costs about the budget. A pick whose minimum lot already exceeds the
+        budget is kept at one lot and flagged ``over_budget`` (shown, never
+        dropped). Exactly one of ``units`` / ``budget_vnd`` is meaningful;
+        ``budget_vnd`` takes precedence if both are given.
+
     Output columns appended (all VND, integer where applicable):
         position_units, position_value_vnd
         entry_vnd                limit-buy price (= close*(1+pred_low) when present)
@@ -89,6 +99,10 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
         rr_ratio                 net_reward / net_loss
         breakeven_pct            price move needed just to cover fees
         actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
+        over_budget              budget mode only: the sized position still
+                                 costs more than budget_vnd (only happens when
+                                 even one lot exceeds it). Always False in
+                                 unit mode.
     """
     if df is None or len(df) == 0:
         return df
@@ -99,22 +113,11 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
 
     pos_units = int(units) if units is not None else int(broker.get("default_position_units", 100))
     default_lot = int(broker.get("lot_size", 100))
-    etf_lot = int(broker.get("etf_lot_size", 10))
+    etf_lot = int(broker.get("etf_lot_size", 100))
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
 
     out = df.copy()
-
-    # Per-row lot size: HOSE ETFs trade in lots of 10, stocks in lots of 100.
-    # We use the cached universe's instrument_type when available and fall
-    # back to the symbol-shape regex (FUE* / E1VFVN30 -> ETF).
-    from .data.universe import is_etf
-    row_lots = out["symbol"].astype(str).map(
-        lambda s: etf_lot if is_etf(s) else default_lot
-    ).astype(int)
-    # ACBS / VN exchange rule: minimum order is one lot. Round each row's
-    # requested ``pos_units`` down to a whole-lot multiple, never below one lot.
-    row_pos_units = ((pos_units // row_lots) * row_lots).clip(lower=row_lots).astype(int)
 
     close_k = out["close"].astype(float)
     pred = out["pred_mean"].astype(float)
@@ -143,6 +146,31 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     entry_k = entry_v / 1000.0
     stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
 
+    # Per-row lot size. Stocks and HOSE ETFs both trade in 100-unit lots; we
+    # still consult the cached universe's instrument_type (symbol-shape regex
+    # fallback) so the split survives if a future config re-separates them.
+    # ``symbol`` is optional per this function's contract — when absent
+    # (unit tests, legacy callers) every row uses the stock lot.
+    from .data.universe import is_etf
+    if "symbol" in out.columns:
+        sym = out["symbol"].astype(str)
+    else:
+        sym = pd.Series("", index=out.index)
+    row_lots = sym.map(lambda s: etf_lot if is_etf(s) else default_lot).astype(int)
+
+    # Size each row down to whole lots, never below one lot (VN exchange rule):
+    #   units mode  — round the requested ``pos_units`` down.
+    #   budget mode — floor ``budget_vnd / entry`` (the limit price) down, so
+    #                 one position costs about the budget. A pick too pricey for
+    #                 even one lot is clipped UP to one lot and flagged
+    #                 ``over_budget`` below (shown, never dropped).
+    if budget_vnd is not None:
+        raw_shares = np.floor(float(budget_vnd) / entry_v.where(entry_v > 0))
+        row_pos_units = ((raw_shares.fillna(0) // row_lots) * row_lots
+                         ).clip(lower=row_lots).astype(int)
+    else:
+        row_pos_units = ((pos_units // row_lots) * row_lots).clip(lower=row_lots).astype(int)
+
     # Position-level P&L (sized per row using row_pos_units, which differs
     # for ETFs vs stocks due to the different lot sizes).
     position_v = entry_v * row_pos_units
@@ -162,6 +190,15 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     breakeven_pct = (fees_total / position_v).round(4)
     actionable = (net_reward > 0) & (rr >= min_rr) & valid
 
+    # Budget mode: flag picks whose sized position still costs more than the
+    # budget. That only happens when even one lot exceeds the budget (we clip
+    # up to one lot rather than drop), so the user can see a real pick they'd
+    # need a bigger budget for. False for every row in unit mode.
+    if budget_vnd is not None:
+        over_budget = position_v > float(budget_vnd)
+    else:
+        over_budget = pd.Series(False, index=out.index)
+
     out["position_units"] = row_pos_units.astype("Int64")
     out["position_value_vnd"] = position_v.round(0).astype("Int64")
     out["entry_vnd"] = entry_v.astype("Int64")
@@ -179,4 +216,5 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None) -> pd.Data
     out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
     out["actionable"] = actionable
+    out["over_budget"] = over_budget.astype(bool)
     return out

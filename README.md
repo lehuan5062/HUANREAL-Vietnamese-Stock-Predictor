@@ -19,7 +19,7 @@ itself later.
 | [`predict_gemini.bat`](predict_gemini.bat) | ML + writes a prompt file you paste into Gemini Chat (web, with browsing). Opens the prompt in Notepad automatically. |
 | [`evaluate.bat`](evaluate.bat) | Refreshes data and grades any past predictions whose T+N has now passed. |
 
-Each predict .bat asks for duration / days / units and auto-sizes the universe.
+Each predict .bat asks for duration / days / sizing (units or budget) and auto-sizes the universe.
 
 ### B. Claude mode — paste a prompt into Claude Desktop
 
@@ -31,7 +31,7 @@ tools, which only exist inside Claude.
 
 1. Open Claude Code or Cowork in Claude Desktop.
 2. Paste the contents of [`claude_prompt.md`](claude_prompt.md) into the chat.
-3. Claude will ask you for `duration`, `days`, `units`, then drive the entire
+3. Claude will ask you for `duration`, `days`, sizing (`units` or `budget`), then drive the entire
    pipeline (run the ML stage → research each candidate across emergent
    per-ticker dimensions → fill the plan → finalize → report explained
    picks).
@@ -77,7 +77,8 @@ power users who want a fully scripted workflow without Claude Desktop.
 | `--duration <int>` or `--duration full` | minutes of budget, or `full` for entire universe with no time cap | `full` |
 | `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
 | `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
-| `--units N` | Position size in shares. Min 100 (ACBS minimum lot rule). Rounds down to nearest 100. | `100` |
+| `--units N` | Position size in shares. Min 100, multiple of 100 (ACBS minimum lot rule). Mutually exclusive with `--budget`. | `100` |
+| `--budget N` | **Budget mode** — a per-pick money limit in VND (e.g. `2000000`). Each pick is sized so one position costs ~this, floored to a 100-share lot; a pick too pricey for one lot is still shown at the 100-share minimum, flagged `over_budget`. Mutually exclusive with `--units`. | _(off)_ |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
 | `--top N` | how many picks to print | `5` |
@@ -410,12 +411,16 @@ After a run, look in two places:
 ### Trade-ready columns (the ones you need)
 
 For each pick, the program produces actual **VND** prices sized at the
-position you set with `--units` (default 100, rounded down to whole lots):
+position you set with `--units` (default 100, rounded down to whole lots) —
+or, in **budget mode** (`--budget N`), sized so each position costs about your
+per-pick VND budget (floored to a 100-share lot; picks too pricey for one lot
+are still shown at the minimum and flagged `over_budget`):
 
 | column | meaning |
 | ------ | ------- |
 | `position_units` | how many shares this trade is for |
 | `position_value_vnd` | gross trade value (entry × units) |
+| `over_budget` | budget mode only: `true` if even one 100-share lot costs more than `--budget` (the pick is shown at the minimum so you can raise your budget) |
 | `entry_vnd` | **price to buy at** (today's close) |
 | `target_vnd` | price to sell at on the exit day T+N (`entry × (1 + pred_mean)`) |
 | `target_low_vnd` / `target_high_vnd` | mean ± 1 ensemble-std target band |
@@ -496,6 +501,8 @@ that does.
 - Want to size bigger? Pass `--units 500` (or 1000).
   Fees scale linearly with trade value, so the % cost stays at 0.43% — but
   the absolute predicted-net dollars scale up.
+- Prefer to size by money instead of share count? Pass `--budget 5000000` to
+  size every pick to ~5,000,000 VND each (mutually exclusive with `--units`).
 - Want to relax the actionable gate? Lower `pricing.min_rr_ratio` in
   config.yaml (default 0.8). Setting it to 0.0 would only require positive
   net_reward.
@@ -686,7 +693,7 @@ filename, the news plan filename, the resolved `--days end` target,
 
 Every saved artifact (picks JSON, news plan markdown, candidates
 parquet, meta JSON) is suffixed with a **run signature** that captures
-the parameters that affect the picks: `mode_d{horizon}_u{units}[_HOSE]`.
+the parameters that affect the picks: `mode_d{horizon}_{u<units>|b<budget>}[_HOSE]`.
 
 Examples:
 

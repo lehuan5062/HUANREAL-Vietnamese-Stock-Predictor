@@ -15,12 +15,13 @@ from ..tracking import effective_today_for_trading, record, run_signature
 
 def run(top_k: int = 5, on: str | None = None,
         units: int | None = None,
+        budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
         exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
-    picks = rank_today(top_k=top_k, on=on, units=units,
+    picks = rank_today(top_k=top_k, on=on, units=units, budget_vnd=budget_vnd,
                        exit_offset_days=exit_offset_days, symbols=symbols)
     picks = annotate_best(picks)
     if on is not None:
@@ -30,14 +31,15 @@ def run(top_k: int = 5, on: str | None = None,
     today = today_ts.strftime("%Y-%m-%d")
 
     cfg = load_config()
-    eff_units = int(units) if units is not None else int(
-        cfg.broker.get("default_position_units", 100)
+    eff_units = None if budget_vnd is not None else (
+        int(units) if units is not None
+        else int(cfg.broker.get("default_position_units", 100))
     )
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         cfg.target["exit_offset_days"]
     )
     sig = run_signature(mode="base", exit_offset_days=eff_horizon,
-                        units=eff_units, hose_only=hose_only,
+                        units=eff_units, budget_vnd=budget_vnd, hose_only=hose_only,
                         include_etfs=include_etfs, exclude=exclude)
     out = reports_dir() / f"picks_{today}_{sig}{actionable_suffix(picks)}.json"
     excl_list = sorted({s.upper() for s in (exclude or [])})
@@ -45,7 +47,9 @@ def run(top_k: int = 5, on: str | None = None,
         "as_of": today,
         "mode": "base",
         "exit_offset_days": eff_horizon,
+        "sizing_mode": "budget" if budget_vnd is not None else "units",
         "units": eff_units,
+        "budget_vnd": budget_vnd,
         "hose_only": hose_only,
         "include_etfs": include_etfs,
         "exclude": excl_list,
@@ -55,6 +59,6 @@ def run(top_k: int = 5, on: str | None = None,
     }
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     record(picks, mode="base", as_of=today_ts,
-           exit_offset_days=eff_horizon, units=eff_units, hose_only=hose_only,
-           include_etfs=include_etfs, exclude=excl_list)
+           exit_offset_days=eff_horizon, units=eff_units, budget_vnd=budget_vnd,
+           hose_only=hose_only, include_etfs=include_etfs, exclude=excl_list)
     return picks, out

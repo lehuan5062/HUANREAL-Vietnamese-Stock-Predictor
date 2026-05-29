@@ -59,6 +59,7 @@ def rank_today(model: TrainedModel | None = None,
                top_k: int = 5,
                panel: pd.DataFrame | None = None,
                units: int | None = None,
+               budget_vnd: int | None = None,
                exit_offset_days: int | None = None,
                symbols: list[str] | None = None,
                low_model: LowQuantileModel | None = None) -> pd.DataFrame:
@@ -110,14 +111,14 @@ def rank_today(model: TrainedModel | None = None,
         snap["pred_low_alpha"] = float(low_model.alpha)
     snap["rank"] = snap["pred_mean"].rank(ascending=False, method="dense").astype(int)
     out = snap.sort_values("pred_mean", ascending=False).head(top_k)
-    out = add_price_suggestions(out, units=units)
+    out = add_price_suggestions(out, units=units, budget_vnd=budget_vnd)
     cols = ["symbol", "close",
             "position_units", "position_value_vnd",
             "entry_vnd", "close_vnd", "entry_limit_pct",
             "target_vnd", "target_low_vnd", "target_high_vnd",
             "stop_vnd", "gross_reward_vnd", "max_loss_vnd",
             "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
-            "rr_ratio", "breakeven_pct", "actionable",
+            "rr_ratio", "breakeven_pct", "actionable", "over_budget",
             "pred_mean", "pred_std", "pred_low", "pred_low_alpha", "rank",
             "rsi_14", "mom_5", "mom_20", "vol_z_20", "adv_vnd_20", "atr_14"]
     cols = [c for c in cols if c in out.columns]

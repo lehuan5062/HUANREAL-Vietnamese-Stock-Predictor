@@ -424,10 +424,11 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
     return (cal[-1] + pd.tseries.offsets.BDay(extra)).normalize()
 
 
-def run_signature(mode: str, exit_offset_days: int, units: int,
+def run_signature(mode: str, exit_offset_days: int, units: int | None = None,
                   hose_only: bool = False,
                   include_etfs: bool = True,
-                  exclude: Iterable[str] | None = None) -> str:
+                  exclude: Iterable[str] | None = None,
+                  budget_vnd: int | None = None) -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
@@ -444,7 +445,9 @@ def run_signature(mode: str, exit_offset_days: int, units: int,
     signature is suffixed with ``x{TICKERS}`` (sorted, dash-joined) so an
     excluded-rerun produces a distinct picks file from the same-day full run.
     """
-    parts = [mode, f"d{int(exit_offset_days)}", f"u{int(units)}"]
+    # Size token: budget mode -> b{VND}, unit mode -> u{shares}.
+    size_tok = f"b{int(budget_vnd)}" if budget_vnd is not None else f"u{int(units)}"
+    parts = [mode, f"d{int(exit_offset_days)}", size_tok]
     if hose_only:
         parts.append("HOSE")
     if not include_etfs:
@@ -460,6 +463,7 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
            run_id: str | None = None,
            exit_offset_days: int | None = None,
            units: int | None = None,
+           budget_vnd: int | None = None,
            hose_only: bool = False,
            include_etfs: bool = True,
            exclude: Iterable[str] | None = None) -> int:
@@ -483,7 +487,7 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
         if hasattr(cfg, "broker") else 100
     )
     sig = run_signature(mode=mode, exit_offset_days=exit_off,
-                        units=u, hose_only=hose_only,
+                        units=u, budget_vnd=budget_vnd, hose_only=hose_only,
                         include_etfs=include_etfs,
                         exclude=exclude)
     if run_id is None:

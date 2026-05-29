@@ -45,8 +45,19 @@ if "%EARLIEST_START%"=="" set EARLIEST_START=2
 set EARLIEST_START_FLAG=--earliest-start %EARLIEST_START%
 
 :skip_earliest_start
+rem Position sizing: a fixed share count (units) OR a per-pick VND budget.
+set /p SIZING=Sizing: [u]nits per pick or [b]udget VND per pick [u]:
+if /I "%SIZING%"=="b" goto ask_budget
 set /p UNITS=Units per pick (min 100, multiple of 100) [100]:
 if "%UNITS%"=="" set UNITS=100
+set SIZE_FLAG=--units %UNITS%
+set SIZING_DESC=units=%UNITS%
+goto sizing_done
+:ask_budget
+set /p BUDGET=Budget VND per pick (e.g. 2000000):
+set SIZE_FLAG=--budget %BUDGET%
+set SIZING_DESC=budget=%BUDGET% VND/pick
+:sizing_done
 
 set HOSE_FLAG=
 set /p HOSE=HOSE-only (exclude HNX/UPCOM)? y/n [n]:
@@ -80,10 +91,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running ML stage: duration=%DURATION%  days=%DAYS%  units=%UNITS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
+echo Running ML stage: duration=%DURATION%  days=%DAYS%  %SIZING_DESC%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% --units %UNITS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
+.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% %SIZE_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
 
 echo.
 echo Opening today's prompt file in Notepad.

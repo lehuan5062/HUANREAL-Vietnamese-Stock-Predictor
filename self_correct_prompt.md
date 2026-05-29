@@ -130,11 +130,11 @@ After all are collected, summarise back and start Step 2.
 
 `Read` the picks JSON. Pull these fields from it:
 
-- `as_of`, `run_signature`, `exit_offset_days`, `units`, `hose_only`, `mode`
+- `as_of`, `run_signature`, `exit_offset_days`, `sizing_mode`, `units`, `budget_vnd`, `hose_only`, `mode` (in budget mode `units` is null and `budget_vnd` holds the per-pick VND limit; `sizing_mode` says which)
 - `weight` (the `news_weight` that was active at finalize time)
 - `plan_file` (interactive mode only — points at the news plan markdown)
 - `picks` (the array; each item has `symbol`, `pred_mean`, `news_score`,
-  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `actionable`, plus the
+  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `actionable`, `over_budget`, plus the
   `business`, `dimensions`, `drivers`, `key_news`, `dimensions_cited` fields
   Claude wrote at finalize time)
 

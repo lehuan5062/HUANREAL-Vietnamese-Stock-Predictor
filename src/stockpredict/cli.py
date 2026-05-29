@@ -328,30 +328,92 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
 # ---------------------------- predict --------------------------------------
 
 
+def _resolve_sizing(units: int | None,
+                    budget: int | None) -> tuple[int | None, int | None]:
+    """Resolve the mutually-exclusive --units / --budget pair.
+
+    Returns ``(units, budget)`` with exactly one non-None: budget mode when
+    --budget was given, else unit mode with the validated/rounded share count
+    (default 100, min 100, floored to a multiple of 100). Exits with code 2 on
+    a bad combination so the CLI behaves like the other input guards.
+    """
+    if units is not None and budget is not None:
+        click.echo("ERROR: --units and --budget are mutually exclusive; pass only one.",
+                   err=True)
+        sys.exit(2)
+    if budget is not None:
+        if budget <= 0:
+            click.echo("ERROR: --budget must be a positive number of VND.", err=True)
+            sys.exit(2)
+        return None, int(budget)
+    u = 100 if units is None else int(units)
+    if u < 100:
+        click.echo("ERROR: --units must be >= 100 (ACBS minimum lot rule).", err=True)
+        sys.exit(2)
+    if u % 100 != 0:
+        new = (u // 100) * 100
+        click.echo(f"[note] --units={u} not a multiple of 100; rounding down to {new}.")
+        u = new
+    return u, None
+
+
+def _print_budget_note(picks, budget: int | None = None) -> None:
+    """In budget mode, flag picks whose minimum lot didn't fit the budget.
+
+    Over-budget picks are kept (sized at the 100-share minimum) rather than
+    dropped, so the user can see a real pick and decide to raise the budget.
+    ``budget`` may be None (e.g. at finalize time, when only the per-row flag
+    is on hand) — the message then omits the exact figure. No-op when nothing
+    is flagged, which is always the case in unit mode.
+    """
+    if picks is None or len(picks) == 0 or "over_budget" not in picks.columns:
+        return
+    over = picks[picks["over_budget"].fillna(False).astype(bool)]
+    if len(over) == 0:
+        return
+    syms = ", ".join(str(s) for s in over["symbol"]) if "symbol" in over.columns else ""
+    budget_txt = f" your {budget:,} VND budget" if budget is not None else " your per-pick budget"
+    if len(over) == len(picks):
+        click.echo(f"\n[note] none of the picks fit{budget_txt} — each is shown at the "
+                   f"100-share minimum and flagged over_budget. Raise --budget to size up.")
+    else:
+        click.echo(f"\n[note] {len(over)} pick(s) exceed{budget_txt} ({syms}) — shown at "
+                   f"the 100-share minimum, flagged over_budget. Raise --budget to size up.")
+
+
 @cli.command("predict")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
 @click.option("--top", type=int, default=5)
 @click.option("--days", type=int, default=2,
               help="T+N exit window (min 2). Use the SAME days as the last train run.")
-@click.option("--units", type=int, default=100, show_default=True,
-              help="Position size in shares. Min 100 (ACBS rule).")
+@click.option("--units", type=int, default=None,
+              help="Position size in shares. Min 100 (ACBS rule); default 100. "
+                   "Mutually exclusive with --budget.")
+@click.option("--budget", type=int, default=None,
+              help="Money limit per pick in VND (e.g. 2000000). Sizes each pick "
+                   "so one position costs ~this; a pick too pricey for one "
+                   "100-share lot is still shown, flagged over_budget. "
+                   "Mutually exclusive with --units.")
 @click.option("--date", "on", default=None, help="YYYY-MM-DD; defaults to most recent cache date")
-def predict_cmd(mode: str, top: int, days: int, units: int, on: str | None) -> None:
+def predict_cmd(mode: str, top: int, days: int, units: int | None,
+                budget: int | None, on: str | None) -> None:
     if days < 2:
         click.echo("ERROR: --days must be >= 2.", err=True)
         sys.exit(2)
-    if units < 100:
-        click.echo("ERROR: --units must be >= 100 (ACBS rule).", err=True)
-        sys.exit(2)
+    units, budget = _resolve_sizing(units, budget)
     if mode == "base":
         from .modes import base
-        picks, out = base.run(top_k=top, on=on, units=units, exit_offset_days=days)
+        picks, out = base.run(top_k=top, on=on, units=units, budget_vnd=budget,
+                              exit_offset_days=days)
         click.echo(_format_picks(picks))
+        _print_budget_note(picks, budget)
         click.echo(f"\nsaved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(top_k_final=top, on=on, units=units, exit_offset_days=days)
+        result, out, tag = claude.run(top_k_final=top, on=on, units=units,
+                                      budget_vnd=budget, exit_offset_days=days)
         click.echo(_format_picks(result))
+        _print_budget_note(result, budget)
         if _has_explanations(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
@@ -365,8 +427,10 @@ def predict_cmd(mode: str, top: int, days: int, units: int, on: str | None) -> N
                                  mode_label="claude")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(top_k_final=top, on=on, units=units, exit_offset_days=days)
+        result, out, tag = gemini.run(top_k_final=top, on=on, units=units,
+                                      budget_vnd=budget, exit_offset_days=days)
         click.echo(_format_picks(result))
+        _print_budget_note(result, budget)
         if _has_explanations(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
@@ -382,6 +446,7 @@ def claude_finalize_cmd(plan_path: str, top: int) -> None:
     from .modes import claude
     picks, out = claude.finalize(plan_path, top_k_final=top)
     click.echo(_format_picks(picks))
+    _print_budget_note(picks)
     if _has_explanations(picks):
         click.echo("")
         click.echo(_format_picks_explained(picks))
@@ -410,6 +475,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
     from .modes import gemini
     picks, out = gemini.finalize(prompt_path, response_path=response_path, top_k_final=top)
     click.echo(_format_picks(picks))
+    _print_budget_note(picks)
     if _has_explanations(picks):
         click.echo("")
         click.echo(_format_picks_explained(picks))
@@ -443,8 +509,14 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
                    "begins (min 2 — Vietnamese T+2 settlement floor). "
                    "Ignored for any other --days value.")
 @click.option("--top", type=int, default=5)
-@click.option("--units", type=int, default=100, show_default=True,
-              help="Position size in shares. Min 100 (ACBS rule). Rounds down to nearest 100.")
+@click.option("--units", type=int, default=None,
+              help="Position size in shares. Min 100, multiple of 100 (ACBS "
+                   "rule); default 100. Mutually exclusive with --budget.")
+@click.option("--budget", type=int, default=None,
+              help="Money limit per pick in VND (e.g. 2000000). Sizes each "
+                   "pick so one position costs ~this (floored to a 100-share "
+                   "lot); a pick too pricey for one lot is still shown, "
+                   "flagged over_budget. Mutually exclusive with --units.")
 @click.option("--hose-only/--no-hose-only", default=False, show_default=True,
               help="Restrict the universe to HOSE-listed tickers only "
                    "(refreshes via VCI to get exchange info; falls back to "
@@ -480,7 +552,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
-            units: int, hose_only: bool, include_etfs: bool,
+            units: int | None, budget: int | None, hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
             skip_train: bool, workers: int) -> None:
     """End-to-end: size universe by time budget -> fetch -> train -> predict.
@@ -537,13 +609,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     if days < 2:
         click.echo("ERROR: --days must be >= 2 (Vietnamese T+2 settlement minimum).", err=True)
         sys.exit(2)
-    if units < 100:
-        click.echo("ERROR: --units must be >= 100 (ACBS minimum lot rule).", err=True)
-        sys.exit(2)
-    if units % 100 != 0:
-        new = (units // 100) * 100
-        click.echo(f"[note] --units={units} not a multiple of 100; rounding down to {new}.")
-        units = new
+    units, budget = _resolve_sizing(units, budget)
     # Normalize --exclude: split each value on commas so BAT-style single
     # comma-separated input works alongside the repeatable form, uppercase,
     # dedupe, sort for stable signature ordering.
@@ -795,7 +861,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
                 if not panel_n_low.empty:
                     low_m = train_quantile(panel_n_low)
                     save_latest_low(low_m)
-            picks_n = rank_today(top_k=top, units=units,
+            picks_n = rank_today(top_k=top, units=units, budget_vnd=budget,
                                  exit_offset_days=n,
                                  symbols=pred_syms)
             last_picks = picks_n
@@ -848,12 +914,14 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
         from .modes import base
-        picks, out = base.run(top_k=top, units=units, exit_offset_days=days,
+        picks, out = base.run(top_k=top, units=units, budget_vnd=budget,
+                              exit_offset_days=days,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
                               exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(picks))
+        _print_budget_note(picks, budget)
         if _has_best_badges(picks):
             click.echo("")
             click.echo(_format_picks_explained(picks))
@@ -861,12 +929,14 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     elif mode == "claude":
         from .modes import claude
         result, out, tag = claude.run(top_k_final=top, units=units,
+                                       budget_vnd=budget,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
                                        exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
+        _print_budget_note(result, budget)
         if _has_explanations(result) or _has_best_badges(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
@@ -886,12 +956,14 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(top_k_final=top, units=units,
+                                       budget_vnd=budget,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
                                        exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
+        _print_budget_note(result, budget)
         if _has_explanations(result) or _has_best_badges(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
