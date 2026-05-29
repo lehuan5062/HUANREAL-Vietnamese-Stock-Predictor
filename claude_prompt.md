@@ -185,11 +185,10 @@ exit.
 - **Sell day** = T+N, the actual trading day on which the position is sold.
   (For T+2, sell only in the afternoon session 13:00–14:30 ICT after noon
   settlement. For T+>2, any time 09:00–14:30 ICT works.)
-- **Reminder day** = T+(N-1), the trading day BEFORE the sell day. The
-  reminder fires at **15:00 ICT** — i.e. AFTER the Vietnamese market closes
-  at 14:30 ICT — so the user has the evening to review and queue exit
-  orders for the next-day open. **This is what you schedule, not the sell
-  day itself.**
+- **Reminder day** = T+N, the sell day itself. The reminder fires at
+  **11:30 ICT** — late morning, just before the lunch break (and, for T+2,
+  30 min before settlement at noon) — so the user can review and queue
+  exit orders for the afternoon session.
 
 How to find both dates:
 
@@ -197,15 +196,15 @@ How to find both dates:
   block listing both `Sell day:` and `Suggested reminder:` lines. Use the
   reminder line verbatim when scheduling.
 - Equivalently, read `reports\picks_claude_<DATE>_<sig>.json` — `as_of`
-  plus `exit_offset_days` resolve to the sell day; subtract one trading
-  day (skip weekends + VN holidays) to get the reminder day.
+  plus `exit_offset_days` resolve to the sell day, which is also the
+  reminder day.
 - In `--days earliest` mode, the actionable horizon is whatever `T+N` the
   search stopped at — already baked into `exit_offset_days`.
 
 If the user accepts:
 
-- Schedule the reminder for **T+(N-1) at 15:00 ICT**, NOT for the sell day
-  morning. Use whatever scheduler you have (Claude Code's scheduled-tasks
+- Schedule the reminder for **T+N at 11:30 ICT** (the sell day, late
+  morning). Use whatever scheduler you have (Claude Code's scheduled-tasks
   tool, cron, Windows `schtasks /create`, etc.) and confirm the resulting
   trigger time in GMT+7.
 - If no scheduler is available, hand the user a copy-pasteable ICS event

@@ -54,28 +54,29 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
 
     # Sell-day reminder: when current_horizon is known, quote a concrete
     # target sell day so the in-session Claude can offer to schedule a
-    # reminder once the picks are finalized. The reminder fires AFTER
-    # market close on T+(N-1) — the trading day BEFORE the sell day —
-    # giving the user the evening to plan and place orders at next-day
-    # open. VN market closes at 14:30 ICT; 15:00 = post-close buffer.
+    # reminder once the picks are finalized. The reminder fires on the
+    # sell day itself at 11:30 ICT — late morning, just before the noon
+    # lunch break (and, for T+2, 30 min before settlement at noon).
     if current_horizon is not None:
         n = int(current_horizon)
         target_date = _next_trading_offset(pd.Timestamp(on), n).date()
-        reminder_date = _next_trading_offset(pd.Timestamp(on),
-                                             max(n - 1, 0)).date()
+        reminder_date = target_date
         if n == 2:
             sell_window = ("13:00–14:30 ICT (afternoon session, "
                            "after T+2 settlement at noon)")
+            reminder_note = "30 min before T+2 settlement at noon"
         else:
             sell_window = "09:00–14:30 ICT (any time during the trading day)"
-        suggested_time = "15:00 ICT"
+            reminder_note = "late morning of sell day, before lunch break"
+        suggested_time = "11:30 ICT"
         target_iso = target_date.isoformat()
         reminder_iso = reminder_date.isoformat()
     else:
         target_iso = "(unknown — fall back to picks_*.json target_date)"
-        reminder_iso = "(unknown — one trading day before the sell day)"
+        reminder_iso = "(unknown — same as sell day)"
         sell_window = "afternoon session ICT"
-        suggested_time = "15:00 ICT"
+        suggested_time = "11:30 ICT"
+        reminder_note = "late morning of sell day"
 
     lines = [
         f"# Claude news re-rank plan — {on.isoformat()}",
@@ -136,10 +137,9 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         f"Vietnamese ICT)** to prepare the exit.",
         "",
         f"- **Sell day** (the actual trade): {target_iso} ({sell_window}).",
-        f"- **Reminder fires**: {reminder_iso} {suggested_time} — i.e. AFTER",
-        f"  market close on T+{int(current_horizon)-1 if current_horizon else 'N-1'}",
-        f"  (VN market closes 14:30 ICT). This gives the user the evening to",
-        f"  review and queue orders for the next-day open.",
+        f"- **Reminder fires**: {reminder_iso} {suggested_time} — on the sell",
+        f"  day itself ({reminder_note}). This gives the user time to review",
+        f"  and queue exit orders for the afternoon session.",
         "",
         "If the user says yes, use whatever scheduling tool you have available",
         "(Claude Code's scheduled-tasks / cron / `at` / Windows `schtasks`),",

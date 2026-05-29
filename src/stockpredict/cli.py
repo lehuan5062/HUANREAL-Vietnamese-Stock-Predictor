@@ -187,17 +187,19 @@ def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
                 else effective_today_for_trading())
     n = int(exit_offset_days)
     target_date = _next_trading_offset(as_of_ts, n)
-    # Reminder fires AFTER market close on T+(N-1) — the trading day before
-    # the sell day — so the user has the evening to prepare and can place
-    # orders at the next morning's open. VN market closes at 14:30 ICT;
-    # 15:00 gives a 30-min buffer for the close to settle.
-    reminder_date = _next_trading_offset(as_of_ts, max(n - 1, 0))
-    reminder_time = "15:00 ICT"
+    # Reminder fires at 11:30 ICT on the sell day itself — late morning,
+    # just before the lunch break. For T+2 this lands 30 min before noon
+    # settlement, giving the user time to queue afternoon-session orders;
+    # for T+>2 it's the natural mid-day check-in before the afternoon close.
+    reminder_date = target_date
+    reminder_time = "11:30 ICT"
     if n == 2:
         sell_window = ("13:00–14:30 ICT  (afternoon session, "
                        "after T+2 settlement at noon)")
+        reminder_note = "30 min before T+2 settlement"
     else:
         sell_window = "09:00–14:30 ICT  (any time during the trading day)"
+        reminder_note = "late morning of sell day, before lunch break"
     sym_list = ", ".join(picks[actionable_mask]["symbol"].astype(str).tolist())
     click.echo("")
     click.echo("==> SELL-REMINDER (GMT+7, Asia/Ho_Chi_Minh — Vietnamese ICT):")
@@ -206,7 +208,7 @@ def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
                f"({sell_window}).")
     click.echo(f"    Suggested reminder: "
                f"{reminder_date.strftime('%Y-%m-%d (%A)')} {reminder_time} "
-               f"(after T+{n-1} market close).")
+               f"({reminder_note}).")
     if mode_label in ("claude", "gemini"):
         click.echo(f"    {mode_label.title()}: ask the user whether they want a "
                    f"reminder scheduled for that day/time in GMT+7.")
@@ -737,9 +739,12 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     # same set we trained on (and the hose_only / no-etfs / exclude filters
     # actually take effect at predict time, not just at fetch time). Computed
     # once and reused by both the earliest-search loop and the final mode
-    # invocation. ``pred_syms=None`` lets rank_today use every cached
-    # symbol — only acceptable when the universe wasn't filtered.
-    pred_syms = syms if (hose_only or not include_etfs or exclude_list) else None
+    # invocation. We used to set this to ``None`` when no per-session filters
+    # were active, but that let delisted-but-still-cached tickers (like HTK)
+    # leak into the prediction set via ``cached_symbols()``. Always pass the
+    # selector-vetted list now; ``rank_today`` also intersects with
+    # ``tradable_symbols()`` as a defense-in-depth check.
+    pred_syms = syms
 
     if earliest_mode:
         # Iterative search: train at T+earliest_start, T+earliest_start+1, ...

@@ -15,7 +15,8 @@ import warnings
 from typing import Iterable
 
 from .data.cache import cached_symbols
-from .data.universe import filter_exchanges, is_etf, load_universe
+from .data.universe import (filter_exchanges, is_etf, load_universe,
+                             tradable_symbols)
 
 
 # ---- curated bluechips (kept in code so single-file deploys still work) ----
@@ -147,16 +148,30 @@ def select(target: int,
             return syms
         return [s for s in syms if s.upper() not in exclude_set]
 
+    # Snapshot of currently-tradable tickers from the (post-DELISTED-filter)
+    # universe parquet. Used to scrub the warm cache layer — without it, a
+    # stale ``cache/ohlcv/<DELISTED>.parquet`` file (e.g. HTK after delisting)
+    # would re-surface as a candidate on every run. ``None`` means the
+    # universe parquet is missing; in that case we skip the filter rather than
+    # wipe the cached layer to nothing on a cold start.
+    tradable = tradable_symbols()
+
+    def _filter_delisted(syms):
+        if tradable is None:
+            return syms
+        return [s for s in syms if s.upper() in tradable]
+
     def _apply_filters(syms):
         return _filter_exclude(_filter_etfs(_filter_hose(syms)))
 
-    # Curated bluechip layer
+    # Curated bluechip layer — trusted, no DELISTED filter so a flaky network
+    # never wipes out the user-vetted picks.
     curated_layer = _apply_filters(CURATED)
     if _add_many(curated_layer):
         return out
 
     # Warm cache layer
-    cached_layer = _apply_filters(cached_symbols())
+    cached_layer = _apply_filters(_filter_delisted(cached_symbols()))
     if _add_many(cached_layer):
         return out
 

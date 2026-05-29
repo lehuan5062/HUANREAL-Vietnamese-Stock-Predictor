@@ -1,4 +1,4 @@
-"""Verify the selector's --hose-only path."""
+"""Verify the selector's --hose-only path and warm-cache delisted filter."""
 import pandas as pd
 
 import stockpredict.selector as sel
@@ -76,6 +76,46 @@ def test_hose_only_false_includes_all_exchanges(monkeypatch):
     assert "BSR" in upper          # UPCOM
 
 
+def test_warm_cache_drops_delisted_via_tradable_set(monkeypatch):
+    """If the warm OHLCV cache still has a delisted ticker (e.g. HTK), the
+    selector must NOT surface it as a candidate. The check is gated on
+    ``tradable_symbols()``: when it returns a set, every cached symbol not in
+    that set is dropped before being mixed back into the output."""
+    # Only VN30 names + one extra are "tradable" per vnstock. HTK is delisted.
+    monkeypatch.setattr(sel, "tradable_symbols",
+                        lambda: set(sel.VN30) | {"AGX"})
+    # Pretend the warm cache contains a delisted ticker.
+    monkeypatch.setattr(sel, "cached_symbols",
+                        lambda: ["VCB", "HTK", "AGX"])
+    # Make the curated layer NOT saturate the target so the warm cache runs.
+    monkeypatch.setattr(sel, "CURATED", ["VCB"])
+    # Avoid hitting the network on the top-up path.
+    monkeypatch.setattr(sel, "load_universe",
+                        lambda refresh=False, source=None: pd.DataFrame())
+
+    out = sel.select(target=10, hose_only=False)
+    upper = {s.upper() for s in out}
+    assert "HTK" not in upper, f"delisted HTK leaked from warm cache: {out}"
+    assert "AGX" in upper, "non-delisted cached ticker should still flow through"
+
+
+def test_warm_cache_filter_noop_when_universe_missing(monkeypatch):
+    """When the universe parquet is missing (cold start), tradable_symbols()
+    returns None and the warm-cache filter degrades to a pass-through —
+    better to over-include than to wipe the cache layer to nothing."""
+    monkeypatch.setattr(sel, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(sel, "cached_symbols",
+                        lambda: ["VCB", "HTK", "AGX"])
+    monkeypatch.setattr(sel, "CURATED", [])
+    monkeypatch.setattr(sel, "load_universe",
+                        lambda refresh=False, source=None: pd.DataFrame())
+
+    out = sel.select(target=10, hose_only=False)
+    upper = {s.upper() for s in out}
+    # All three cached names survive (no tradable set to filter against).
+    assert {"VCB", "HTK", "AGX"}.issubset(upper)
+
+
 def test_hose_known_set_consistent():
     """HOSE_KNOWN should contain only curated HOSE names — never any
     HNX_LIQUID or UPCOM_LIQUID names."""
@@ -83,5 +123,5 @@ def test_hose_known_set_consistent():
     overlap_upc = sel.HOSE_KNOWN & set(sel.UPCOM_LIQUID)
     assert not overlap_hnx, f"HNX names in HOSE_KNOWN: {overlap_hnx}"
     assert not overlap_upc, f"UPCOM names in HOSE_KNOWN: {overlap_upc}"
-    # And it should be VN30 + HOSE_MID exactly.
-    assert sel.HOSE_KNOWN == set(sel.VN30 + sel.HOSE_MID)
+    # And it should be VN30 + HOSE_MID + HOSE_ETFS exactly.
+    assert sel.HOSE_KNOWN == set(sel.VN30 + sel.HOSE_MID + sel.HOSE_ETFS)

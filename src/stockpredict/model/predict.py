@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
 from ..filters import liquidity_mask
 from ..pricing import add_price_suggestions
@@ -78,6 +79,19 @@ def rank_today(model: TrainedModel | None = None,
         )]
 
     snap = latest_cross_section(panel, on=on)
+    if snap.empty:
+        return snap
+
+    # Drop tickers that vnstock no longer lists as tradable on HOSE/HNX/UPCOM
+    # (DELISTED, etc.). The OHLCV cache keeps a parquet file for every ticker
+    # we have ever fetched — including delisted names like HTK — so without
+    # this guard a stale cache entry can re-surface as a top pick the user
+    # cannot actually buy. ``tradable_symbols()`` returns None when the
+    # universe parquet is missing (cold start); in that case we degrade to
+    # the pre-existing behaviour rather than wiping the cross-section.
+    tradable = tradable_symbols()
+    if tradable is not None:
+        snap = snap[snap["symbol"].astype(str).str.upper().isin(tradable)]
     if snap.empty:
         return snap
 

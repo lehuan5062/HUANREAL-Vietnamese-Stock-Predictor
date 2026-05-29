@@ -21,17 +21,18 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     )
     # Compute the target sell day in Vietnamese trading-day space so the prompt
     # can quote a concrete date back at Gemini, who can then ask the user
-    # about scheduling a reminder. Reminder fires the trading day BEFORE the
-    # sell day, after market close (15:00 ICT — VN closes at 14:30).
+    # about scheduling a reminder. Reminder fires on the sell day itself at
+    # 11:30 ICT — late morning, just before the noon lunch break.
     from ..tracking import _next_trading_offset
     target_date = _next_trading_offset(pd.Timestamp(on), horizon).date()
-    reminder_date = _next_trading_offset(pd.Timestamp(on),
-                                         max(horizon - 1, 0)).date()
+    reminder_date = target_date
     if horizon == 2:
         sell_window = "13:00–14:30 ICT (afternoon session, after T+2 settlement)"
+        reminder_note = "30 min before T+2 settlement at noon"
     else:
         sell_window = "09:00–14:30 ICT (any time during the trading day)"
-    suggested_time = "15:00 ICT"
+        reminder_note = "late morning of sell day, before lunch break"
+    suggested_time = "11:30 ICT"
 
     from .company_info import enrich
     candidates = enrich(candidates)
@@ -186,9 +187,9 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         f"Vietnamese ICT)** to prepare the exit.\n"
         f"- Sell day: {target_date.isoformat()} ({sell_window}).\n"
         f"- Reminder fires: {reminder_date.isoformat()} {suggested_time} — "
-        f"AFTER market close on T+{horizon-1} (VN closes 14:30 ICT). "
-        f"This gives the user the evening to plan and queue orders for the "
-        f"next-day open."
+        f"on the sell day itself ({reminder_note}). "
+        f"This gives the user time to review and queue exit orders for the "
+        f"afternoon session."
     )
     parts.append("")
     parts.append(

@@ -32,6 +32,24 @@ _TYPE_COLUMN_CANDIDATES = (
     "security_type", "instrument_type", "product_type", "asset_type",
 )
 
+# Exchange labels we accept as "tradable on a Vietnamese retail broker".
+# vnstock's VCI source uses HSX; KBS uses HOSE — both alias to the same
+# exchange (we already canonicalize via ``filter_exchanges`` downstream).
+# Anything else (DELISTED, BOND, XHNF, etc.) is dropped at fetch time so
+# names like HTK never reach the candidate pool.
+_TRADABLE_EXCHANGES = {"HSX", "HOSE", "HNX", "UPCOM"}
+
+# Raw type values we drop unconditionally. Match is exact (after upper())
+# so "FU" (futures) does NOT accidentally swallow "FUND" (ETFs).
+_NONEQUITY_RAW_TYPES = {
+    # VCI uppercase
+    "BOND", "CW", "FU", "DEBENTURE",
+    # KBS lowercase variants — covered by upper() at compare time
+    "CORPBOND", "FUTURE",
+    # Generic safety net
+    "WARRANT", "DERIVATIVE",
+}
+
 
 def universe_path() -> Path:
     return cache_dir() / _UNIVERSE_FILE
@@ -77,6 +95,12 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
     Pass ``source`` to force a specific provider (e.g. 'VCI' to try to pick up
     the ``exchange`` column when KBS is the configured default).
 
+    Prefers ``Listing.symbols_by_exchange()`` over ``all_symbols()`` because the
+    former returns explicit ``exchange`` / ``type`` columns we use to drop
+    delisted tickers and non-equity instruments (covered warrants, futures,
+    bonds). Without that filter, vnstock returns rows like HTK (delisted) and
+    the pipeline writes picks for tickers the broker won't accept orders for.
+
     Also unions in the dedicated ETF listing from ``Listing.all_etf()`` (only
     supported by the KBS source). ``all_symbols()`` returns common stocks
     only — ETFs / fund certificates live on a separate endpoint and would be
@@ -101,9 +125,16 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
         for attempt in range(retries):
             try:
                 _limiter().wait()
-                df = Listing(source=src).all_symbols()
+                listing = Listing(source=src)
+                # Prefer the exchange-aware endpoint so we can drop DELISTED
+                # tickers; fall back to all_symbols() if the source / vnstock
+                # release doesn't implement it.
+                df = _try_symbols_by_exchange(listing)
+                if df is None or len(df) == 0:
+                    df = listing.all_symbols()
                 if df is None or len(df) == 0:
                     continue
+                df = _drop_untradable(df)
                 df = _normalize_listing(df)
                 # Union in the dedicated ETF listing. Failure is non-fatal —
                 # the stock listing is the primary product; ETF augmentation
@@ -127,6 +158,41 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
                     _limiter().pause(65.0, reason=f"{src} Listing 429")
                 continue
     raise RuntimeError(f"All vnstock sources failed for Listing: {last_err}")
+
+
+def _try_symbols_by_exchange(listing) -> pd.DataFrame | None:
+    """Best-effort call to ``Listing.symbols_by_exchange()``. Returns None when
+    the method is missing, the broker errors out, or the response is empty —
+    the caller then falls back to ``all_symbols()``."""
+    fn = getattr(listing, "symbols_by_exchange", None)
+    if fn is None:
+        return None
+    try:
+        df = fn()
+    except Exception:
+        return None
+    if df is None or len(df) == 0:
+        return None
+    return df
+
+
+def _drop_untradable(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip rows that aren't ordinary equities / ETFs on HOSE/HNX/UPCOM.
+
+    ``vnstock``'s listings include DELISTED tickers, bonds, covered warrants,
+    and futures alongside the names a retail account can actually trade. Drop
+    them at fetch time so they never enter the OHLCV cache or candidate pool.
+    No-op when neither an ``exchange`` nor a type column is present (e.g.
+    KBS' ``all_symbols()`` fallback returns only ``symbol`` + ``organ_name``)."""
+    out = df
+    if "exchange" in out.columns:
+        ex = out["exchange"].astype(str).str.upper().str.strip()
+        out = out[ex.isin(_TRADABLE_EXCHANGES)]
+    type_col = next((c for c in _TYPE_COLUMN_CANDIDATES if c in out.columns), None)
+    if type_col is not None:
+        raw = out[type_col].astype(str).str.upper().str.strip()
+        out = out[~raw.isin(_NONEQUITY_RAW_TYPES)]
+    return out.reset_index(drop=True)
 
 
 def _try_fetch_etf_listing() -> pd.DataFrame | None:
@@ -244,7 +310,12 @@ def _normalize_listing(df: pd.DataFrame) -> pd.DataFrame:
 def load_universe(refresh: bool = False, source: str | None = None) -> pd.DataFrame:
     p = universe_path()
     if not refresh and p.exists():
-        return pd.read_parquet(p)
+        cached = pd.read_parquet(p)
+        # Force a rebuild if the cached parquet predates the DELISTED filter
+        # (no ``exchange`` column). Otherwise users would have to manually
+        # delete cache/universe.parquet to pick up the new schema.
+        if "exchange" in cached.columns:
+            return cached
     df = fetch_universe(source=source)
     df.to_parquet(p, index=False)
     # Drop the lru_cache so the next is_etf / instrument_type lookup re-reads
@@ -298,6 +369,23 @@ def instrument_type(symbol: str) -> str:
 def is_etf(symbol: str) -> bool:
     """True if ``symbol`` is a Vietnamese ETF (HOSE-listed FUE* / E1VFVN30)."""
     return instrument_type(symbol) == "ETF"
+
+
+def tradable_symbols() -> set[str] | None:
+    """Set of symbols vnstock currently lists on HOSE/HNX/UPCOM (post the
+    ``_drop_untradable`` filter applied at fetch time). Returns ``None`` when
+    the universe parquet is missing — callers should treat that as "unknown,
+    don't filter" rather than "nothing is tradable"."""
+    p = universe_path()
+    if not p.exists():
+        return None
+    try:
+        u = pd.read_parquet(p)
+    except Exception:
+        return None
+    if "symbol" not in u.columns:
+        return None
+    return {str(s).upper() for s in u["symbol"].tolist()}
 
 
 def invalidate_type_cache() -> None:
