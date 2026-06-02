@@ -1,7 +1,7 @@
 """Build a markdown news-research plan that an in-session Claude can execute via WebFetch.
 
 Workflow:
-  1. base ML stage narrows to top-N candidates (default 20)
+  1. base ML stage selects the actionable candidates (capped at report.max_picks)
   2. write_plan() produces a markdown checklist with per-ticker URLs
      and a +1 / 0 / -1 sentiment rubric
   3. Claude (running this session) fills in the rubric using WebFetch

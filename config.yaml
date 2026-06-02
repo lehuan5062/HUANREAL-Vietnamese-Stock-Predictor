@@ -94,14 +94,20 @@ pricing:
   # to entry = today's close (the legacy behavior).
   entry_low_alpha: 0.25
 
+report:
+  # Ceiling on how many actionable tickers a report lists (shared by all modes).
+  # A report lists every ticker that clears the actionable gate (net_reward > 0
+  # AND rr_ratio >= min_rr_ratio), sorted by predicted return, up to this many.
+  # The count is dynamic below the cap — most days far fewer (often zero)
+  # tickers are actionable at a short horizon. Override per-run with --top.
+  # For the claude/gemini modes this also bounds the number of candidates sent
+  # for news research (one LLM call per candidate).
+  max_picks: 20
+
 modes:
-  base:
-    top_k: 5
   claude:
-    candidate_pool: 20      # ML narrows to 20, news re-ranks to 5
     news_weight: 0.10
   gemini:
-    candidate_pool: 20
     news_weight: 0.05
 
 news:

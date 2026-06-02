@@ -53,7 +53,8 @@ For question 3, pass exactly one of `--units <UNITS>` or `--budget <VND>` (mutua
 
 Working directory: `D:\stock`. The CLI writes a markdown plan at
 `D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
-sidecar. The console output also lists the top 20 candidates with
+sidecar. The console output also lists the actionable candidates (every
+ticker that cleared the rr/net gate, up to `report.max_picks`) with
 entry/target/stop/fees at the chosen sizing (a fixed share count, or each pick sized to your per-pick budget).
 
 If the CLI prints `[claude] DROP override:` or any error, surface it to the
@@ -62,12 +63,12 @@ user verbatim before continuing.
 ### 2. Read the plan markdown
 
 Use `Read` on the path the CLI printed. The plan has a Method section and a
-per-ticker section for each of the 20 candidates with empty Step 1 / Step 2 /
-Step 4 fields and a `## Scores` table at the bottom.
+per-ticker section for each candidate (the actionable picks for the day) with
+empty Step 1 / Step 2 / Step 4 fields and a `## Scores` table at the bottom.
 
 ### 3. Research each ticker — business-aware, emergent dimensions
 
-**For each of the 20 candidates:**
+**For each candidate in the plan:**
 
 - **First, check the heading tag.** ETF rows are marked
   `### FUEVFVND  —  FUEVFVND  [ETF — apply ETF rubric, NOT company business]`.
@@ -165,7 +166,7 @@ future runs can self-correct.
 
 ### 6. Report to the user
 
-Show the explained top-5 with these fields per pick:
+Show every explained pick with these fields per pick:
 
 - Symbol, company, business one-liner
 - Trade economics: entry / target / stop in VND, fees round-trip, net P&L

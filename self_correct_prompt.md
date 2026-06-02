@@ -376,8 +376,11 @@ filename identifies the report and the ledger holds the data. Structure:
 2. `config.yaml` — for tunable knobs:
    - `modes.claude.news_weight` (current 0.05) — raise / lower if
      news_score is consistently mis-weighted relative to ML.
-   - `modes.claude.candidate_pool` (current 20) — only change if the
-     pool size is plausibly the issue.
+   - `report.max_picks` (current 20) — the ceiling on how many actionable
+     tickers a report lists. This is a presentation cap, NOT a signal knob:
+     raising it only surfaces more already-actionable picks on an unusually
+     strong day; it does not change which tickers are actionable. Rarely
+     worth touching.
    - `pricing.stop_atr_mult` (current 1.5), `pricing.min_rr_ratio`
      (current 0.8) — for entry/exit rule mismatches.
    - **`pricing.entry_low_alpha` (current 0.5) — raise toward 0.75 if

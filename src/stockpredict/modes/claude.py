@@ -29,7 +29,7 @@ def _autonomous_available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def run(top_k_final: int = 5, on: str | None = None,
+def run(max_picks: int | None = None, on: str | None = None,
         units: int | None = None,
         budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
@@ -41,7 +41,7 @@ def run(top_k_final: int = 5, on: str | None = None,
     where mode_tag is 'autonomous' or 'interactive'."""
     if _autonomous_available():
         try:
-            return _run_autonomous(top_k_final=top_k_final, on=on, units=units,
+            return _run_autonomous(max_picks=max_picks, on=on, units=units,
                                    budget_vnd=budget_vnd,
                                    exit_offset_days=exit_offset_days,
                                    symbols=symbols, hose_only=hose_only,
@@ -49,7 +49,7 @@ def run(top_k_final: int = 5, on: str | None = None,
                                    exclude=exclude)
         except Exception as e:
             print(f"[claude] autonomous mode failed ({e}); falling back to plan emit.")
-    candidates, plan_path = emit_plan(top_k_final=top_k_final, on=on, units=units,
+    candidates, plan_path = emit_plan(max_picks=max_picks, on=on, units=units,
                                       budget_vnd=budget_vnd,
                                       exit_offset_days=exit_offset_days,
                                       symbols=symbols, hose_only=hose_only,
@@ -58,7 +58,7 @@ def run(top_k_final: int = 5, on: str | None = None,
     return candidates, plan_path, "interactive"
 
 
-def emit_plan(top_k_final: int = 5, on: str | None = None,
+def emit_plan(max_picks: int | None = None, on: str | None = None,
               units: int | None = None,
               budget_vnd: int | None = None,
               exit_offset_days: int | None = None,
@@ -66,9 +66,8 @@ def emit_plan(top_k_final: int = 5, on: str | None = None,
               hose_only: bool = False,
               include_etfs: bool = True,
               exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
-    cfg = load_config().modes["claude"]
-    pool = int(cfg["candidate_pool"])
-    candidates = rank_today(top_k=pool, on=on, units=units, budget_vnd=budget_vnd,
+    candidates = rank_today(actionable_only=True, max_picks=max_picks, on=on,
+                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     if on is not None:
         on_date = dt.date.fromisoformat(on)
@@ -115,7 +114,7 @@ def emit_plan(top_k_final: int = 5, on: str | None = None,
     return candidates, plan_path
 
 
-def _run_autonomous(top_k_final: int, on: str | None,
+def _run_autonomous(max_picks: int | None = None, on: str | None = None,
                     units: int | None = None,
                     budget_vnd: int | None = None,
                     exit_offset_days: int | None = None,
@@ -126,11 +125,9 @@ def _run_autonomous(top_k_final: int, on: str | None,
     from ..news import claude_api
 
     cfg = load_config().modes["claude"]
-    pool = int(cfg["candidate_pool"])
-    candidates = rank_today(top_k=pool, on=on, units=units, budget_vnd=budget_vnd,
+    candidates = rank_today(actionable_only=True, max_picks=max_picks, on=on,
+                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
-    if candidates.empty:
-        raise RuntimeError("no candidates from ML stage")
 
     if on is not None:
         today_ts = pd.Timestamp(on)
@@ -147,15 +144,43 @@ def _run_autonomous(top_k_final: int, on: str | None,
         full_cfg.target["exit_offset_days"]
     )
     excl_list = sorted({s.upper() for s in (exclude or [])})
+    eff_max_picks = max_picks if max_picks is not None else int(
+        full_cfg.get("report", {}).get("max_picks", 20))
     sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
                         units=eff_units, budget_vnd=budget_vnd, hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
+
+    if candidates.empty:
+        # Nothing cleared the actionable gate today — write an empty report
+        # rather than spending a live API call scoring a zero-row table.
+        merged = annotate_best(candidates)
+        out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
+        payload = {
+            "as_of": today,
+            "mode": "claude_autonomous",
+            "exit_offset_days": eff_horizon,
+            "sizing_mode": "budget" if budget_vnd is not None else "units",
+            "units": eff_units,
+            "budget_vnd": budget_vnd,
+            "hose_only": hose_only,
+            "include_etfs": include_etfs,
+            "exclude": excl_list,
+            "run_signature": sig,
+            "selection": "actionable_only",
+            "max_picks": eff_max_picks,
+            "n_actionable": 0,
+            "global_summary": "",
+            "weight": float(cfg["news_weight"]),
+            "picks": [],
+        }
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return merged, out, "autonomous"
 
     print(f"[claude] calling Anthropic API to score {len(candidates)} candidates...")
     scored = claude_api.score(candidates, date=today,
                               current_horizon=eff_horizon,
                               current_signature=sig)
-    merged = claude_api.merge(candidates, scored).head(top_k_final)
+    merged = claude_api.merge(candidates, scored)
     merged = annotate_best(merged)
 
     out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
@@ -170,6 +195,9 @@ def _run_autonomous(top_k_final: int, on: str | None,
         "include_etfs": include_etfs,
         "exclude": excl_list,
         "run_signature": sig,
+        "selection": "actionable_only",
+        "max_picks": eff_max_picks,
+        "n_actionable": int(len(merged)),
         "global_summary": scored.get("global_summary", ""),
         "weight": float(cfg["news_weight"]),
         "picks": json.loads(merged.to_json(orient="records")),
@@ -182,7 +210,7 @@ def _run_autonomous(top_k_final: int, on: str | None,
     return merged, out, "autonomous"
 
 
-def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame, Path]:
+def finalize(plan_path: str | Path, max_picks: int | None = None) -> tuple[pd.DataFrame, Path]:
     from ..news.claude_runner import DROP_SENTINEL
 
     cfg = load_config().modes["claude"]
@@ -217,7 +245,11 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
         # Older plans without sidecar: fall back to the bare score table.
         merged = scored
     merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
-    merged = merged.sort_values("adjusted", ascending=False).head(top_k_final).reset_index(drop=True)
+    merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
+    # The candidate set is already the capped actionable set from emit time;
+    # honor an explicit --top override here as a manual trim, otherwise list all.
+    if max_picks is not None:
+        merged = merged.head(int(max_picks)).reset_index(drop=True)
     merged = annotate_best(merged)
 
     # Recover horizon / units / hose_only from the sidecar metadata (if present).
@@ -263,6 +295,8 @@ def finalize(plan_path: str | Path, top_k_final: int = 5) -> tuple[pd.DataFrame,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
         "run_signature": sig,
+        "selection": "actionable_only",
+        "n_actionable": int(len(merged)),
         "plan_file": str(plan_path),
         "weight": weight,
         "picks": json.loads(merged.to_json(orient="records")),

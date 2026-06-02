@@ -1,5 +1,5 @@
 """Generate a self-contained Gemini prompt that asks Gemini to research news for
-candidate Vietnamese tickers and return a re-ranked top-5 as JSON."""
+candidate Vietnamese tickers and return a re-ranked list as JSON."""
 from __future__ import annotations
 
 import datetime as dt
@@ -169,12 +169,13 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("  ]")
     parts.append("}")
     parts.append("```")
-    parts.append("Top 5 picks, sorted by `adjusted` descending.")
+    parts.append("List ALL candidates below, sorted by `adjusted` descending "
+                 "(drop any you judge should be excluded on the news).")
     parts.append("")
     parts.append("## Final step — sell reminder (after the JSON, in chat)")
     parts.append("")
     parts.append(
-        f"After you output the JSON, look at how many of your top-5 picks "
+        f"After you output the JSON, look at how many of your picks "
         f"are `actionable: yes` in the candidates table above (or, if you "
         f"have re-ranked them with news, would still pass the rr/net cost "
         f"gate)."

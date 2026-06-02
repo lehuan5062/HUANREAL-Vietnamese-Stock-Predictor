@@ -25,7 +25,7 @@ from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, run_signature
 
 
-def run(top_k_final: int = 5, on: str | None = None,
+def run(max_picks: int | None = None, on: str | None = None,
         units: int | None = None,
         budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
@@ -34,7 +34,8 @@ def run(top_k_final: int = 5, on: str | None = None,
         include_etfs: bool = True,
         exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
     """Always emits a prompt file; returns (candidates, prompt_path, 'prompt-only')."""
-    candidates, prompt_path = emit_prompt(on=on, units=units, budget_vnd=budget_vnd,
+    candidates, prompt_path = emit_prompt(max_picks=max_picks, on=on, units=units,
+                                          budget_vnd=budget_vnd,
                                           exit_offset_days=exit_offset_days,
                                           symbols=symbols, hose_only=hose_only,
                                           include_etfs=include_etfs,
@@ -42,7 +43,7 @@ def run(top_k_final: int = 5, on: str | None = None,
     return candidates, prompt_path, "prompt-only"
 
 
-def emit_prompt(on: str | None = None,
+def emit_prompt(max_picks: int | None = None, on: str | None = None,
                 units: int | None = None,
                 budget_vnd: int | None = None,
                 exit_offset_days: int | None = None,
@@ -50,9 +51,8 @@ def emit_prompt(on: str | None = None,
                 hose_only: bool = False,
                 include_etfs: bool = True,
                 exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
-    cfg = load_config().modes["gemini"]
-    pool = int(cfg["candidate_pool"])
-    candidates = rank_today(top_k=pool, on=on, units=units, budget_vnd=budget_vnd,
+    candidates = rank_today(actionable_only=True, max_picks=max_picks, on=on,
+                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     if on:
         on_date = dt.date.fromisoformat(on)
@@ -102,7 +102,7 @@ def emit_prompt(on: str | None = None,
 
 def finalize(prompt_path: str | Path,
              response_path: str | Path | None = None,
-             top_k_final: int = 5) -> tuple[pd.DataFrame, Path]:
+             max_picks: int | None = None) -> tuple[pd.DataFrame, Path]:
     """Merge Gemini's JSON response back into the saved candidates and produce
     the final explained top-K picks JSON.
 
@@ -142,7 +142,11 @@ def finalize(prompt_path: str | Path,
         raise RuntimeError("all candidates dropped or unmatched")
 
     merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
-    merged = merged.sort_values("adjusted", ascending=False).head(top_k_final).reset_index(drop=True)
+    merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
+    # The candidate set is already the capped actionable set from emit time;
+    # honor an explicit --top override here as a manual trim, otherwise list all.
+    if max_picks is not None:
+        merged = merged.head(int(max_picks)).reset_index(drop=True)
     merged = annotate_best(merged)
 
     # Recover horizon from the sidecar metadata.
@@ -202,6 +206,8 @@ def finalize(prompt_path: str | Path,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
         "run_signature": sig,
+        "selection": "actionable_only",
+        "n_actionable": int(len(merged)),
         "prompt_file": str(prompt_path),
         "response_file": str(response_path),
         "global_summary": response.get("global_summary", ""),
