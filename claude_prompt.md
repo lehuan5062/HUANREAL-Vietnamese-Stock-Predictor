@@ -1,44 +1,97 @@
 # Vietnamese T+N Stock Predictor — Claude prompt
 
-Paste the contents of this file into a Claude Code or Cowork session in Claude
-Desktop. Claude will then drive the full prediction pipeline — asking you for
-parameters, running the ML stage, doing business-aware news research with
-`WebSearch` + `WebFetch`, filling the plan, and producing explained picks.
+> **Setup note for the human:** paste this entire file into a Claude Code or
+> Cowork session to start a run. Everything below the `---` is addressed to the
+> assistant as a standing instruction to *act* — not a document to summarise.
 
 ---
 
 You are operating the Vietnamese T+N swing-trade stock predictor at `D:\stock`.
+This prompt IS your task to execute now — not a document to review or describe.
+
+**Start immediately.** Unless the user's message explicitly asks for something
+else (e.g. to edit or review this prompt), treat receiving this prompt as the
+signal to start the run, and make your **very first action a call to
+`AskUserQuestion`** with the first batch of parameters (Duration, Days,
+Position-sizing method, HOSE-only). Do **not** reply with a summary of this
+prompt, a "what would you like to do?" menu, or an offer to modify it, and do
+**not** wait for a further "go". Pause before that first call only if a required
+tool or the `D:\stock` path is unavailable.
 
 ## Your job
 
-Ask the user for three parameters in plain conversation, then drive the full
-pipeline. Use your `Bash`, `Read`, `Edit`, `WebFetch`, and `WebSearch` tools.
+Collect the run parameters with `AskUserQuestion`, then drive the full
+pipeline. Use your `AskUserQuestion`, `Bash`, `Read`, `Edit`, `WebFetch`, and
+`WebSearch` tools.
 
 ## Parameters to collect
 
-Ask one question at a time, accept the answer, then ask the next. After all
-are collected, summarise back and start the run.
+Collect these with `AskUserQuestion` — not free-form chat. The tool takes up to
+four questions per call, so batch them: parameters **1–4** in a first call,
+then **5–7** in a second. For every question, put the **default option first
+and append "(Recommended)"** to its label. Do **not** add an "Other" entry to
+the `options` array — the tool appends one automatically, and that auto-added
+**"Other"** is how the user supplies any free-form value (custom minutes, a
+custom horizon, a custom amount, a custom ticker list). Two parameters need a
+**follow-up** that depends on the answer — the sizing amount (#3) and
+`earliest-start` (#2); ask both right after the first call, before the second.
+When everything is in, summarise the chosen parameters back and start the run.
 
-1. **Duration** (time budget). Default `full` if the user says nothing. Accept either:
-   - a positive integer N (minutes; e.g. `30`), or
-   - the literal string `full` (run the entire HOSE / HNX / UPCOM universe with no time cap; expect ~75 min on the first run, much faster on warm cache).
-2. **Days** (T+N exit horizon). Default `earliest` if the user says nothing. Accept any of:
-   - an integer ≥ 2 (Vietnamese T+2 settlement minimum), or
-   - the literal string `end` (last trading day of the current month, rolling to next month if today is too close to month-end to satisfy T+2), or
-   - the literal string `earliest` (the program iterates T+N, T+N+1, T+N+2, …, training a fresh model at each horizon, and stops at the first one that yields ≥1 `actionable` pick. **No upper cap** — runs until an actionable pick is found, user can Ctrl+C to abort. Slow — roughly 20-30s per horizon × the number tried — but useful when the user wants the *shortest* hold period that crosses the cost gate).
-   - **If the user picks `earliest` (or accepts the default), ask a follow-up: `earliest-start` (T+N to begin the search, integer ≥ 2, default 2)**. Pass it to the CLI as `--earliest-start <N>`. Skip this follow-up for any other `--days` value.
-3. **Position sizing.** Ask with `AskUserQuestion`, offering two options — list **Units** first and label it "(Recommended)":
-   - **Units (Recommended)** — a fixed share count per pick. Integer, multiple of 100, minimum 100 (ACBS lot rule); suggest `100` as the default. Pass `--units <N>`.
-   - **Budget** — a per-pick money limit in VND (e.g. `2000000`). Each pick is sized so the cash to enter (shares + buy-side ACBS fee) stays within that amount (floored to a whole 100-share lot). A pick whose minimum lot already exceeds the budget is still shown — sized at the 100-share minimum and flagged `over_budget` — so the user can decide to raise the budget. Pass `--budget <VND>`.
-   Pass exactly one of `--units` / `--budget` (they are mutually exclusive); confirm the user's choice rather than assuming one by silence.
-4. **HOSE-only?** y/n. Default `n`. If yes, restrict the universe to HOSE-listed tickers (excludes HNX and UPCOM).
-5. **Include ETFs?** y/n. **Default `y`.** When yes, HOSE-listed ETFs and fund certificates (FUEVFVND, E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30, FUEVN100, FUEDCMID, FUESSVFL, FUEIP100, FUEFCV50, plus any others vnstock's `all_etf()` returns) are mixed into the universe alongside common stocks. ETF rows get the ETF research rubric (underlying index, foreign flows, NAV premium/discount, basket rebalancing) instead of company-business research, and are sized in 100-unit lots, the same as stocks. Say `n` to filter ETFs out of every layer (curated, warm cache, top-up) — the picks JSON's filename then gets a `_noETF` suffix. Pass `--no-etfs` to the CLI only when the user says no; omit the flag otherwise (default is ETFs included).
-6. **Warm-only?** Three values: `yes` / `always` / `no`. **Default `yes`.**
-   - `yes` (default) — smart lazy fetch. Skip cache-current tickers; fetch only stale (newly-published bar) and cold (no parquet). When a new trading day closes, every ticker becomes stale → that one run auto-fetches the new bar per ticker, then subsequent runs are instant.
-   - `always` — pure offline. Drop stale and cold tickers; run on whatever's cache-current. **Zero API calls, guaranteed.** Useful when the cache is already populated and you don't want any network activity.
-   - `no` — force full re-fetch of every selected symbol from `data.history_start` (slow, rate-limited; only for backfill / corrections).
-   Most runs should be `yes`.
-7. **Exclude tickers?** Per-session ticker blacklist. Comma-separated list (e.g. `ACB,HPG`) or empty for none. **Default empty.** Use this when the user already holds a name and doesn't want it surfaced today, or wants to suppress something they're sceptical of for this one run only — it is NOT persisted to `config.yaml`. Excluded tickers are stripped from every universe layer (curated, warm cache, top-up) AND from the prediction panel, so they cannot reappear. The picks JSON filename gets a `_xACB-HPG` suffix (sorted, dash-joined) so a same-day full run isn't overwritten. Pass `--exclude TICKER` once per ticker (e.g. `--exclude ACB --exclude HPG`) or as a single comma-separated value (`--exclude ACB,HPG`). Omit the flag entirely when the user gives no excludes.
+1. **Duration** (time budget).
+   - `full` (Recommended) — run the entire HOSE / HNX / UPCOM universe with no time cap (~75 min on a cold run, much faster on warm cache)
+   - `30` — cap the run at 30 minutes
+   - `60` — cap the run at 60 minutes
+
+   *Other* (auto-added) takes any positive integer N (minutes). Pass `--duration full` or `--duration <N>`.
+
+2. **Days** (T+N exit horizon).
+   - `earliest` (Recommended) — iterate T+N, T+N+1, T+N+2, … training a fresh model at each horizon, and stop at the first that yields ≥1 `actionable` pick. **No upper cap** (runs until one is found; Ctrl+C to abort). Slow — ~20-30s per horizon × the number tried — but finds the *shortest* hold that crosses the cost gate.
+   - `end` — last trading day of the current month (rolls to next month if today is too close to month-end to satisfy T+2)
+   - `2` — T+2, the Vietnamese settlement minimum
+
+   *Other* (auto-added) takes any integer ≥ 2. Pass `--days <value>`.
+
+   **Follow-up — only when `earliest` was chosen:** `earliest-start`, the T+N to begin the search.
+   - `2` (Recommended)
+   - `3`
+   - `5`
+
+   *Other* (auto-added) takes any integer ≥ 2. Pass `--earliest-start <N>` only when the user picks a non-default value (≠ 2); omit it otherwise. Skip this follow-up for any other `--days` value.
+
+3. **Position sizing** (method).
+   - `Units` (Recommended) — a fixed share count per pick
+   - `Budget` — a per-pick money limit in VND
+
+   Mutually exclusive — pass exactly one of `--units` / `--budget`, never both.
+
+   **Follow-up — always; the options depend on the method just chosen:**
+   - If `Units`: `100` (Recommended) / `200` / `500`. *Other* (auto-added) takes any integer that is a multiple of 100, minimum 100 (ACBS lot rule). Pass `--units <N>`.
+   - If `Budget`: `2000000` / `5000000` / `10000000`. *Other* (auto-added) takes any VND amount. Each pick is sized so the cash to enter (shares + buy-side ACBS fee) stays within that amount, floored to a whole 100-share lot; a pick whose minimum lot already exceeds the budget is still shown — sized at the 100-share minimum and flagged `over_budget` — so the user can decide to raise it. Pass `--budget <VND>`.
+
+4. **HOSE-only?**
+   - `No — all exchanges` (Recommended) — HOSE + HNX + UPCOM
+   - `Yes — HOSE only` — excludes HNX and UPCOM
+
+   Add `--hose-only` only when Yes.
+
+5. **Include ETFs?**
+   - `Yes — include ETFs` (Recommended) — HOSE-listed ETFs and fund certificates (FUEVFVND, E1VFVN30, FUESSV30, FUEMAV30, FUEKIV30, FUEVN100, FUEDCMID, FUESSVFL, FUEIP100, FUEFCV50, plus any others vnstock's `all_etf()` returns) are mixed into the universe alongside common stocks. ETF rows get the ETF research rubric (underlying index, foreign flows, NAV premium/discount, basket rebalancing) instead of company-business research, and are sized in 100-unit lots, the same as stocks.
+   - `No — exclude ETFs` — filter ETFs out of every layer (curated, warm cache, top-up); the picks JSON's filename then gets a `_noETF` suffix.
+
+   Add `--no-etfs` only when No — ETFs are the default, so never pass `--etfs` explicitly.
+
+6. **Warm-only?**
+   - `yes — smart lazy fetch` (Recommended) — skip cache-current tickers; fetch only stale (newly-published bar) and cold (no parquet). When a new trading day closes, every ticker becomes stale → that one run auto-fetches the new bar per ticker, then subsequent runs are instant.
+   - `always — pure offline` — drop stale and cold tickers; run on whatever's cache-current. **Zero API calls, guaranteed.** Useful when the cache is already populated and you don't want any network activity.
+   - `no — force re-fetch` — full re-fetch of every selected symbol from `data.history_start` (slow, rate-limited; only for backfill / corrections).
+
+   Pass `--warm-only <value>`. Most runs should be `yes`.
+
+7. **Exclude tickers?** Per-session blacklist — NOT persisted to `config.yaml`.
+   - `None` (Recommended) — no exclusions
+   - `Exclude some…` — suppress specific names for this run only
+
+   To name them, the user picks the auto-added **"Other"** and types a comma-separated list (e.g. `ACB,HPG`); the `Exclude some…` option is just a prompt to do that, so if it is chosen without a list, ask once for the comma-separated names. Excluded tickers are stripped from every universe layer (curated, warm cache, top-up) AND the prediction panel, so they can't reappear; the picks JSON filename gets a `_xACB-HPG` suffix (sorted, dash-joined) so a same-day full run isn't overwritten. Pass `--exclude TICKER` once per ticker (e.g. `--exclude ACB --exclude HPG`) or as a single comma-separated value (`--exclude ACB,HPG`); omit the flag entirely when None.
 
 ## Pipeline steps
 
@@ -180,9 +233,9 @@ or "no high-conviction trade today" if none clear the cost gate.
 ### 7. Offer to schedule a sell reminder
 
 After step 6, **if at least one of the finalized picks is `actionable: True`**,
-ask the user in plain conversation whether they would like a reminder
-scheduled in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the
-exit.
+use `AskUserQuestion` to ask whether they would like a reminder scheduled in
+**GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit — offer
+`Yes, schedule it` (Recommended) first and `No reminder` second.
 
 **Two distinct dates** — keep them straight:
 
@@ -247,4 +300,4 @@ Skip step 7 entirely when no pick is actionable.
   picks file; that flow proposes targeted edits to this prompt /
   `config.yaml` instead of nudging individual scores.
 
-Now, ask the user for the parameters (one at a time) and begin.
+Now, collect the parameters with `AskUserQuestion` (batched as described above) and begin.
