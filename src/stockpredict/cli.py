@@ -383,10 +383,6 @@ def _print_budget_note(picks, budget: int | None = None) -> None:
 
 @cli.command("predict")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
-@click.option("--top", type=int, default=None,
-              help="Optional ceiling on how many actionable picks to list for "
-                   "this run; overrides report.max_picks from config. "
-                   "Omit to use the config default.")
 @click.option("--days", type=int, default=2,
               help="T+N exit window (min 2). Use the SAME days as the last train run.")
 @click.option("--units", type=int, default=None,
@@ -398,7 +394,7 @@ def _print_budget_note(picks, budget: int | None = None) -> None:
                    "too pricey for one 100-share lot is still shown, flagged "
                    "over_budget. Mutually exclusive with --units.")
 @click.option("--date", "on", default=None, help="YYYY-MM-DD; defaults to most recent cache date")
-def predict_cmd(mode: str, top: int, days: int, units: int | None,
+def predict_cmd(mode: str, days: int, units: int | None,
                 budget: int | None, on: str | None) -> None:
     if days < 2:
         click.echo("ERROR: --days must be >= 2.", err=True)
@@ -406,14 +402,14 @@ def predict_cmd(mode: str, top: int, days: int, units: int | None,
     units, budget = _resolve_sizing(units, budget)
     if mode == "base":
         from .modes import base
-        picks, out = base.run(max_picks=top, on=on, units=units, budget_vnd=budget,
+        picks, out = base.run(on=on, units=units, budget_vnd=budget,
                               exit_offset_days=days)
         click.echo(_format_picks(picks))
         _print_budget_note(picks, budget)
         click.echo(f"\nsaved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(max_picks=top, on=on, units=units,
+        result, out, tag = claude.run(on=on, units=units,
                                       budget_vnd=budget, exit_offset_days=days)
         click.echo(_format_picks(result))
         _print_budget_note(result, budget)
@@ -430,7 +426,7 @@ def predict_cmd(mode: str, top: int, days: int, units: int | None,
                                  mode_label="claude")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(max_picks=top, on=on, units=units,
+        result, out, tag = gemini.run(on=on, units=units,
                                       budget_vnd=budget, exit_offset_days=days)
         click.echo(_format_picks(result))
         _print_budget_note(result, budget)
@@ -444,13 +440,9 @@ def predict_cmd(mode: str, top: int, days: int, units: int | None,
 
 @cli.command("claude-finalize")
 @click.argument("plan_path", type=click.Path(exists=True))
-@click.option("--top", type=int, default=None,
-              help="Optional ceiling on how many actionable picks to list for "
-                   "this run; overrides report.max_picks from config. "
-                   "Omit to use the config default.")
-def claude_finalize_cmd(plan_path: str, top: int) -> None:
+def claude_finalize_cmd(plan_path: str) -> None:
     from .modes import claude
-    picks, out = claude.finalize(plan_path, max_picks=top)
+    picks, out = claude.finalize(plan_path)
     click.echo(_format_picks(picks))
     _print_budget_note(picks)
     if _has_explanations(picks):
@@ -474,15 +466,11 @@ def claude_finalize_cmd(plan_path: str, top: int) -> None:
 @click.option("--response", "response_path", type=click.Path(exists=True), default=None,
               help="Path to the JSON response from Gemini Chat. "
                    "Defaults to reports/gemini_response_<date>.json next to the prompt.")
-@click.option("--top", type=int, default=None,
-              help="Optional ceiling on how many actionable picks to list for "
-                   "this run; overrides report.max_picks from config. "
-                   "Omit to use the config default.")
-def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -> None:
+def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
     """Merge Gemini Chat's JSON response with the saved candidates and produce
-    the final explained top-K picks. Save Gemini's response as JSON first."""
+    the final explained picks. Save Gemini's response as JSON first."""
     from .modes import gemini
-    picks, out = gemini.finalize(prompt_path, response_path=response_path, max_picks=top)
+    picks, out = gemini.finalize(prompt_path, response_path=response_path)
     click.echo(_format_picks(picks))
     _print_budget_note(picks)
     if _has_explanations(picks):
@@ -517,10 +505,6 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
               help="Only used when --days earliest. T+N at which the search "
                    "begins (min 2 — Vietnamese T+2 settlement floor). "
                    "Ignored for any other --days value.")
-@click.option("--top", type=int, default=None,
-              help="Optional ceiling on how many actionable picks to list for "
-                   "this run; overrides report.max_picks from config. "
-                   "Omit to use the config default.")
 @click.option("--units", type=int, default=None,
               help="Position size in shares. Min 100, multiple of 100 (ACBS "
                    "rule); default 100. Mutually exclusive with --budget.")
@@ -564,7 +548,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None, top: int) -
               help="Use the existing models/latest.pkl instead of retraining.")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
-def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
+def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
             units: int | None, budget: int | None, hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
             skip_train: bool, workers: int) -> None:
@@ -874,7 +858,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
                 if not panel_n_low.empty:
                     low_m = train_quantile(panel_n_low)
                     save_latest_low(low_m)
-            picks_n = rank_today(actionable_only=True, max_picks=top, units=units,
+            picks_n = rank_today(actionable_only=True, units=units,
                                  budget_vnd=budget, exit_offset_days=n,
                                  symbols=pred_syms)
             last_picks = picks_n
@@ -927,7 +911,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
         from .modes import base
-        picks, out = base.run(max_picks=top, units=units, budget_vnd=budget,
+        picks, out = base.run(units=units, budget_vnd=budget,
                               exit_offset_days=days,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
@@ -941,7 +925,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
         click.echo(f"\nsaved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(max_picks=top, units=units,
+        result, out, tag = claude.run(units=units,
                                        budget_vnd=budget,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,
@@ -968,7 +952,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int, top: int,
                                  mode_label="claude")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(max_picks=top, units=units,
+        result, out, tag = gemini.run(units=units,
                                        budget_vnd=budget,
                                        exit_offset_days=days, symbols=pred_syms,
                                        hose_only=hose_only,

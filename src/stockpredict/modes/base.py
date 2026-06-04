@@ -13,7 +13,7 @@ from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, record, run_signature
 
 
-def run(max_picks: int | None = None, on: str | None = None,
+def run(on: str | None = None,
         units: int | None = None,
         budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
@@ -21,7 +21,7 @@ def run(max_picks: int | None = None, on: str | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
         exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
-    picks = rank_today(actionable_only=True, max_picks=max_picks, on=on,
+    picks = rank_today(actionable_only=True, on=on,
                        units=units, budget_vnd=budget_vnd,
                        exit_offset_days=exit_offset_days, symbols=symbols)
     picks = annotate_best(picks)
@@ -32,8 +32,6 @@ def run(max_picks: int | None = None, on: str | None = None,
     today = today_ts.strftime("%Y-%m-%d")
 
     cfg = load_config()
-    eff_max_picks = max_picks if max_picks is not None else int(
-        cfg.get("report", {}).get("max_picks", 20))
     eff_units = None if budget_vnd is not None else (
         int(units) if units is not None
         else int(cfg.broker.get("default_position_units", 100))
@@ -58,7 +56,6 @@ def run(max_picks: int | None = None, on: str | None = None,
         "exclude": excl_list,
         "run_signature": sig,
         "selection": "actionable_only",
-        "max_picks": eff_max_picks,
         "n_actionable": int(len(picks)),
         "picks": json.loads(picks.to_json(orient="records", date_format="iso")),
     }

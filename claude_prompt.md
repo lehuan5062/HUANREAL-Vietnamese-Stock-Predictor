@@ -107,7 +107,7 @@ For question 3, pass exactly one of `--units <UNITS>` or `--budget <VND>` (mutua
 Working directory: `D:\stock`. The CLI writes a markdown plan at
 `D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
 sidecar. The console output also lists the actionable candidates (every
-ticker that cleared the rr/net gate, up to `report.max_picks`) with
+ticker that cleared the rr/net gate) with
 entry/target/stop/fees at the chosen sizing (a fixed share count, or each pick sized to your per-pick budget).
 
 If the CLI prints `[claude] DROP override:` or any error, surface it to the

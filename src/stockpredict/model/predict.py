@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ..config import load_config
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
 from ..filters import liquidity_mask
@@ -59,7 +58,6 @@ def rank_today(model: TrainedModel | None = None,
                on: str | pd.Timestamp | None = None,
                top_k: int = 5,
                actionable_only: bool = False,
-               max_picks: int | None = None,
                panel: pd.DataFrame | None = None,
                units: int | None = None,
                budget_vnd: int | None = None,
@@ -73,12 +71,11 @@ def rank_today(model: TrainedModel | None = None,
 
     * ``actionable_only=False`` (legacy) — cut to the ``top_k`` highest
       ``pred_mean`` rows first, then price just those.
-    * ``actionable_only=True`` — price the WHOLE scored universe, keep only the
-      rows that clear the ``actionable`` gate (``net_reward > 0 & rr >= min_rr``),
-      and cap at ``max_picks`` (falling back to ``config.report.max_picks``).
-      The predicted return still drives the target price (hence the gate) and
-      the ``pred_mean``-descending sort order, but a ticker is no longer hidden
-      just because it ranks below ``top_k`` by predicted return.
+    * ``actionable_only=True`` — price the WHOLE scored universe and return
+      every row that clears the ``actionable`` gate (``net_reward > 0 &
+      rr >= min_rr``), sorted by ``pred_mean`` descending. There is no cap; a
+      ticker is no longer hidden just because it ranks below ``top_k`` by
+      predicted return.
     """
     if model is None:
         model = TrainedModel.load(latest_model_path())
@@ -128,16 +125,11 @@ def rank_today(model: TrainedModel | None = None,
     ordered = snap.sort_values("pred_mean", ascending=False)
     if actionable_only:
         # Price the WHOLE liquid/tradable universe (both heads already scored it
-        # above, so this only adds vectorized pricing math), then keep just the
-        # rows that clear the actionable gate and cap at the configured ceiling.
-        # This surfaces every actionable ticker — not only ones that happen to
-        # rank in the top_k by pred_mean — while the predicted return still
-        # drives the target price (hence the gate) and the sort order.
+        # above, so this only adds vectorized pricing math), then return every
+        # row that clears the actionable gate — no cap. The predicted return
+        # drives the target price (hence the gate) and the pred_mean sort order.
         out = add_price_suggestions(ordered, units=units, budget_vnd=budget_vnd)
         out = out[out["actionable"].fillna(False).astype(bool)]
-        cap = max_picks if max_picks is not None else int(
-            load_config().get("report", {}).get("max_picks", 20))
-        out = out.head(cap)
     else:
         # Legacy path: cut to the top_k by pred_mean first, then price just those.
         out = ordered.head(top_k)

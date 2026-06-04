@@ -1,10 +1,9 @@
 """Verify the actionable-only scan in rank_today (and base.run's empty report).
 
-rank_today(actionable_only=True) must price the WHOLE scored universe, keep
-only rows that clear the `actionable` gate, sort by pred_mean desc, and cap at
-`max_picks` (falling back to config.report.max_picks). The legacy `top_k` path
-must be untouched. base.run must write a valid (empty) report when nothing is
-actionable.
+rank_today(actionable_only=True) must price the WHOLE scored universe and
+return every row that clears the `actionable` gate, sorted by pred_mean desc,
+with no cap. The legacy `top_k` path must be untouched. base.run must write a
+valid (empty) report when nothing is actionable.
 """
 from __future__ import annotations
 
@@ -14,7 +13,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from stockpredict.config import load_config
 from stockpredict.model import predict as predict_mod
 
 
@@ -63,21 +61,6 @@ def _wire(monkeypatch, panel, price_stub):
     monkeypatch.setattr(predict_mod, "add_price_suggestions", price_stub)
 
 
-def test_actionable_only_filters_and_caps(monkeypatch):
-    """Only actionable rows survive, capped at max_picks, sorted by pred_mean."""
-    panel = _fake_panel(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"])
-    _wire(monkeypatch, panel, _price_stub({"AAA", "CCC", "EEE"}))
-
-    out = predict_mod.rank_today(model=_FakeMeanModel(), actionable_only=True,
-                                 max_picks=2, low_model=None)
-
-    assert len(out) == 2
-    assert out["actionable"].all()
-    assert set(out["symbol"].astype(str)).issubset({"AAA", "CCC", "EEE"})
-    # Highest-conviction actionable picks first.
-    assert out["pred_mean"].is_monotonic_decreasing
-
-
 def test_actionable_only_empty_when_none_actionable(monkeypatch):
     """Zero actionable rows -> empty frame, no crash (the typical T+2 case)."""
     panel = _fake_panel(["AAA", "BBB", "CCC"])
@@ -89,16 +72,16 @@ def test_actionable_only_empty_when_none_actionable(monkeypatch):
     assert "symbol" in out.columns  # schema preserved
 
 
-def test_actionable_only_falls_back_to_config_ceiling(monkeypatch):
-    """max_picks=None -> cap comes from config.report.max_picks."""
+def test_actionable_only_lists_all_actionable(monkeypatch):
+    """actionable_only lists EVERY actionable row (no cap), sorted by pred_mean."""
     panel = _fake_panel(["AAA", "BBB", "CCC", "DDD", "EEE"])
-    _wire(monkeypatch, panel, _price_stub(None))  # all five actionable
-    monkeypatch.setattr(predict_mod, "load_config",
-                        lambda: {"report": {"max_picks": 3}})
+    _wire(monkeypatch, panel, _price_stub({"AAA", "CCC", "EEE"}))  # 3 of 5 actionable
 
     out = predict_mod.rank_today(model=_FakeMeanModel(), actionable_only=True,
                                  low_model=None)
-    assert len(out) == 3
+    assert len(out) == 3  # every actionable row, nothing capped
+    assert set(out["symbol"].astype(str)) == {"AAA", "CCC", "EEE"}
+    assert out["actionable"].all()
     assert out["pred_mean"].is_monotonic_decreasing
 
 
@@ -128,5 +111,3 @@ def test_base_run_writes_empty_report(monkeypatch, tmp_path):
     assert payload["selection"] == "actionable_only"
     assert payload["n_actionable"] == 0
     assert payload["picks"] == []
-    expected_cap = int(load_config().get("report", {}).get("max_picks", 20))
-    assert payload["max_picks"] == expected_cap
