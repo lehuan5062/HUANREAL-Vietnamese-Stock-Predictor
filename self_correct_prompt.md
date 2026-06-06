@@ -378,14 +378,21 @@ filename identifies the report and the ledger holds the data. Structure:
      news_score is consistently mis-weighted relative to ML.
    - `pricing.stop_atr_mult` (current 1.5), `pricing.min_rr_ratio`
      (current 0.8) — for entry/exit rule mismatches.
-   - **`pricing.entry_low_alpha` (current 0.5) — raise toward 0.75 if
+   - **`pricing.entry_low_alpha` (currently 0.25) — sets the quantile
+     level of the per-ticker rolling empirical low head (since
+     2026-06-05; see memory `project_low_head_negative_skill.md` — do
+     NOT reintroduce an ML low head). Raise toward 0.75 if
      fill_rate is consistently below alpha AND `fill_margin` on
      unfilled rows is consistently small-negative (we're too bearish
      on dips, but only just); lower toward 0.25 if `fill_margin` on
      filled rows is consistently large-positive (we're filling with
      lots of slack — money on the table). Both signals must anchor on
      `entry_limit_price` vs `t0_low`, never on the close. This is the
-     primary knob for stage-1 findings.**
+     primary knob for stage-1 findings. First rule out a one-sided
+     melt-up regime (low fills market-wide ≠ miscalibration). The
+     trailing window auto-sizes with alpha via
+     `pricing.entry_low_target_tail_obs` (default 15); an alpha change
+     needs a `train` to take effect.**
 3. Source files (e.g. `src/stockpredict/news/claude_runner.py`,
    `src/stockpredict/tracking.py`, `src/stockpredict/model/train.py`)
    — **only** when there's a concrete structural defect (parser bug,

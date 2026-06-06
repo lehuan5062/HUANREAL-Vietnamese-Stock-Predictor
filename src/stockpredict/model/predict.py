@@ -17,7 +17,7 @@ from ..dataset import FEATURE_COLS, build_panel
 from ..filters import liquidity_mask
 from ..pricing import add_price_suggestions
 from .train import (
-    LowQuantileModel,
+    RollingEmpiricalQuantileModel,
     TrainedModel,
     latest_low_model_path,
     latest_model_path,
@@ -38,16 +38,19 @@ def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) ->
     return last
 
 
-def _try_load_low_model() -> LowQuantileModel | None:
-    """Return the cached low-quantile model, or None if it hasn't been
-    trained yet. Missing pickle is a soft fallback — the caller produces
-    candidates without a ``pred_low`` column and pricing reverts to the
-    close-anchored entry."""
+def _try_load_low_model() -> RollingEmpiricalQuantileModel | None:
+    """Return the cached low head, or None if it hasn't been trained yet.
+    Missing pickle is a soft fallback — the caller produces candidates without
+    a ``pred_low`` column and pricing reverts to the close-anchored entry.
+
+    A stale pickle from the previous LightGBM ``LowQuantileModel`` class no
+    longer unpickles (the class was removed); that raises here and is treated
+    as missing, so entries fall back to close until the user retrains."""
     p = latest_low_model_path()
     if not p.exists():
         return None
     try:
-        return LowQuantileModel.load(p)
+        return RollingEmpiricalQuantileModel.load(p)
     except Exception:
         # Corrupt pickle (interrupted save, schema mismatch) — treat as
         # missing rather than crashing the whole rank pass.
@@ -63,7 +66,7 @@ def rank_today(model: TrainedModel | None = None,
                budget_vnd: int | None = None,
                exit_offset_days: int | None = None,
                symbols: list[str] | None = None,
-               low_model: LowQuantileModel | None = None) -> pd.DataFrame:
+               low_model: RollingEmpiricalQuantileModel | None = None) -> pd.DataFrame:
     """Compute predicted return for every eligible symbol on the given date,
     apply the liquidity filter, and return the candidate picks as a DataFrame.
 
@@ -116,10 +119,12 @@ def rank_today(model: TrainedModel | None = None,
     preds = model.predict(snap)
     snap = snap.assign(**preds)
     if low_model is not None:
-        # ``pred_low`` is the predicted ``low[T+1]/close[T] - 1`` at the
-        # configured quantile alpha. add_price_suggestions consumes this
-        # to derive entry_vnd; if absent, it falls back to entry = close.
-        snap["pred_low"] = low_model.predict(snap)
+        # ``pred_low`` is the per-ticker empirical ``low[T+1]/close[T] - 1`` at
+        # the configured quantile alpha. add_price_suggestions consumes this to
+        # derive entry_vnd; if absent, it falls back to entry = close. Pass the
+        # in-memory panel as history so the quantile is computed from the data
+        # already loaded (no per-symbol parquet re-reads).
+        snap["pred_low"] = low_model.predict(snap, history=panel)
         snap["pred_low_alpha"] = float(low_model.alpha)
     snap["rank"] = snap["pred_mean"].rank(ascending=False, method="dense").astype(int)
     ordered = snap.sort_values("pred_mean", ascending=False)

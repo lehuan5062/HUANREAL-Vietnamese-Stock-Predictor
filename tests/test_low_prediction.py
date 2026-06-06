@@ -21,6 +21,10 @@ from stockpredict.model.target import (
     attach_target,
     next_day_low_return,
 )
+from stockpredict.model.train import (
+    RollingEmpiricalQuantileModel,
+    derive_lookback,
+)
 from stockpredict.pricing import add_price_suggestions
 
 
@@ -69,6 +73,78 @@ def test_attach_target_skips_target_low_without_low_column():
     out = attach_target(df, exit_offset_days=1)
     assert "target" in out.columns
     assert "target_low" not in out.columns
+
+
+# ---------------------------------------------------------------------------
+# 1b. RollingEmpiricalQuantileModel — per-ticker empirical low head
+# ---------------------------------------------------------------------------
+
+def _emp_model(alpha=0.25, lookback=60, min_obs=5, global_quantile=-0.03):
+    return RollingEmpiricalQuantileModel(
+        alpha=alpha, target_tail_obs=min_obs, lookback=lookback,
+        min_obs=min_obs, global_quantile=global_quantile,
+        train_end=pd.Timestamp("2026-01-01"), train_rows=1000,
+    )
+
+
+def test_derive_lookback_scales_with_alpha():
+    """Window auto-sizes so the tail keeps ~target_tail_obs observations,
+    bounded by [30, 120]."""
+    assert derive_lookback(0.25, 15) == 60     # 15/0.25 = 60
+    assert derive_lookback(0.50, 15) == 30     # 15/0.50 = 30 (floor)
+    assert derive_lookback(0.10, 15) == 120    # 15/0.10 = 150 → cap 120
+    assert derive_lookback(0.90, 15) == 30     # tiny → floor
+
+
+def test_empirical_predict_uses_per_ticker_history():
+    """pred_low is the alpha-quantile of the ticker's OWN recent target_low."""
+    idx = pd.date_range("2026-01-01", periods=40, freq="B")
+    # 39 known dips of -2%, then the as-of row.
+    tl = [-0.02] * 39 + [np.nan]
+    history = pd.DataFrame({"symbol": "AAA", "target_low": tl}, index=idx)
+    history.index.name = "date"
+    snap = history.iloc[[-1]].copy()  # one row, as-of = last date
+    model = _emp_model(alpha=0.25, lookback=60, min_obs=5)
+    out = model.predict(snap, history=history)
+    assert np.isclose(out.iloc[0], -0.02)
+
+
+def test_empirical_predict_runner_quotes_near_zero():
+    """A name that has not been dipping (all positive next-low returns, i.e. a
+    gap-up runner) yields a non-negative quantile → pricing will clip to close."""
+    idx = pd.date_range("2026-01-01", periods=40, freq="B")
+    tl = [0.05] * 39 + [np.nan]   # never dipped — opened up every day
+    history = pd.DataFrame({"symbol": "DST", "target_low": tl}, index=idx)
+    history.index.name = "date"
+    snap = history.iloc[[-1]].copy()
+    out = _emp_model(min_obs=5).predict(snap, history=history)
+    assert out.iloc[0] >= 0.0   # clipped to close downstream in pricing
+
+
+def test_empirical_predict_falls_back_to_global_when_thin():
+    """Too few observations → pooled global_quantile, not a per-ticker guess."""
+    idx = pd.date_range("2026-01-01", periods=4, freq="B")
+    tl = [-0.02, -0.02, -0.02, np.nan]   # only 3 usable obs < min_obs=5
+    history = pd.DataFrame({"symbol": "NEW", "target_low": tl}, index=idx)
+    history.index.name = "date"
+    snap = history.iloc[[-1]].copy()
+    out = _emp_model(min_obs=5, global_quantile=-0.031).predict(snap, history=history)
+    assert np.isclose(out.iloc[0], -0.031)
+
+
+def test_empirical_predict_is_lookahead_safe():
+    """The as-of row's own target_low (which uses low[T+1]) must never enter the
+    window: only observations strictly before the as-of date are used."""
+    idx = pd.date_range("2026-01-01", periods=10, freq="B")
+    # Early history dips -1%; the as-of-day's own (future) value is a huge -50%
+    # that, if leaked, would dominate the quantile.
+    tl = [-0.01] * 9 + [-0.50]
+    history = pd.DataFrame({"symbol": "AAA", "target_low": tl}, index=idx)
+    history.index.name = "date"
+    snap = history.iloc[[-1]].copy()    # as-of = last date, value -0.50
+    out = _emp_model(alpha=0.25, lookback=60, min_obs=3).predict(snap, history=history)
+    # Window excludes the -0.50 leak → quantile sits at -0.01, not near -0.50.
+    assert np.isclose(out.iloc[0], -0.01)
 
 
 # ---------------------------------------------------------------------------

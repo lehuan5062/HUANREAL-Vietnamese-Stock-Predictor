@@ -304,8 +304,8 @@ def train_cmd(start: str | None, end: str | None, skip_low: bool) -> None:
     click.echo(f"  low head: {len(panel_low):,} rows with target_low")
     low_model = train_quantile(panel_low)
     low_path = save_latest_low(low_model)
-    click.echo(f"  trained {len(low_model.boosters)} quantile boosters "
-               f"(alpha={low_model.alpha:.2f}); saved -> {low_path}")
+    click.echo(f"  built empirical low head (alpha={low_model.alpha:.2f}, "
+               f"lookback={low_model.lookback}d); saved -> {low_path}")
 
 
 # ---------------------------- backtest -------------------------------------
@@ -1092,12 +1092,13 @@ def status_cmd() -> None:
     lm = models_dir() / "low_latest.pkl"
     if lm.exists():
         try:
-            from .model.train import LowQuantileModel
-            low = LowQuantileModel.load(lm)
+            from .model.train import RollingEmpiricalQuantileModel
+            low = RollingEmpiricalQuantileModel.load(lm)
             click.echo(f"latest low model:  present  ({lm})  alpha={low.alpha:.2f}  "
-                       f"trained_on={low.train_rows:,} rows")
+                       f"lookback={low.lookback}d  trained_on={low.train_rows:,} rows")
         except Exception as e:
-            click.echo(f"latest low model:  present but unreadable ({e})")
+            click.echo(f"latest low model:  present but unreadable ({e}) "
+                       f"— retrain to rebuild (entries fall back to close meanwhile)")
     else:
         click.echo(f"latest low model:  missing  ({lm}) "
                    f"— predictions fall back to entry = close")
