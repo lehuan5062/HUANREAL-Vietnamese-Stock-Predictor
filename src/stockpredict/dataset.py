@@ -64,6 +64,14 @@ def build_panel(symbols: list[str] | None = None,
     if not frames:
         return pd.DataFrame()
     panel = pd.concat(frames)
+    # Refine the liquidity gate column to be calendar-aware: count active days
+    # over the trailing 20 *market* trading days (treating days the symbol
+    # didn't trade as zero volume), now that the panel reveals the full set of
+    # market dates. Overwrites the per-symbol row-based fallback from add_all.
+    if {"close", "volume", "symbol"}.issubset(panel.columns):
+        min_adv = load_config().universe["liquidity_filter"]["min_adv_vnd"]
+        panel["adv_active_days_20"] = microstructure.active_days_calendar(
+            panel, min_adv, 20)
     panel = panel.dropna(subset=FEATURE_COLS)
     if require_target:
         panel = panel.dropna(subset=["target"])

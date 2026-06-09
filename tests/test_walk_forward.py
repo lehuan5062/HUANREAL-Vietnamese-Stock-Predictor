@@ -30,6 +30,8 @@ def _make_panel(seed: int = 7, n_days: int = 1200) -> pd.DataFrame:
         feats["rsi_14"] = rsi_vals
         # Plausible liquidity so the filter doesn't reject the row
         feats["adv_vnd_20"] = np.full(n_days, 5_000_000_000.0)
+        # Gate column: all 20 trailing days "active" (>= min_adv_vnd).
+        feats["adv_active_days_20"] = np.full(n_days, 20.0)
         target = signal_strength * (50 - rsi_vals) / 50.0 * 0.02 + rng.normal(0, 0.005, n_days)
         df = pd.DataFrame(feats, index=dates)
         df["target"] = target

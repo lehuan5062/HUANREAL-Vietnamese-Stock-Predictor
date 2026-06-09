@@ -18,7 +18,12 @@ universe:
     # vnstock returns prices in thousand-VND units, so all VND thresholds below
     # are also in thousand-VND. close >= 5 means 5,000 VND, adv >= 1_000_000
     # thousand-VND-shares means ~1B VND of daily traded value (~$40k).
-    min_adv_vnd: 1_000_000       # 20-day average daily value, in thousand-VND-shares
+    min_adv_vnd: 1_000_000       # per-day "active day" bar, in thousand-VND-shares (~1B VND)
+    # Require the stock to clear min_adv_vnd on at least this many of the last
+    # 20 trading days. Counting active days (instead of averaging) stops a
+    # single block-trade spike from sneaking a mostly-dead stock through — the
+    # average is fooled by one huge day, the count is not.
+    min_adv_active_days: 15
     min_close_vnd: 5             # avoid penny stocks (5,000 VND)
     min_history_days: 250
 

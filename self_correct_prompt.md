@@ -393,6 +393,12 @@ filename identifies the report and the ledger holds the data. Structure:
      trailing window auto-sizes with alpha via
      `pricing.entry_low_target_tail_obs` (default 15); an alpha change
      needs a `train` to take effect.**
+   - `universe.liquidity_filter.min_adv_active_days` (currently 15 of 20)
+     — raise if the user reports a pick was effectively untradeable (thin
+     volume / "I was the only buyer"). That's a universe-liquidity problem,
+     NOT a scoring or `entry_low_alpha` problem — don't tune alpha for it.
+     Note: this isn't ledger-observable (a thin name can still fill), so it
+     only surfaces via user-supplied extra context in Step 1.
 3. Source files (e.g. `src/stockpredict/news/claude_runner.py`,
    `src/stockpredict/tracking.py`, `src/stockpredict/model/train.py`)
    — **only** when there's a concrete structural defect (parser bug,
