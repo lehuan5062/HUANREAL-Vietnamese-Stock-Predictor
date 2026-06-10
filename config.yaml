@@ -99,6 +99,15 @@ pricing:
   # When no `models/low_latest.pkl` is present, the program falls back
   # to entry = today's close (the legacy behavior).
   entry_low_alpha: 0.25
+  # Exclude names locked limit-up: a stock that closed at the daily ceiling
+  # opens the next session with a buy queue and no sellers, so a limit-buy
+  # can't fill (you "can't buy it for days"). Per-exchange daily price-band
+  # limits (fractions); a bar is treated as a ceiling-lock when it closed at
+  # its high AND the 1-day return is within `ceiling_tol` of the band (the
+  # tolerance absorbs tick rounding, which shaves the realized ceiling gain a
+  # bit below the nominal band).
+  ceiling_limits: {HSX: 0.07, HNX: 0.10, UPCOM: 0.15}
+  ceiling_tol: 0.015
   # Target number of observations the alpha-quantile should rest on in the tail.
   # The per-ticker trailing window auto-sizes to lookback =
   # clip(ceil(target_tail_obs / alpha), 30, 120) trading days, so a deeper alpha

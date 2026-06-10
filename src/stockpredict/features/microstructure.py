@@ -78,4 +78,10 @@ def add_all(df: pd.DataFrame) -> pd.DataFrame:
     # count (active_days_calendar) once the full set of market dates is known.
     min_adv = load_config().universe["liquidity_filter"]["min_adv_vnd"]
     out["adv_active_days_20"] = active_days_above(df, min_adv, 20)
+    # Gate-support columns (not model features) for the ceiling-lock filter:
+    # the 1-day close-to-close return and whether the bar closed at its high.
+    # A bar that closed at the high with a near-limit gain is locked limit-up
+    # (no sellers) — the next session opens unbuyable.
+    out["ret_1d"] = df["close"].pct_change()
+    out["close_at_high"] = df["close"] >= df["high"]
     return out

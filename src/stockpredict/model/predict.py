@@ -14,7 +14,7 @@ import pandas as pd
 
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
-from ..filters import liquidity_mask
+from ..filters import ceiling_lock_mask, liquidity_mask
 from ..pricing import add_price_suggestions
 from .train import (
     RollingEmpiricalQuantileModel,
@@ -113,6 +113,12 @@ def rank_today(model: TrainedModel | None = None,
 
     mask = liquidity_mask(snap)
     snap = snap[mask].copy()
+    if snap.empty:
+        return snap
+
+    # Drop names locked limit-up: they closed at the daily ceiling, so the buy
+    # session opens with a queue and no sellers and a limit-buy can't fill.
+    snap = snap[ceiling_lock_mask(snap)].copy()
     if snap.empty:
         return snap
 
