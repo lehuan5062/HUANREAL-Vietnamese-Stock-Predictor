@@ -97,6 +97,17 @@ Classify each row:
   - Buy day has closed (`now_vn > 15:00` on `as_of`) → **Stage-1 ready
     after ingest + evaluate-fills**. Today's OHLC bars likely not yet
     in `cache/ohlcv/<sym>.parquet`; offer to refresh data and stamp.
+    **Never run a bare `update-data`** — that re-fetches the entire
+    universe (minutes of API calls for data this diagnosis never
+    reads). `evaluate-fills` already refreshes exactly the un-stamped
+    symbols itself; run it directly. If a straggler persists after
+    that, refresh just the picked symbols:
+
+    ```
+    D:\stock\.venv\Scripts\python.exe -m stockpredict.cli update-data -s <SYM1> -s <SYM2>
+    ```
+
+    (symbols from the report's `picks[].symbol`).
   - Buy day hasn't closed yet → not yet; ask the user to come back
     after 15:00 Asia/Ho_Chi_Minh on the buy day.
 
@@ -463,6 +474,10 @@ treating any change as confirmed.
 
 ## What NOT to do
 
+- Don't run a full-universe `update-data` (no `-s`). Self-correction
+  only ever needs bars for the report's picked symbols, and
+  `evaluate-fills` fetches those itself. Always pass `-s <symbol>` if
+  a manual refresh is needed at all.
 - Don't ask the user to blindly pick from a list of all reports. Run
   the eligibility scan (Step 1) first, classify each recent report by
   stage readiness, and default-suggest the right one. The user should
