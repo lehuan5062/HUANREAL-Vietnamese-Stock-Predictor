@@ -1,9 +1,13 @@
-"""Pick which N tickers to include in a time-bounded run.
+"""Order the universe so the most useful tickers come first.
+
+Runs always cover the entire universe, but the fetch order still matters:
+if a cold full-history fetch is interrupted (rate limit, Ctrl+C), the
+priority order ensures the liquid names land on disk first.
 
 Priority order:
   1. Curated liquid list (VN30 + HNX30 + UPCOM bluechips). These are the
      most-likely-to-pass-the-liquidity-filter names; we fetch them first so
-     short-duration runs still return useful picks.
+     an interrupted run still returns useful picks.
   2. Currently-cached symbols (warm cache -> cheap incremental updates).
   3. Top-up from the full vnstock universe in alphabetical order.
 

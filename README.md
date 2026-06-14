@@ -19,7 +19,7 @@ itself later.
 | [`predict_gemini.bat`](predict_gemini.bat) | ML + writes a prompt file you paste into Gemini Chat (web, with browsing). Opens the prompt in Notepad automatically. |
 | [`evaluate.bat`](evaluate.bat) | Refreshes data and grades any past predictions whose T+N has now passed. |
 
-Each predict .bat asks for duration / days / sizing (units or budget) and auto-sizes the universe.
+Each predict .bat asks for days / sizing (units or budget) and runs the entire universe.
 
 ### B. Claude mode — paste a prompt into Claude Desktop
 
@@ -31,7 +31,7 @@ tools, which only exist inside Claude.
 
 1. Open Claude Code or Cowork in Claude Desktop.
 2. Paste the contents of [`claude_prompt.md`](claude_prompt.md) into the chat.
-3. Claude will ask you for `duration`, `days`, sizing (`units` or `budget`), then drive the entire
+3. Claude will ask you for `days`, sizing (`units` or `budget`), then drive the entire
    pipeline (run the ML stage → research each candidate across emergent
    per-ticker dimensions → fill the plan → finalize → report explained
    picks).
@@ -44,20 +44,17 @@ emergent, not a fixed checklist), and the ACBS fee model.
 ### C. CLI (advanced)
 
 ```bash
-# Standard daily run (30-min budget, T+2 horizon, 100-share lots)
-.venv\Scripts\python -m stockpredict.cli run --duration 30 --mode base
+# Standard daily run (entire universe, T+2 horizon, 100-share lots)
+.venv\Scripts\python -m stockpredict.cli run --mode base
 
 # Longer hold horizon (T+5, automatically retrains)
-.venv\Scripts\python -m stockpredict.cli run --duration 30 --days 5 --mode base
+.venv\Scripts\python -m stockpredict.cli run --days 5 --mode base
 
 # Last trading day of the month
-.venv\Scripts\python -m stockpredict.cli run --duration 30 --days end --mode base
-
-# Full-universe weekly run (no time cap, fetches all ~1,500 tickers)
-.venv\Scripts\python -m stockpredict.cli run --duration full --mode base
+.venv\Scripts\python -m stockpredict.cli run --days end --mode base
 
 # Larger position size
-.venv\Scripts\python -m stockpredict.cli run --duration 30 --units 500 --mode base
+.venv\Scripts\python -m stockpredict.cli run --units 500 --mode base
 
 # Other commands
 .venv\Scripts\python -m stockpredict.cli evaluate
@@ -74,43 +71,23 @@ power users who want a fully scripted workflow without Claude Desktop.
 
 | flag | meaning | default |
 | ---- | ------- | ------- |
-| `--duration <int>` or `--duration full` | minutes of budget, or `full` for entire universe with no time cap | `full` |
 | `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
 | `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
 | `--units N` | Position size in shares. Min 100, multiple of 100 (ACBS minimum lot rule). Mutually exclusive with `--budget`. | `100` |
 | `--budget N` | **Budget mode** — a per-pick money limit in VND (e.g. `2000000`). Each pick is sized so the cash to enter (shares + buy-side fee) fits this, floored to a 100-share lot; a pick too pricey for one lot is still shown at the 100-share minimum, flagged `over_budget`. Mutually exclusive with `--units`. | _(off)_ |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
-| `--top N` | how many picks to print | `5` |
+| `--top N` | cap how many picks to print | _(off — lists all actionable picks dynamically)_ |
 | `--skip-train` | reuse cached `models/latest.pkl` (only works at `days=2`; otherwise ignored) | off |
 
-## How `--duration` sizes the universe
+## Universe coverage
 
-vnstock's free guest tier rate-limits at 20 API calls per minute. The program:
-
-1. Reserves 3–8 minutes for feature engineering, training, and prediction
-   (more for `claude` mode since Claude does ~30 `web_search` calls).
-2. Calculates the remaining time × 18 calls/min as the **API call budget**.
-3. Picks the universe in priority order: VN30 → HNX-30 → UPCOM bluechips →
-   HOSE mid-caps → fill from full HOSE/HNX/UPCOM listing alphabetically.
-
-Example budgets:
-
-| Duration | Reserved overhead | Tickers fetched |
-| -------- | ----------------- | --------------- |
-| 10 min | 3 (base) | ~125 |
-| 30 min | 3 (base) | ~485 |
-| 60 min | 3 (base) | ~1025 |
-| 30 min | 8 (claude) | ~395 |
-| **full** | – | **entire universe, no cap** (all of HOSE+HNX+UPCOM, ~1,765 today and growing) |
-
-`--duration full` runs with no time cap. Expect ~75 minutes the first time
-(rate-limited), faster on subsequent runs since cached tickers cost 0 API
-calls. Use this for a weekly / monthly full-universe scan; use a numeric
-duration for daily pre-market runs.
-
-Already-cached tickers cost 0 API calls if their data is already up-to-date,
-so the second run of the day is much faster regardless of the budget.
+Every run covers the **entire universe** (all of HOSE + HNX + UPCOM, ~1,765
+tickers today and growing) with no time cap. Expect ~75 minutes the first time
+(vnstock's free guest tier rate-limits at 20 API calls per minute), much faster
+on subsequent runs since cached, up-to-date tickers cost 0 API calls. The smart
+lazy fetch (`--warm-only yes`, the default) only hits the network for stale and
+cold tickers, so the second run of the day is near-instant.
 
 ## Pre-flight cache audit + `--warm-only`
 
@@ -172,8 +149,8 @@ Typical workflow:
 - **Default daily runs**: just run it. The first run after each trading
   close fetches that one new bar per ticker (~15-30s of API time);
   subsequent runs that day are instant.
-- **First-ever full-universe seed**: pass `--duration full`. The smart
-  cache then keeps it lazy for everything that follows.
+- **First-ever full-universe seed**: just run it (the universe is always
+  full). The smart cache then keeps it lazy for everything that follows.
 - **Backfill / corrections / sanity refresh**: `--no-warm-only` to
   force a full re-fetch. Slow — schedule it overnight.
 
@@ -422,7 +399,9 @@ flagged `over_budget`):
 | `position_units` | how many shares this trade is for |
 | `position_value_vnd` | gross trade value (entry × units) |
 | `over_budget` | budget mode only: `true` if even one 100-share lot — shares + buy fee — costs more than `--budget` (the pick is shown at the minimum so you can raise your budget) |
-| `entry_vnd` | **price to buy at** (today's close) |
+| `close_vnd` | today's close, for reference |
+| `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile (`pricing.entry_low_alpha`) of recent next-day-low returns (clipped never above the close). Falls back to the close when no low head is present. |
+| `entry_limit_pct` | the predicted dip vs close (≤ 0) baked into `entry_vnd` |
 | `target_vnd` | price to sell at on the exit day T+N (`entry × (1 + pred_mean)`) |
 | `target_low_vnd` / `target_high_vnd` | mean ± 1 ensemble-std target band |
 | `stop_vnd` | stop-loss (`entry − stop_atr_mult × ATR(14)`) |
@@ -577,7 +556,7 @@ The same fields are also stored in the saved picks JSON
 
 ```bash
 # Step 1: ML stage + emit prompt
-.venv\Scripts\python -m stockpredict.cli run --duration 30 --mode gemini
+.venv\Scripts\python -m stockpredict.cli run --mode gemini
 
 # (open the prompt file, paste into gemini.google.com with browsing on,
 #  copy the JSON response, save to reports\gemini_response_<date>.json)
@@ -874,7 +853,7 @@ into `reports/backtest_<date>/` with `summary.md` and `equity.png`.
 .venv\Scripts\python -m pytest -q
 ```
 
-98 tests, all use synthetic data — no network required. Coverage spans
+156 tests, all use synthetic data — no network required. Coverage spans
 features, pricing, the trading calendar, cache freshness + watermarks,
 the rate limiter, walk-forward backtest sanity, run-signature uniqueness,
 entry slippage, and per-dimension hit-rate aggregation.
@@ -891,6 +870,15 @@ Key knobs:
 - `data.source: VCI | KBS | MSN` — vnstock data source. KBS is most complete;
   VCI is sometimes more reliable per-ticker.
 - `backtest.cost_bps: 30` — round-trip transaction cost in basis points.
+- `pricing.entry_low_alpha: 0.40` — quantile for the limit-buy "low" head. The
+  entry price is each ticker's α-quantile of its own recent next-day-low
+  returns; lower α = deeper dip / lower fill probability, higher α = shallower /
+  more likely to fill. The low head is a per-ticker empirical quantile, *not* an
+  ML model — an earlier LightGBM quantile head had negative skill and was
+  replaced. Auto-sizes its trailing window via `entry_low_target_tail_obs`.
+- `pricing.ceiling_limits` / `ceiling_tol` — names locked limit-up (closed at
+  the daily price-band ceiling) are excluded from the pickable universe, since a
+  limit-buy can't fill against an all-buyers queue.
 
 ## Layout
 
@@ -905,7 +893,6 @@ D:\stock\
 
   src/stockpredict/
     cli.py                 click entry point
-    budget.py              duration -> universe size
     selector.py            curated bluechip list + universe top-up
     tracking.py            prediction ledger + evaluate_pending + feedback_block
     envfile.py             .env loader

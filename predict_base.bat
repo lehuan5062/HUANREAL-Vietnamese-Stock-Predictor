@@ -14,9 +14,6 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-set /p DURATION=Time budget in minutes, or 'full' for entire universe [full]:
-if "%DURATION%"=="" set DURATION=full
-
 set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [earliest]:
 if "%DAYS%"=="" set DAYS=earliest
 
@@ -78,10 +75,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running: duration=%DURATION%  days=%DAYS%  %SIZING_DESC%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
+echo Running: days=%DAYS%  %SIZING_DESC%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% %SIZE_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
+.venv\Scripts\python.exe -m stockpredict.cli run --days %DAYS% %EARLIEST_START_FLAG% %SIZE_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
 
 echo.
 echo === Done. Picks saved to reports\ ===

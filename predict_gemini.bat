@@ -27,9 +27,6 @@ echo Invalid choice.
 goto menu
 
 :step1
-set /p DURATION=Time budget in minutes, or 'full' for entire universe [full]:
-if "%DURATION%"=="" set DURATION=full
-
 set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [earliest]:
 if "%DAYS%"=="" set DAYS=earliest
 
@@ -91,10 +88,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running ML stage: duration=%DURATION%  days=%DAYS%  %SIZING_DESC%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
+echo Running ML stage: days=%DAYS%  %SIZING_DESC%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --duration %DURATION% --days %DAYS% %EARLIEST_START_FLAG% %SIZE_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
+.venv\Scripts\python.exe -m stockpredict.cli run --days %DAYS% %EARLIEST_START_FLAG% %SIZE_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
 
 echo.
 echo Opening today's prompt file in Notepad.

@@ -490,8 +490,6 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
 
 
 @cli.command("run")
-@click.option("--duration", type=str, default="full", show_default=True,
-              help="Minutes available, or 'full' for the entire universe with no time cap.")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
 @click.option("--days", type=str, default="earliest", show_default=True,
               help="T+N exit window. Integer (min 2 — Vietnamese T+2 settlement); "
@@ -548,19 +546,17 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
               help="Use the existing models/latest.pkl instead of retraining.")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
-def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
+def run_cmd(mode: str, days: str, earliest_start: int,
             units: int | None, budget: int | None, hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
             skip_train: bool, workers: int) -> None:
-    """End-to-end: size universe by time budget -> fetch -> train -> predict.
+    """End-to-end: fetch -> train -> predict over the entire universe.
 
-    Designed to be invoked from a double-click .bat. Enter how many minutes
-    you have before market open (or `full` for no time cap), and the program
-    sizes the universe accordingly.
+    Designed to be invoked from a double-click .bat. Always runs on the full
+    universe (no time cap); lazy caching keeps repeat runs fast.
     """
     import time as _time
 
-    from .budget import plan as plan_budget
     from .data.cache import cached_symbols
     from .data.fetcher import update_many
     from .dataset import build_panel
@@ -620,18 +616,6 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
     if exclude_list:
         click.echo(f"[note] excluding {len(exclude_list)} ticker(s): "
                    f"{', '.join(exclude_list)}")
-    # Parse duration: int minutes or "full"
-    duration_arg: int | str
-    if duration.strip().lower() == "full":
-        duration_arg = "full"
-    else:
-        try:
-            duration_arg = int(duration)
-        except ValueError:
-            click.echo(f"ERROR: --duration must be an integer (minutes) or 'full'. Got {duration!r}.",
-                       err=True)
-            sys.exit(2)
-
     # The model is horizon-specific. If --days != 2, force retraining; the cached
     # latest.pkl was almost certainly trained on T+2 returns.
     if days != 2 and skip_train:
@@ -640,8 +624,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
         skip_train = False
 
     started = _time.time()
-    rp = plan_budget(duration_arg, mode=mode)
-    click.echo(rp.summary())
+    click.echo(f"mode={mode}  universe=entire (no cap)")
     click.echo(f"  horizon: T+{days}"
                + ("  (T+2: sell in afternoon session only — settlement noon T+2)"
                   if days == 2 else f"  (T+{days}: sell any time on the exit day)"))
@@ -650,7 +633,9 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
     # Auto-evaluate any predictions that are now T+2 or later. This must run
     # AFTER the data refresh so we have closes for the target date — see below.
 
-    syms = select_symbols(target=rp.universe_target, hose_only=hose_only,
+    # Always run on the entire universe. select() clamps to the real universe
+    # size, so a comfortably-oversized target means "everything".
+    syms = select_symbols(target=10_000, hose_only=hose_only,
                           include_etfs=include_etfs, exclude=exclude_list)
     cached = set(cached_symbols())
     n_warm = len(set(syms) & cached)
@@ -662,15 +647,6 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
         label += f", excl={len(exclude_list)}"
     click.echo(f"selected {len(syms)} tickers  (warm={n_warm}, cold={n_cold})  [{label}]")
     click.echo("")
-
-    # If the cold count exceeds the API budget, cap to the warm + budget tickers
-    # so we don't promise more than we can fetch in time.
-    if n_cold > rp.api_call_budget:
-        warm = [s for s in syms if s in cached]
-        cold = [s for s in syms if s not in cached][: rp.api_call_budget]
-        syms = warm + cold
-        click.echo(f"  capped to {len(syms)} ({len(warm)} warm + "
-                   f"{len(cold)} new) to fit budget\n")
 
     # Quiet vnstock's noisy ERROR-level logger before bulk fetching — its
     # transient errors are already handled by our fallback + rate limiter.
@@ -971,7 +947,7 @@ def run_cmd(duration: str, mode: str, days: str, earliest_start: int,
             click.echo("    Tip: set GEMINI_API_KEY in .env to run autonomously.")
 
     elapsed = (_time.time() - started) / 60.0
-    click.echo(f"\nelapsed: {elapsed:.1f} min  /  budget: {duration}")
+    click.echo(f"\nelapsed: {elapsed:.1f} min")
 
 
 # ---------------------------- evaluate / track ----------------------------
