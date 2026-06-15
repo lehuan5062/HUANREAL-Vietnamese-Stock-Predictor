@@ -349,13 +349,9 @@ def predict_cmd(mode: str, days: int, on: str | None) -> None:
             click.echo("")
             click.echo(_format_picks_explained(result))
         click.echo(f"\nsaved -> {out}  (path: {tag})")
-        if tag == "interactive":
-            click.echo("Next: ask Claude to fill the plan, then run claude-finalize.")
-        else:
-            # Interactive Claude doesn't have actionable flags filled until
-            # finalize; only the autonomous path has the final picks here.
-            _print_sell_reminder(result, as_of=on, exit_offset_days=days,
-                                 mode_label="claude")
+        # Claude mode only emits the interactive plan; actionable flags and the
+        # sell reminder land at claude-finalize, not here.
+        click.echo("Next: ask Claude to fill the plan, then run claude-finalize.")
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(on=on, exit_offset_days=days)
@@ -826,18 +822,13 @@ def run_cmd(mode: str, days: str, earliest_start: int,
             click.echo("")
             click.echo(_format_picks_explained(result))
         click.echo(f"\nsaved -> {out}  (path: {tag})")
-        if tag == "interactive":
-            click.echo("")
-            click.echo("==> NEXT (run inside Claude Code / Cowork):")
-            click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
-            click.echo("    2. Then run:")
-            click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
-            click.echo("    Tip: set ANTHROPIC_API_KEY in .env to skip this manual step.")
-        else:
-            # Autonomous path already has actionable flags; interactive path
-            # only fills them at finalize-time (see claude-finalize command).
-            _print_sell_reminder(result, as_of=None, exit_offset_days=days,
-                                 mode_label="claude")
+        # Claude mode emits the interactive plan; actionable flags and the
+        # sell reminder land at claude-finalize, not here.
+        click.echo("")
+        click.echo("==> NEXT (run inside Claude Code / Cowork):")
+        click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
+        click.echo("    2. Then run:")
+        click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(exit_offset_days=days, symbols=pred_syms,
@@ -853,7 +844,6 @@ def run_cmd(mode: str, days: str, earliest_start: int,
         if tag == "prompt-only":
             click.echo("")
             click.echo("==> NEXT: paste the prompt file's contents into Gemini Pro with browsing.")
-            click.echo("    Tip: set GEMINI_API_KEY in .env to run autonomously.")
 
     elapsed = (_time.time() - started) / 60.0
     click.echo(f"\nelapsed: {elapsed:.1f} min")

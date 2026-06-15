@@ -217,23 +217,74 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     lines.append("Use `DROP` for delisting / suspension / bankruptcy / known fraud — these")
     lines.append("override the ML score and are never traded.")
     lines.append("")
-    lines.append("| symbol | pred_mean | news_score |")
-    lines.append("| --- | --- | --- |")
+    lines.append("**News-adjusted entry / target (optional).** The `adj_entry_vnd` and")
+    lines.append("`adj_target_vnd` columns are pre-filled with the mechanical limit-dip")
+    lines.append("entry and the ML target. These do NOT replace the mechanical prices —")
+    lines.append("they add a parallel, news-aware trade the user can compare. The")
+    lines.append("mechanical entry is a per-ticker dip limit that ignores today's news,")
+    lines.append("so on a broad news-driven melt-up the dip never comes and the limit")
+    lines.append("never fills. If your research says the stock will gap up (or down),")
+    lines.append("overwrite these two cells with the entry and target you'd actually")
+    lines.append("place in VND per share. Unlike the mechanical entry, `adj_entry_vnd`")
+    lines.append("MAY sit ABOVE today's close to guarantee a fill on a strong catalyst.")
+    lines.append("Leave them as-is (or blank) to keep them equal to the mechanical prices.")
+    lines.append("")
+    lines.append("| symbol | pred_mean | news_score | adj_entry_vnd | adj_target_vnd |")
+    lines.append("| --- | --- | --- | --- | --- |")
     for _, row in candidates.iterrows():
-        lines.append(f"| {row['symbol']} | {row['pred_mean']:+.4f} | 0 |")
+        ae = int(row["entry_vnd"]) if "entry_vnd" in row and pd.notna(row.get("entry_vnd")) else ""
+        at = int(row["target_vnd"]) if "target_vnd" in row and pd.notna(row.get("target_vnd")) else ""
+        lines.append(f"| {row['symbol']} | {row['pred_mean']:+.4f} | 0 | {ae} | {at} |")
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
 
-_SCORE_ROW = re.compile(
-    r"^\|\s*([A-Z0-9]+)\s*\|\s*([+\-]?\d*\.?\d+)\s*\|\s*(DROP|[+\-]?\d+)\s*\|\s*$",
-    re.IGNORECASE,
-)
-
 # Sentinel: news_score == DROP_SENTINEL means "exclude entirely; never trade".
 DROP_SENTINEL = -999
+
+_SYM_RE = re.compile(r"^[A-Z0-9]{2,8}$")
+_INT_SCORE_RE = re.compile(r"^[+\-]?\d+$")
+
+
+def _parse_price_cell(cell: str) -> float:
+    """Parse an optional adj_entry/adj_target cell into a float VND value.
+    Blank / '-' / unparseable → NaN (caller falls back to the mechanical
+    price). Commas and a stray VND suffix are tolerated."""
+    s = (cell or "").strip().replace(",", "").replace("đ", "").replace("VND", "").strip()
+    if not s or s == "-":
+        return float("nan")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
+def _parse_score_row(line: str):
+    """Parse one `## Scores` table row by splitting on `|`. Returns
+    (symbol, pred_mean, news_score_str, adj_entry, adj_target) or None if the
+    line isn't a data row (header, separator, prose). Backward-compatible: a
+    3-column row (no adj columns) yields NaN for adj_entry / adj_target."""
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return None
+    cells = [c.strip() for c in stripped.strip("|").split("|")]
+    if len(cells) < 3:
+        return None
+    sym = cells[0].upper()
+    if not _SYM_RE.match(sym):
+        return None
+    try:
+        pred_mean = float(cells[1])
+    except ValueError:
+        return None
+    score_str = cells[2].upper()
+    if score_str != "DROP" and not _INT_SCORE_RE.match(score_str):
+        return None
+    adj_entry = _parse_price_cell(cells[3]) if len(cells) > 3 else float("nan")
+    adj_target = _parse_price_cell(cells[4]) if len(cells) > 4 else float("nan")
+    return sym, pred_mean, score_str, adj_entry, adj_target
 
 
 def _split_per_ticker_sections(text: str) -> dict[str, str]:
@@ -358,10 +409,9 @@ def parse_plan(path: str | Path) -> pd.DataFrame:
             continue
         if not in_scores:
             continue
-        m = _SCORE_ROW.match(line)
-        if m:
-            sym = m.group(1).upper()
-            score_str = m.group(3).upper()
+        parsed = _parse_score_row(line)
+        if parsed:
+            sym, pred_mean, score_str, adj_entry, adj_target = parsed
             if score_str == "DROP":
                 ns = DROP_SENTINEL
             else:
@@ -370,8 +420,13 @@ def parse_plan(path: str | Path) -> pd.DataFrame:
             findings = _extract_findings_list(sec)
             rows.append({
                 "symbol": sym,
-                "pred_mean": float(m.group(2)),
+                "pred_mean": pred_mean,
                 "news_score": ns,
+                # News-adjusted entry / target the user/Claude wrote in the
+                # score table. NaN when left blank → downstream falls back to
+                # the mechanical entry_vnd / target_vnd.
+                "adj_entry_vnd": adj_entry,
+                "adj_target_vnd": adj_target,
                 "business": _extract_step(sec, "Business"),
                 # Step 2 was renamed from "Key drivers" to "Research dimensions"
                 # — these are the dimensions Claude derived for THIS ticker.

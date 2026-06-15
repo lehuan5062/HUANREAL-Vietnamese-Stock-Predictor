@@ -53,6 +53,22 @@ def parse_response(text: str) -> dict[str, Any]:
     return json.loads(text[start:end])
 
 
+def _opt_float(v: Any) -> float:
+    """Coerce an optional Gemini-supplied price to float VND; NaN when absent
+    or unparseable. Tolerates strings with commas / a VND suffix."""
+    if v is None:
+        return float("nan")
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", "").replace("đ", "").replace("VND", "").strip()
+    if not s or s == "-":
+        return float("nan")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
 def merge_response(candidates: pd.DataFrame, response: dict[str, Any]) -> pd.DataFrame:
     """Attach business / news_score / rationale / key_news / drivers to candidates.
     Tickers Gemini flagged with rationale starting `DROP:` are excluded entirely."""
@@ -81,6 +97,14 @@ def merge_response(candidates: pd.DataFrame, response: dict[str, Any]) -> pd.Dat
     )
     out["key_news"] = out["symbol"].map(
         lambda s: by_sym.get(s.upper(), {}).get("key_news", [])
+    )
+    # Optional news-adjusted entry / target (VND per share). NaN when Gemini
+    # omitted them → downstream falls back to the mechanical entry/target.
+    out["adj_entry_vnd"] = out["symbol"].map(
+        lambda s: _opt_float(by_sym.get(s.upper(), {}).get("adj_entry_vnd"))
+    )
+    out["adj_target_vnd"] = out["symbol"].map(
+        lambda s: _opt_float(by_sym.get(s.upper(), {}).get("adj_target_vnd"))
     )
     out["dropped"] = out["rationale"].str.upper().str.startswith("DROP")
     if out["dropped"].any():

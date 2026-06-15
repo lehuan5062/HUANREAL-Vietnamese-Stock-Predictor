@@ -59,10 +59,10 @@ emergent, not a fixed checklist), and the ACBS fee model.
 .venv\Scripts\python -m stockpredict.cli backtest --start 2022-01-01
 ```
 
-**Note**: `--mode claude` is also exposed at the CLI for users with
-`ANTHROPIC_API_KEY` set in `.env` (autonomous Claude API call). The primary
-Claude path is the prompt file (option B above) — the CLI flag exists for
-power users who want a fully scripted workflow without Claude Desktop.
+**Note**: `--mode claude` at the CLI emits the markdown research plan (the
+same plan the prompt file drives). The primary Claude path is the prompt file
+(option B above); the in-session Claude fills the plan and runs
+`claude-finalize`.
 
 ### Run command flags
 
@@ -531,7 +531,7 @@ The same fields are also stored in the saved picks JSON
 | mode | how it runs | source of explanation |
 | ---- | ----------- | --------------------- |
 | **base** | `predict_base.bat` or CLI | None — pure ML, no narrative. Compact table only. |
-| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. After finalize, **Claude offers to schedule a sell reminder for the target day in GMT+7 (Vietnamese ICT).** Optionally autonomous via `ANTHROPIC_API_KEY` for power users. |
+| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. After finalize, **Claude offers to schedule a sell reminder for the target day in GMT+7 (Vietnamese ICT).** |
 | **gemini** | `predict_gemini.bat` (two-step) | `predict --mode gemini` writes a prompt; you paste into Gemini Chat (web with browsing); save Gemini's JSON response to `reports/gemini_response_<date>.json`; run `gemini-finalize` to merge it into explained picks. After finalize, **you receive a `SELL-REMINDER` block with the target exit day in GMT+7 (Vietnamese ICT), and Gemini prompts you about scheduling a reminder.** |
 
 ### Gemini two-step flow
@@ -583,9 +583,8 @@ the LLM thought was relevant for that specific name on that day.
 
 | mode | search mechanism | scope |
 | ---- | ---------------- | ----- |
-| `claude` (autonomous, `ANTHROPIC_API_KEY` set) | Anthropic API + `web_search` server tool | **whole web** via Google. The URL list in the prompt is hints; Claude can issue any query. |
 | `gemini` | Gemini Chat web with browsing on (`google_search` grounding) | **whole web** via Google. Source list in the prompt is hints. |
-| `claude` (interactive, no API key) | Claude in this Code/Cowork session uses `WebFetch` + `WebSearch` against the URLs the markdown plan lists, plus broader Google searches the plan instructs. | **whole web**, but only as broadly as the in-session Claude chooses. The plan now explicitly says "these URLs are STARTING POINTS — also use WebSearch for the latest news beyond them." |
+| `claude` (interactive) | Claude in this Code/Cowork session uses `WebFetch` + `WebSearch` against the URLs the markdown plan lists, plus broader Google searches the plan instructs. | **whole web**, but only as broadly as the in-session Claude chooses. The plan now explicitly says "these URLs are STARTING POINTS — also use WebSearch for the latest news beyond them." |
 
 The starting URL list (in [`config.yaml`](config.yaml) under `news.vn_sources`):
 baomoi, Google News VN, cafef, vietstock, vneconomy, ndh, theinvestor,
@@ -683,8 +682,8 @@ pick, tagged with `run_id`, `signature`, `mode`, `exit_offset_days`,
 `predict_*.bat`) auto-scores predictions whose target date has elapsed
 by looking up the actual close price in the cached OHLCV.
 
-The Claude mode prompt — both the autonomous API call and the markdown
-plan for in-session Claude — includes a **Past performance feedback**
+The Claude mode markdown plan for in-session Claude includes a
+**Past performance feedback**
 block. The block now has three apples-to-apples views, in order of
 specificity:
 
@@ -789,8 +788,8 @@ py -3.13 -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev,llm]"
 ```
 
-For autonomous Claude mode, copy [`.env.example`](.env.example) to `.env` and
-fill in `ANTHROPIC_API_KEY`. The .bat files load `.env` automatically.
+Optional API keys live in [`.env.example`](.env.example); copy it to `.env`
+to set them. The .bat files load `.env` automatically.
 
 ## Daily workflow
 
@@ -886,7 +885,6 @@ D:\stock\
     backtest/              walk-forward simulator
     news/
       claude_runner.py     interactive Claude (markdown plan)
-      claude_api.py        autonomous Claude (Anthropic API + web_search)
       gemini_prompt.py     prompt builder for Gemini Chat (web)
       sources.py           URL builders
     modes/                 base / claude / gemini orchestrators

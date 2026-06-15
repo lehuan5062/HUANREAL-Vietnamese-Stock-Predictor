@@ -128,6 +128,10 @@ def finalize(prompt_path: str | Path,
         raise RuntimeError("all candidates dropped or unmatched")
 
     merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
+    # Parallel news-adjusted entry/target economics (adj_* columns). Purely
+    # additive — the mechanical entry/target/rr/actionable are untouched.
+    from ..pricing import add_adjusted_price_suggestions
+    merged = add_adjusted_price_suggestions(merged)
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
     merged = annotate_best(merged)
 

@@ -1,32 +1,21 @@
 """Mode B: Claude does the news re-rank.
 
-Two paths:
-  - **autonomous**: ANTHROPIC_API_KEY is set -> call the Anthropic API with
-    web_search server tool, get back a JSON of news scores, re-rank.
-  - **interactive**: no API key -> emit a markdown plan that an in-session
-    Claude (Claude Code / Cowork) reads via WebFetch and fills, then run
-    `claude-finalize` to re-rank.
+Emit a markdown plan that an in-session Claude (Claude Code / Cowork) reads
+via WebFetch and fills, then run `claude-finalize` to re-rank.
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 from pathlib import Path
 
 import pandas as pd
 
 from ..config import load_config, reports_dir
-from ..envfile import load as load_env
 from ..model.predict import rank_today
 from ..news.claude_runner import parse_plan, write_plan
 from ..picks_meta import actionable_suffix, annotate_best
 from ..tracking import effective_today_for_trading, run_signature
-
-
-def _autonomous_available() -> bool:
-    load_env()  # populate env from .env if present
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def run(on: str | None = None,
@@ -35,17 +24,7 @@ def run(on: str | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
         exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
-    """Run the best-available path. Returns (picks_df, output_path, mode_tag)
-    where mode_tag is 'autonomous' or 'interactive'."""
-    if _autonomous_available():
-        try:
-            return _run_autonomous(on=on,
-                                   exit_offset_days=exit_offset_days,
-                                   symbols=symbols, hose_only=hose_only,
-                                   include_etfs=include_etfs,
-                                   exclude=exclude)
-        except Exception as e:
-            print(f"[claude] autonomous mode failed ({e}); falling back to plan emit.")
+    """Emit the interactive plan. Returns (candidates_df, plan_path, 'interactive')."""
     candidates, plan_path = emit_plan(on=on,
                                       exit_offset_days=exit_offset_days,
                                       symbols=symbols, hose_only=hose_only,
@@ -100,85 +79,6 @@ def emit_plan(on: str | None = None,
     return candidates, plan_path
 
 
-def _run_autonomous(on: str | None = None,
-                    exit_offset_days: int | None = None,
-                    symbols: list[str] | None = None,
-                    hose_only: bool = False,
-                    include_etfs: bool = True,
-                    exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
-    from ..news import claude_api
-
-    cfg = load_config().modes["claude"]
-    candidates = rank_today(actionable_only=True, on=on,
-                            exit_offset_days=exit_offset_days, symbols=symbols)
-
-    if on is not None:
-        today_ts = pd.Timestamp(on)
-    else:
-        today_ts = effective_today_for_trading()
-    today = today_ts.strftime("%Y-%m-%d")
-
-    full_cfg = load_config()
-    eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
-        full_cfg.target["exit_offset_days"]
-    )
-    excl_list = sorted({s.upper() for s in (exclude or [])})
-    sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        hose_only=hose_only,
-                        include_etfs=include_etfs, exclude=excl_list)
-
-    if candidates.empty:
-        # Nothing cleared the actionable gate today — write an empty report
-        # rather than spending a live API call scoring a zero-row table.
-        merged = annotate_best(candidates)
-        out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
-        payload = {
-            "as_of": today,
-            "mode": "claude_autonomous",
-            "exit_offset_days": eff_horizon,
-            "hose_only": hose_only,
-            "include_etfs": include_etfs,
-            "exclude": excl_list,
-            "run_signature": sig,
-            "selection": "actionable_only",
-            "n_actionable": 0,
-            "global_summary": "",
-            "weight": float(cfg["news_weight"]),
-            "picks": [],
-        }
-        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return merged, out, "autonomous"
-
-    print(f"[claude] calling Anthropic API to score {len(candidates)} candidates...")
-    scored = claude_api.score(candidates, date=today,
-                              current_horizon=eff_horizon,
-                              current_signature=sig)
-    merged = claude_api.merge(candidates, scored)
-    merged = annotate_best(merged)
-
-    out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
-    payload = {
-        "as_of": today,
-        "mode": "claude_autonomous",
-        "exit_offset_days": eff_horizon,
-        "hose_only": hose_only,
-        "include_etfs": include_etfs,
-        "exclude": excl_list,
-        "run_signature": sig,
-        "selection": "actionable_only",
-        "n_actionable": int(len(merged)),
-        "global_summary": scored.get("global_summary", ""),
-        "weight": float(cfg["news_weight"]),
-        "picks": json.loads(merged.to_json(orient="records")),
-    }
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    from ..tracking import record
-    record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=eff_horizon,
-           hose_only=hose_only, include_etfs=include_etfs, exclude=excl_list)
-    return merged, out, "autonomous"
-
-
 def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     from ..news.claude_runner import DROP_SENTINEL
 
@@ -204,7 +104,8 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     # dimensions_cited) from parse_plan. dimensions_cited rides through to
     # `record()` so the ledger can later aggregate hit-rate by dimension.
     explain_cols = ["symbol", "news_score", "business", "dimensions",
-                    "drivers", "key_news", "dimensions_cited"]
+                    "drivers", "key_news", "dimensions_cited",
+                    "adj_entry_vnd", "adj_target_vnd"]
     explain_cols = [c for c in explain_cols if c in scored.columns]
     sidecar = plan_path.with_suffix(".candidates.parquet")
     if sidecar.exists():
@@ -214,6 +115,10 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         # Older plans without sidecar: fall back to the bare score table.
         merged = scored
     merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
+    # Parallel news-adjusted entry/target economics (adj_* columns). Purely
+    # additive — the mechanical entry/target/rr/actionable are untouched.
+    from ..pricing import add_adjusted_price_suggestions
+    merged = add_adjusted_price_suggestions(merged)
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
     merged = annotate_best(merged)
 

@@ -188,6 +188,20 @@ Use `Edit` to replace placeholders in `D:\stock\reports\claude_news_plan_<DATE>.
     `[peer-earnings]`, `[FX-impact]`, `[delisting-risk]`
 - In the `## Scores` table at the bottom, replace each `0` with the score
   you decided (`-1` / `0` / `+1` / `DROP`).
+- **News-adjusted entry / target (optional).** The same table has
+  `adj_entry_vnd` and `adj_target_vnd` columns, pre-filled with the
+  mechanical dip-limit entry and the ML target. These are **additive** — they
+  never replace the mechanical prices; the program keeps both and shows the
+  news-aware trade alongside. The mechanical entry is a per-ticker dip limit
+  that ignores today's news, so on a broad news-driven melt-up (a macro
+  catalyst lifting the whole market) the dip never comes and the limit never
+  fills. **If your research says a ticker will gap up (or down)** — e.g. a
+  treaty / policy / sector catalyst that's moving many names — overwrite those
+  two cells with the entry and target you'd actually place (VND per share).
+  Unlike the mechanical entry, `adj_entry_vnd` **may sit ABOVE today's close**
+  to guarantee a fill on a strong catalyst. Leave them as-is (or blank) when
+  you have no specific price view — they then stay equal to the mechanical
+  prices.
 
 ### 5. Finalize
 
@@ -208,6 +222,11 @@ Show every explained pick with these fields per pick:
 - Symbol, company, business one-liner
 - Trade economics: entry / target / stop in VND, fees round-trip, net P&L
   for 100-unit position, risk-reward ratio, `actionable: True/False`
+- **If you set a news-adjusted entry/target** for this pick, also show the
+  `adj_*` trade (adj_entry / adj_target / adj_stop, adj_rr_ratio,
+  `adj_actionable`) on its own line and say in one sentence why the news
+  warranted moving off the mechanical dip-limit. Skip this line when the
+  adjusted trade equals the mechanical one.
 - News score and one-sentence rationale citing the dimension and finding
 - The 3-7 dimensions you researched
 

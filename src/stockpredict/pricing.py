@@ -167,3 +167,95 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     out["breakeven_pct"] = breakeven_pct
     out["actionable"] = actionable
     return out
+
+
+def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
+    """Append a PARALLEL set of ``adj_*`` columns derived from LLM-supplied
+    entry / target overrides — **without** touching any of the mechanical
+    columns produced by :func:`add_price_suggestions`.
+
+    Motivation: the mechanical ``entry_vnd`` is a per-ticker dip limit that the
+    news stage cannot move. On a news-driven melt-up (e.g. a macro catalyst
+    lifting the whole market), that dip never comes and the limit never fills.
+    This lets the Claude / Gemini news stage quote its OWN entry and target —
+    informed by the catalyst — and surfaces the matching risk-reward so the
+    user can compare the news-adjusted trade against the mechanical one
+    side by side.
+
+    Inputs (optional, in VND per share; produced by the news parsers):
+        adj_entry_vnd   — limit/entry price the LLM wants placed. Unlike the
+                          mechanical entry, this is NOT clipped at the close:
+                          on a strong catalyst the LLM may quote an entry ABOVE
+                          today's close to guarantee a fill.
+        adj_target_vnd  — exit target the LLM wants.
+
+    When either is missing / NaN for a row, that row's ``adj_*`` outputs mirror
+    the mechanical values (``entry_vnd`` / ``target_vnd``), so the columns are
+    always fully populated and an un-adjusted pick reads identically to its
+    mechanical twin.
+
+    Output columns appended (all VND per share unless noted), each the
+    ``adj_`` twin of a mechanical column:
+        adj_entry_vnd, adj_target_vnd  (echoed back, NaN-filled to mechanical)
+        adj_stop_vnd                   stop anchored on the adjusted entry
+        adj_gross_reward_vnd, adj_max_loss_vnd
+        adj_fees_round_trip_vnd
+        adj_net_reward_vnd, adj_net_loss_vnd
+        adj_rr_ratio
+        adj_breakeven_pct
+        adj_actionable
+    """
+    if df is None or len(df) == 0:
+        return df
+
+    cfg = load_config()
+    broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
+    pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
+    stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
+    min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
+
+    out = df.copy()
+
+    # Mechanical anchors to fall back on (these must already exist; if a
+    # legacy frame lacks them, default to NaN so the adj columns are NaN too).
+    mech_entry = out.get("entry_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
+    mech_target = out.get("target_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
+    atr_k = out.get("atr_14", pd.Series(np.nan, index=out.index)).astype(float)
+
+    # LLM overrides — when absent or NaN, mirror the mechanical price.
+    adj_entry = out.get("adj_entry_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
+    adj_target = out.get("adj_target_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
+    adj_entry_v = adj_entry.where(adj_entry.notna(), mech_entry).round(0)
+    adj_target_v = adj_target.where(adj_target.notna(), mech_target).round(0)
+
+    # Stop anchored on the ADJUSTED entry, same rule as the mechanical stop:
+    # risk distance is exactly stop_atr_mult * ATR below the entry.
+    adj_entry_k = adj_entry_v / 1000.0
+    adj_stop_v = ((adj_entry_k - stop_mult * atr_k) * 1000.0).round(0)
+
+    adj_gross_reward = adj_target_v - adj_entry_v
+    adj_max_loss = adj_entry_v - adj_stop_v
+
+    _, _, adj_fees_total, _ = _broker_costs(adj_entry_v, adj_target_v, broker)
+    adj_net_reward = adj_gross_reward - adj_fees_total
+    adj_net_loss = adj_max_loss + adj_fees_total
+
+    adj_rr = pd.Series(np.nan, index=out.index, dtype=float)
+    valid = (adj_max_loss > 0) & adj_net_loss.notna()
+    adj_rr[valid] = adj_net_reward[valid] / adj_net_loss[valid]
+
+    adj_breakeven_pct = (adj_fees_total / adj_entry_v).round(4)
+    adj_actionable = (adj_net_reward > 0) & (adj_rr >= min_rr) & valid
+
+    out["adj_entry_vnd"] = adj_entry_v.astype("Int64")
+    out["adj_target_vnd"] = adj_target_v.astype("Int64")
+    out["adj_stop_vnd"] = adj_stop_v.astype("Int64")
+    out["adj_gross_reward_vnd"] = adj_gross_reward.round(0).astype("Int64")
+    out["adj_max_loss_vnd"] = adj_max_loss.round(0).astype("Int64")
+    out["adj_fees_round_trip_vnd"] = adj_fees_total.round(0).astype("Int64")
+    out["adj_net_reward_vnd"] = adj_net_reward.round(0).astype("Int64")
+    out["adj_net_loss_vnd"] = adj_net_loss.round(0).astype("Int64")
+    out["adj_rr_ratio"] = adj_rr.round(2)
+    out["adj_breakeven_pct"] = adj_breakeven_pct
+    out["adj_actionable"] = adj_actionable
+    return out

@@ -159,11 +159,27 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append('     "dimensions": ["the 3-7 dimensions YOU derived for this ticker"],')
     parts.append('     "drivers": ["the 2-3 most material drivers among the dimensions"],')
     parts.append('     "ml_score": 0.0017, "news_score": 1, "adjusted": 0.001785,')
+    parts.append('     "adj_entry_vnd": 13400, "adj_target_vnd": 13900,')
     parts.append('     "rationale": "1-2 sentences citing specific findings with dates",')
     parts.append('     "key_news": ["finding 1 (date, source)", "finding 2"]}')
     parts.append("  ]")
     parts.append("}")
     parts.append("```")
+    parts.append("")
+    parts.append(
+        "**`adj_entry_vnd` / `adj_target_vnd` (optional, news-adjusted trade).** "
+        "The `entry_vnd` / `target_vnd` in the candidates table are mechanical: "
+        "the entry is a per-ticker dip limit that ignores today's news, so on a "
+        "broad news-driven melt-up the dip never comes and the limit never fills. "
+        "If your research says a ticker will gap up (or down), set `adj_entry_vnd` "
+        "and `adj_target_vnd` to the entry and target you'd actually place (VND "
+        "per share). These do NOT replace the mechanical prices — the program "
+        "keeps both and shows the news-adjusted trade alongside. Unlike the "
+        "mechanical entry, `adj_entry_vnd` MAY sit ABOVE today's close to "
+        "guarantee a fill on a strong catalyst. Omit both (or set them equal to "
+        "the mechanical `entry_vnd` / `target_vnd`) when you have no price view."
+    )
+    parts.append("")
     parts.append("List ALL candidates below, sorted by `adjusted` descending "
                  "(drop any you judge should be excluded on the news).")
     parts.append("")
