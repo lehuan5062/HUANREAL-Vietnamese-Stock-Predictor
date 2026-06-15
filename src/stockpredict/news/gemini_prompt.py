@@ -115,6 +115,21 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("")
     parts.append("Also consult vnexpress.net/kinh-doanh, cafef.vn for general VN market news.")
     parts.append("")
+    parts.append(
+        "**Major-conflict / geopolitical check — do this ONCE, before scoring "
+        "any ticker.** Scan for major global conflicts or geopolitical shocks "
+        "breaking or escalating today: wars, ceasefires / peace treaties, new "
+        "sanctions or tariffs, oil-supply or shipping-route disruptions, sharp "
+        "oil / gold / USD-VND moves. A market-wide geopolitical catalyst can "
+        "move the entire VN-Index — and specific sectors (oil & gas, shipping "
+        "/ logistics, exporters, gold, fertiliser) — regardless of any single "
+        "company's news. If you find one, summarise it in `global_summary` and "
+        "carry it into EVERY ticker's `news_score` AND its `adj_entry_vnd` / "
+        "`adj_target_vnd` (a broad risk-on melt-up means dip-limits won't fill, "
+        "so raise the adjusted entry; a risk-off shock means gaps down). If "
+        "today is geopolitically quiet, say so in `global_summary` and move on."
+    )
+    parts.append("")
 
     parts.append("## Candidates")
     parts.append("")

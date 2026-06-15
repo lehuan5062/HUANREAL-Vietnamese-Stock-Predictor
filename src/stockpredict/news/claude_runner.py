@@ -152,6 +152,19 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "",
         "## Global / macro context (read once)",
         "",
+        "**Major-conflict / geopolitical check — do this ONCE, before scoring "
+        "any ticker.** Scan for major global conflicts or geopolitical shocks "
+        "breaking or escalating today: wars, ceasefires / peace treaties, new "
+        "sanctions or tariffs, oil-supply or shipping-route disruptions, sharp "
+        "oil / gold / USD-VND moves. A market-wide geopolitical catalyst can "
+        "move the entire VN-Index — and specific sectors (oil & gas, shipping "
+        "/ logistics, exporters, gold, fertiliser) — regardless of any single "
+        "company's news. If you find one, note it in the global context and "
+        "carry it into EVERY ticker's `news_score` AND its `adj_entry_vnd` / "
+        "`adj_target_vnd` (a broad risk-on melt-up means dip-limits won't fill, "
+        "so raise the adjusted entry; a risk-off shock means gaps down). If "
+        "today is geopolitically quiet, say so and move on.",
+        "",
     ])
     for name, url in global_urls().items():
         lines.append(f"- [{name}]({url})")

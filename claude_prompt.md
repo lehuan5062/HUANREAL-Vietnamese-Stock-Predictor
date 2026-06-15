@@ -105,7 +105,20 @@ empty Step 1 / Step 2 / Step 4 fields and a `## Scores` table at the bottom.
 
 ### 3. Research each ticker — business-aware, emergent dimensions
 
-**For each candidate in the plan:**
+**First, once up front — major-conflict / geopolitical check.** Before
+scoring any ticker, scan for major global conflicts or geopolitical shocks
+breaking or escalating today: wars, ceasefires / peace treaties, new
+sanctions or tariffs, oil-supply or shipping-route disruptions, sharp oil /
+gold / USD-VND moves. A market-wide geopolitical catalyst can move the entire
+VN-Index — and specific sectors (oil & gas, shipping / logistics, exporters,
+gold, fertiliser) — regardless of any single company's news. If you find one,
+record it in the plan's global-context section and carry it into **every**
+ticker's `news_score` **and** its `adj_entry_vnd` / `adj_target_vnd` (a broad
+risk-on melt-up means dip-limits won't fill — raise the adjusted entry; a
+risk-off shock means gaps down). If today is geopolitically quiet, note that
+and move on.
+
+**Then, for each candidate in the plan:**
 
 - **First, check the heading tag.** ETF rows are marked
   `### FUEVFVND  —  FUEVFVND  [ETF — apply ETF rubric, NOT company business]`.
