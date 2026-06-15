@@ -50,6 +50,21 @@ def test_after_cutoff_skips_weekend(fake_calendar):
     assert out == pd.Timestamp("2026-05-11")
 
 
+def test_weekend_morning_rolls_to_next_trading_day(fake_calendar):
+    """A run on a non-trading day rolls forward regardless of the clock:
+    Sunday 9 AM (before the cutoff) → next trading day = Monday, NOT Sunday."""
+    now = dt.datetime(2026, 5, 10, 9, 0)  # Sunday morning, pre-cutoff
+    out = tracking.effective_today_for_trading(now=now)
+    assert out == pd.Timestamp("2026-05-11")
+
+
+def test_saturday_after_cutoff_rolls_to_monday(fake_calendar):
+    """Saturday afternoon → Monday (weekend roll, cutoff irrelevant)."""
+    now = dt.datetime(2026, 5, 9, 16, 0)  # Saturday
+    out = tracking.effective_today_for_trading(now=now)
+    assert out == pd.Timestamp("2026-05-11")
+
+
 def test_after_cutoff_with_holiday(monkeypatch):
     """Post-14:30 on the last day before a holiday cluster → skips both
     the holiday and the weekend."""
@@ -71,26 +86,26 @@ def test_after_cutoff_with_holiday(monkeypatch):
 def test_run_signature_distinct_for_distinct_params():
     """Different parameter combos yield different signatures."""
     sigs = {
-        tracking.run_signature("base", 2, 100, hose_only=False),
-        tracking.run_signature("base", 2, 200, hose_only=False),
-        tracking.run_signature("base", 2, 100, hose_only=True),
-        tracking.run_signature("claude", 2, 100, hose_only=False),
-        tracking.run_signature("base", 5, 100, hose_only=False),
+        tracking.run_signature("base", 2, hose_only=False),
+        tracking.run_signature("base", 2, hose_only=True),
+        tracking.run_signature("claude", 2, hose_only=False),
+        tracking.run_signature("base", 5, hose_only=False),
+        tracking.run_signature("base", 2, hose_only=False, exclude=["HPG"]),
     }
     assert len(sigs) == 5, f"expected 5 distinct signatures; got {len(sigs)}: {sigs}"
 
 
 def test_run_signature_idempotent():
     """Same params → same signature."""
-    a = tracking.run_signature("claude", 18, 200, hose_only=True)
-    b = tracking.run_signature("claude", 18, 200, hose_only=True)
+    a = tracking.run_signature("claude", 18, hose_only=True)
+    b = tracking.run_signature("claude", 18, hose_only=True)
     assert a == b
-    assert a == "claude_d18_u200_HOSE"
+    assert a == "claude_d18_u100_HOSE"
 
 
 def test_run_signature_no_hose_tag_when_off():
     """hose_only=False omits the HOSE tag — keeps signatures readable."""
-    sig = tracking.run_signature("base", 2, 100, hose_only=False)
+    sig = tracking.run_signature("base", 2, hose_only=False)
     assert "HOSE" not in sig
     assert sig == "base_d2_u100"
 
@@ -248,9 +263,9 @@ def test_record_uses_run_signature_for_default_run_id(monkeypatch, tmp_path):
         "close": 10.0, "actionable": False,
     }])
     tracking.record(picks, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=18, units=200, hose_only=True)
+                    exit_offset_days=18, hose_only=True)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
-    assert df.iloc[0]["run_id"] == "20260505_base_d18_u200_HOSE"
+    assert df.iloc[0]["run_id"] == "20260505_base_d18_u100_HOSE"
 
 
 def test_record_distinct_runs_coexist(monkeypatch, tmp_path):
@@ -265,12 +280,12 @@ def test_record_distinct_runs_coexist(monkeypatch, tmp_path):
         "close": 10.0, "actionable": True,
     }])
     tracking.record(picks_a, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2, units=100)
+                    exit_offset_days=2)
     tracking.record(picks_b, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=18, units=200)
+                    exit_offset_days=18)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert len(df) == 2
-    assert set(df["run_id"]) == {"20260505_base_d2_u100", "20260505_base_d18_u200"}
+    assert set(df["run_id"]) == {"20260505_base_d2_u100", "20260505_base_d18_u100"}
 
 
 def test_record_same_run_id_replaces(monkeypatch, tmp_path):
@@ -285,9 +300,9 @@ def test_record_same_run_id_replaces(monkeypatch, tmp_path):
         "close": 10.0, "actionable": True,
     }])
     tracking.record(picks_a, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2, units=100)
+                    exit_offset_days=2)
     tracking.record(picks_b, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2, units=100)  # same params
+                    exit_offset_days=2)  # same params
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert len(df) == 1
     # Latest pred_mean wins.

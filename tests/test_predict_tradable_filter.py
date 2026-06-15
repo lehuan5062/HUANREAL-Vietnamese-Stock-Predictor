@@ -60,8 +60,7 @@ def test_rank_today_drops_non_tradable_symbols(monkeypatch, tmp_path):
     monkeypatch.setattr(predict_mod, "liquidity_mask",
                         lambda df: pd.Series(True, index=df.index))
     monkeypatch.setattr(predict_mod, "add_price_suggestions",
-                        lambda df, units=None, budget_vnd=None: df.assign(
-                            position_units=100,
+                        lambda df: df.assign(
                             entry_vnd=df["close"] * 1000,
                             close_vnd=df["close"] * 1000,
                             entry_limit_pct=-0.05,
@@ -86,8 +85,8 @@ def test_rank_today_skips_filter_when_universe_missing(monkeypatch):
     monkeypatch.setattr(predict_mod, "liquidity_mask",
                         lambda df: pd.Series(True, index=df.index))
     monkeypatch.setattr(predict_mod, "add_price_suggestions",
-                        lambda df, units=None, budget_vnd=None: df.assign(
-                            position_units=100, entry_vnd=df["close"] * 1000,
+                        lambda df: df.assign(
+                            entry_vnd=df["close"] * 1000,
                             close_vnd=df["close"] * 1000, entry_limit_pct=-0.05,
                         ))
 

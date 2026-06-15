@@ -38,7 +38,7 @@ class _FakeMeanModel:
 def _price_stub(actionable_syms):
     """add_price_suggestions stub that marks a row `actionable` iff its symbol
     is in `actionable_syms` (None => every row actionable)."""
-    def _stub(df, units=None, budget_vnd=None):
+    def _stub(df):
         out = df.copy()
         sym = out["symbol"].astype(str)
         mask = pd.Series(True, index=out.index) if actionable_syms is None \

@@ -136,12 +136,7 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
             f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {act} |"
         )
     parts.append("")
-    if has_etf_candidates:
-        parts.append("Position sizing: stock rows use 100-unit lots (HOSE/HNX/UPCOM "
-                     "minimum); ETF rows use 10-unit lots (HOSE ETF rule). All VND "
-                     "values are absolute.")
-    else:
-        parts.append("Position is 100 units (Vietnamese minimum lot). All VND values are absolute.")
+    parts.append("All VND values are PER SHARE; position sizing is left to the user.")
     parts.append("`net_vnd` already accounts for ACBS round-trip fees (commission + VAT + PIT).")
     parts.append("")
 

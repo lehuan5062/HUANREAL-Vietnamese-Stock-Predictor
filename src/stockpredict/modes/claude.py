@@ -30,8 +30,6 @@ def _autonomous_available() -> bool:
 
 
 def run(on: str | None = None,
-        units: int | None = None,
-        budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
@@ -41,16 +39,14 @@ def run(on: str | None = None,
     where mode_tag is 'autonomous' or 'interactive'."""
     if _autonomous_available():
         try:
-            return _run_autonomous(on=on, units=units,
-                                   budget_vnd=budget_vnd,
+            return _run_autonomous(on=on,
                                    exit_offset_days=exit_offset_days,
                                    symbols=symbols, hose_only=hose_only,
                                    include_etfs=include_etfs,
                                    exclude=exclude)
         except Exception as e:
             print(f"[claude] autonomous mode failed ({e}); falling back to plan emit.")
-    candidates, plan_path = emit_plan(on=on, units=units,
-                                      budget_vnd=budget_vnd,
+    candidates, plan_path = emit_plan(on=on,
                                       exit_offset_days=exit_offset_days,
                                       symbols=symbols, hose_only=hose_only,
                                       include_etfs=include_etfs,
@@ -59,15 +55,12 @@ def run(on: str | None = None,
 
 
 def emit_plan(on: str | None = None,
-              units: int | None = None,
-              budget_vnd: int | None = None,
               exit_offset_days: int | None = None,
               symbols: list[str] | None = None,
               hose_only: bool = False,
               include_etfs: bool = True,
               exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
     candidates = rank_today(actionable_only=True, on=on,
-                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     if on is not None:
         on_date = dt.date.fromisoformat(on)
@@ -75,16 +68,12 @@ def emit_plan(on: str | None = None,
         on_date = effective_today_for_trading().date()
 
     full_cfg = load_config()
-    eff_units = None if budget_vnd is not None else (
-        int(units) if units is not None
-        else int(full_cfg.broker.get("default_position_units", 100))
-    )
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         full_cfg.target["exit_offset_days"]
     )
     excl_list = sorted({s.upper() for s in (exclude or [])})
     sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        units=eff_units, budget_vnd=budget_vnd, hose_only=hose_only,
+                        hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
 
     plan_path = write_plan(candidates, on=on_date,
@@ -95,15 +84,12 @@ def emit_plan(on: str | None = None,
     # and other feature columns that aren't in the markdown score table.
     sidecar = plan_path.with_suffix(".candidates.parquet")
     candidates.to_parquet(sidecar, index=False)
-    # Sidecar metadata so `finalize` knows the horizon / units / hose-only /
+    # Sidecar metadata so `finalize` knows the horizon / hose-only /
     # include-etfs / exclude used at emit time.
     meta_path = plan_path.with_suffix(".meta.json")
     meta_path.write_text(
         json.dumps({
             "exit_offset_days": eff_horizon,
-            "sizing_mode": "budget" if budget_vnd is not None else "units",
-            "units": eff_units,
-            "budget_vnd": budget_vnd,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
             "exclude": excl_list,
@@ -115,8 +101,6 @@ def emit_plan(on: str | None = None,
 
 
 def _run_autonomous(on: str | None = None,
-                    units: int | None = None,
-                    budget_vnd: int | None = None,
                     exit_offset_days: int | None = None,
                     symbols: list[str] | None = None,
                     hose_only: bool = False,
@@ -126,7 +110,6 @@ def _run_autonomous(on: str | None = None,
 
     cfg = load_config().modes["claude"]
     candidates = rank_today(actionable_only=True, on=on,
-                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
 
     if on is not None:
@@ -136,16 +119,12 @@ def _run_autonomous(on: str | None = None,
     today = today_ts.strftime("%Y-%m-%d")
 
     full_cfg = load_config()
-    eff_units = None if budget_vnd is not None else (
-        int(units) if units is not None
-        else int(full_cfg.broker.get("default_position_units", 100))
-    )
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         full_cfg.target["exit_offset_days"]
     )
     excl_list = sorted({s.upper() for s in (exclude or [])})
     sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        units=eff_units, budget_vnd=budget_vnd, hose_only=hose_only,
+                        hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
 
     if candidates.empty:
@@ -157,9 +136,6 @@ def _run_autonomous(on: str | None = None,
             "as_of": today,
             "mode": "claude_autonomous",
             "exit_offset_days": eff_horizon,
-            "sizing_mode": "budget" if budget_vnd is not None else "units",
-            "units": eff_units,
-            "budget_vnd": budget_vnd,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
             "exclude": excl_list,
@@ -185,9 +161,6 @@ def _run_autonomous(on: str | None = None,
         "as_of": today,
         "mode": "claude_autonomous",
         "exit_offset_days": eff_horizon,
-        "sizing_mode": "budget" if budget_vnd is not None else "units",
-        "units": eff_units,
-        "budget_vnd": budget_vnd,
         "hose_only": hose_only,
         "include_etfs": include_etfs,
         "exclude": excl_list,
@@ -201,7 +174,7 @@ def _run_autonomous(on: str | None = None,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=eff_horizon, units=eff_units, budget_vnd=budget_vnd,
+           exit_offset_days=eff_horizon,
            hose_only=hose_only, include_etfs=include_etfs, exclude=excl_list)
     return merged, out, "autonomous"
 
@@ -244,7 +217,7 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
     merged = annotate_best(merged)
 
-    # Recover horizon / units / hose_only from the sidecar metadata (if present).
+    # Recover horizon / hose_only from the sidecar metadata (if present).
     meta_path = plan_path.with_suffix(".meta.json")
     meta = {}
     if meta_path.exists():
@@ -253,10 +226,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         except Exception:
             meta = {}
     exit_off = meta.get("exit_offset_days")
-    eff_units = meta.get("units")
-    eff_budget = meta.get("budget_vnd")
-    sizing_mode = meta.get("sizing_mode") or (
-        "budget" if eff_budget is not None else "units")
     eff_hose = bool(meta.get("hose_only", False))
     # Legacy meta files (pre-ETF) lack `include_etfs`; default to True so
     # the recovered signature matches what the original emit_plan produced.
@@ -266,8 +235,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     sig = meta.get("run_signature") or run_signature(
         mode="claude",
         exit_offset_days=int(exit_off or 2),
-        units=(None if eff_budget is not None else int(eff_units or 100)),
-        budget_vnd=eff_budget,
         hose_only=eff_hose,
         include_etfs=eff_etfs,
         exclude=eff_excl,
@@ -280,9 +247,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         "as_of": today,
         "mode": "claude",
         "exit_offset_days": exit_off,
-        "sizing_mode": sizing_mode,
-        "units": eff_units,
-        "budget_vnd": eff_budget,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
@@ -296,6 +260,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=exit_off, units=eff_units, budget_vnd=eff_budget,
+           exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out

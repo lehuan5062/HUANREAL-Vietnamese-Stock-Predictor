@@ -146,7 +146,7 @@ def test_record_stores_dimensions_cited(monkeypatch, tmp_path):
         "dimensions_cited": "insider-action,sector-flow",
     }])
     tracking.record(picks, mode="claude", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=11, units=100)
+                    exit_offset_days=11)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert df.iloc[0]["dimensions_cited"] == "insider-action,sector-flow"
 

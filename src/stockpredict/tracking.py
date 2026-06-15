@@ -295,28 +295,48 @@ def effective_today_for_trading(now: dt.datetime | None = None,
     the next trading day as T+0.
 
     Returns: a normalized pandas Timestamp.
-      * `now <= cutoff`           -> today (calendar date of `now`)
-      * `now > cutoff`            -> the next trading day after today
+      * trading day, `now <= cutoff`  -> today
+      * trading day, `now > cutoff`   -> the next trading day after today
+      * non-trading day (weekend /
+        holiday), any time of day      -> the next trading day after today
     Weekends and Vietnamese holidays are skipped via the cached trading
-    calendar; if the calendar is empty we fall back to BDay.
+    calendar; if the calendar is empty we fall back to BDay. A run on a
+    non-trading day always rolls forward — there is no "today" to buy on, so
+    the cutoff is irrelevant.
     """
     now = now or dt.datetime.now()
     today = pd.Timestamp(now.date()).normalize()
     cutoff = dt.time(cutoff_hour, cutoff_minute)
-    if now.time() <= cutoff:
-        return today
-    # Past the cutoff — pick next trading day strictly after today.
+    past_cutoff = now.time() > cutoff
     cal = calendar if calendar is not None else _trading_calendar_cached()
+
     if len(cal) == 0:
+        # No cached calendar — best-effort: today counts only if it's a
+        # weekday that isn't a fixed-date holiday, and we're before the cutoff.
+        today_tradeable = today.weekday() < 5 and not _is_vn_fixed_holiday(today)
+        if today_tradeable and not past_cutoff:
+            return today
         return (today + pd.tseries.offsets.BDay(1)).normalize()
+
+    # Is today itself a trading day (present in the calendar)?
+    pos_left = int(cal.searchsorted(today, side="left"))
+    today_is_trading = pos_left < len(cal) and cal[pos_left].normalize() == today
+
+    # Before the cutoff on a trading day: buy today (close not yet locked in).
+    if today_is_trading and not past_cutoff:
+        return today
+
+    # Otherwise — past the cutoff, OR today is a weekend/holiday — advance to
+    # the next trading day strictly after today.
     pos = int(cal.searchsorted(today, side="right"))
     if pos < len(cal):
         return cal[pos].normalize()
-    # today is past the end of the cached calendar — project forward.
-    anchor = today if today.weekday() < 5 else (today + pd.tseries.offsets.BDay(1)).normalize()
-    if anchor == today:
-        return (today + pd.tseries.offsets.BDay(1)).normalize()
-    return anchor
+    # today is past the end of the cached calendar — project forward as
+    # weekdays, still honoring the cutoff for a tradeable weekday.
+    today_tradeable = today.weekday() < 5 and not _is_vn_fixed_holiday(today)
+    if today_tradeable and not past_cutoff:
+        return today
+    return (today + pd.tseries.offsets.BDay(1)).normalize()
 
 
 def _last_trading_day_of_month(reference: pd.Timestamp,
@@ -424,11 +444,10 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
     return (cal[-1] + pd.tseries.offsets.BDay(extra)).normalize()
 
 
-def run_signature(mode: str, exit_offset_days: int, units: int | None = None,
+def run_signature(mode: str, exit_offset_days: int,
                   hose_only: bool = False,
                   include_etfs: bool = True,
-                  exclude: Iterable[str] | None = None,
-                  budget_vnd: int | None = None) -> str:
+                  exclude: Iterable[str] | None = None) -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
@@ -444,10 +463,13 @@ def run_signature(mode: str, exit_offset_days: int, units: int | None = None,
     ``exclude`` is the per-session blacklist of tickers. When non-empty, the
     signature is suffixed with ``x{TICKERS}`` (sorted, dash-joined) so an
     excluded-rerun produces a distinct picks file from the same-day full run.
+
+    The ``u100`` size token is kept as a fixed constant for backward
+    compatibility: position sizing was removed (pricing is per share), but the
+    filename / ledger ``run_id`` format stays ``mode_d{horizon}_u100[...]`` so
+    new runs keep grouping with — and replacing — historical artifacts.
     """
-    # Size token: budget mode -> b{VND}, unit mode -> u{shares}.
-    size_tok = f"b{int(budget_vnd)}" if budget_vnd is not None else f"u{int(units)}"
-    parts = [mode, f"d{int(exit_offset_days)}", size_tok]
+    parts = [mode, f"d{int(exit_offset_days)}", "u100"]
     if hose_only:
         parts.append("HOSE")
     if not include_etfs:
@@ -462,8 +484,6 @@ def run_signature(mode: str, exit_offset_days: int, units: int | None = None,
 def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
            run_id: str | None = None,
            exit_offset_days: int | None = None,
-           units: int | None = None,
-           budget_vnd: int | None = None,
            hose_only: bool = False,
            include_etfs: bool = True,
            exclude: Iterable[str] | None = None) -> int:
@@ -471,8 +491,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
 
     `picks` is the dataframe returned by mode runs; must have at minimum:
     columns symbol, pred_mean. Optional: news_score, adjusted, close, rank.
-    The default ``run_id`` includes mode/horizon/units/hose-only so a same-
-    day rerun with different parameters does not clobber prior rows.
+    The default ``run_id`` includes mode/horizon/hose-only so a same-day
+    rerun with different parameters does not clobber prior rows.
     """
     if picks is None or len(picks) == 0:
         return 0
@@ -482,12 +502,8 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
     as_of = (pd.to_datetime(as_of) if as_of is not None
              else effective_today_for_trading())
     target = _next_trading_offset(as_of, exit_off)
-    u = int(units) if units is not None else int(
-        cfg.broker.get("default_position_units", 100)
-        if hasattr(cfg, "broker") else 100
-    )
     sig = run_signature(mode=mode, exit_offset_days=exit_off,
-                        units=u, budget_vnd=budget_vnd, hose_only=hose_only,
+                        hose_only=hose_only,
                         include_etfs=include_etfs,
                         exclude=exclude)
     if run_id is None:
@@ -838,10 +854,10 @@ def _entry_slippage_stats(df: pd.DataFrame) -> dict | None:
 
 
 def _by_run_signature(df: pd.DataFrame) -> dict:
-    """Group evaluated picks by full run signature (mode + horizon + units +
-    hose flag). Lets the LLM see, for example, that its `claude_d2_u100`
-    runs hit 60% but `claude_d18_u200` runs hit 40% — finer-grained than
-    horizon alone, since fees and hose-only filters change the population."""
+    """Group evaluated picks by full run signature (mode + horizon + hose
+    flag). Lets the LLM see, for example, that its `claude_d2_u100` runs hit
+    60% but `claude_d18_u100` runs hit 40% — finer-grained than horizon alone,
+    since hose-only / exclude filters change the population."""
     if "signature" not in df.columns:
         return {}
     out: dict = {}
@@ -908,7 +924,7 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
     If ``current_horizon`` (the T+N being predicted right now) is provided,
     its line in the by-horizon table is highlighted — those rows are the
     apples-to-apples comparison and the LLM should weight them most.
-    If ``current_signature`` (full param set, e.g. ``claude_d18_u200_HOSE``)
+    If ``current_signature`` (full param set, e.g. ``claude_d18_u100_HOSE``)
     is provided, an additional by-signature table highlights the EXACT
     parameter combination history — the most apples-to-apples view."""
     perf = recent_performance(window_days=window_days, mode=mode)
@@ -930,7 +946,7 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
         lines += [
             "### By full run signature (most apples-to-apples)",
             "",
-            "Each row is a distinct parameter combination (mode + horizon + units",
+            "Each row is a distinct parameter combination (mode + horizon",
             "+ hose-only). Re-runs of the same combo update the same row in the",
             "ledger. **THIS RUN** marks the exact parameters of today's prediction.",
             "",

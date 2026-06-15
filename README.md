@@ -19,7 +19,7 @@ itself later.
 | [`predict_gemini.bat`](predict_gemini.bat) | ML + writes a prompt file you paste into Gemini Chat (web, with browsing). Opens the prompt in Notepad automatically. |
 | [`evaluate.bat`](evaluate.bat) | Refreshes data and grades any past predictions whose T+N has now passed. |
 
-Each predict .bat asks for days / sizing (units or budget) and runs the entire universe.
+Each predict .bat asks for days / hose-only / etfs / exclude / warm-only and runs the entire universe.
 
 ### B. Claude mode — paste a prompt into Claude Desktop
 
@@ -31,7 +31,7 @@ tools, which only exist inside Claude.
 
 1. Open Claude Code or Cowork in Claude Desktop.
 2. Paste the contents of [`claude_prompt.md`](claude_prompt.md) into the chat.
-3. Claude will ask you for `days`, sizing (`units` or `budget`), then drive the entire
+3. Claude will ask you for `days`, then drive the entire
    pipeline (run the ML stage → research each candidate across emergent
    per-ticker dimensions → fill the plan → finalize → report explained
    picks).
@@ -44,7 +44,7 @@ emergent, not a fixed checklist), and the ACBS fee model.
 ### C. CLI (advanced)
 
 ```bash
-# Standard daily run (entire universe, T+2 horizon, 100-share lots)
+# Standard daily run (entire universe, T+2 horizon)
 .venv\Scripts\python -m stockpredict.cli run --mode base
 
 # Longer hold horizon (T+5, automatically retrains)
@@ -52,9 +52,6 @@ emergent, not a fixed checklist), and the ACBS fee model.
 
 # Last trading day of the month
 .venv\Scripts\python -m stockpredict.cli run --days end --mode base
-
-# Larger position size
-.venv\Scripts\python -m stockpredict.cli run --units 500 --mode base
 
 # Other commands
 .venv\Scripts\python -m stockpredict.cli evaluate
@@ -73,8 +70,6 @@ power users who want a fully scripted workflow without Claude Desktop.
 | ---- | ------- | ------- |
 | `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
 | `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
-| `--units N` | Position size in shares. Min 100, multiple of 100 (ACBS minimum lot rule). Mutually exclusive with `--budget`. | `100` |
-| `--budget N` | **Budget mode** — a per-pick money limit in VND (e.g. `2000000`). Each pick is sized so the cash to enter (shares + buy-side fee) fits this, floored to a 100-share lot; a pick too pricey for one lot is still shown at the 100-share minimum, flagged `over_budget`. Mutually exclusive with `--units`. | _(off)_ |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
 | `--top N` | cap how many picks to print | _(off — lists all actionable picks dynamically)_ |
@@ -371,7 +366,7 @@ badges:
 | ----- | --------- |
 | `BEST adjusted` | Highest `adjusted` (= `pred_mean × (1 + 0.05 × news_score)`). The system's overall conviction. |
 | `BEST rr` | Highest `rr_ratio = net_reward / net_loss`. Most asymmetric upside-vs-downside. |
-| `BEST net` | Highest `net_reward_vnd`. Biggest absolute dollar edge at the configured `--units` size. |
+| `BEST net` | Highest `net_reward_vnd`. Biggest per-share dollar edge (net of fees). |
 | `BEST composite` | Lowest sum of (rank by adjusted) + (rank by rr) + (rank by net). The all-rounder. |
 
 The four boolean fields (`best_adjusted`, `best_rr`, `best_net`,
@@ -387,29 +382,22 @@ After a run, look in two places:
 
 ### Trade-ready columns (the ones you need)
 
-For each pick, the program produces actual **VND** prices sized at the
-position you set with `--units` (default 100, rounded down to whole lots) —
-or, in **budget mode** (`--budget N`), sized so the cash to enter each position
-(shares + buy-side ACBS fee) stays within your per-pick VND budget (floored to a
-100-share lot; picks too pricey for one lot are still shown at the minimum and
-flagged `over_budget`):
+For each pick, the program produces actual **VND** prices on a **per-share**
+basis. You size the position yourself:
 
 | column | meaning |
 | ------ | ------- |
-| `position_units` | how many shares this trade is for |
-| `position_value_vnd` | gross trade value (entry × units) |
-| `over_budget` | budget mode only: `true` if even one 100-share lot — shares + buy fee — costs more than `--budget` (the pick is shown at the minimum so you can raise your budget) |
 | `close_vnd` | today's close, for reference |
 | `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile (`pricing.entry_low_alpha`) of recent next-day-low returns (clipped never above the close). Falls back to the close when no low head is present. |
 | `entry_limit_pct` | the predicted dip vs close (≤ 0) baked into `entry_vnd` |
 | `target_vnd` | price to sell at on the exit day T+N (`entry × (1 + pred_mean)`) |
 | `target_low_vnd` / `target_high_vnd` | mean ± 1 ensemble-std target band |
 | `stop_vnd` | stop-loss (`entry − stop_atr_mult × ATR(14)`) |
-| `gross_reward_vnd` | `(target − entry) × units` (before fees) |
-| `max_loss_vnd` | `(entry − stop) × units` (before fees) |
-| `fees_round_trip_vnd` | ACBS commission + VAT + PIT for this round trip |
-| `net_reward_vnd` | **predicted profit after all fees** — the headline number |
-| `net_loss_vnd` | worst-case loss if stopped out (max_loss + fees) |
+| `gross_reward_vnd` | `target − entry` per share (before fees) |
+| `max_loss_vnd` | `entry − stop` per share (before fees) |
+| `fees_round_trip_vnd` | ACBS commission + VAT + PIT for this round trip, per share |
+| `net_reward_vnd` | **predicted per-share profit after all fees** — the headline number |
+| `net_loss_vnd` | worst-case per-share loss if stopped out (max_loss + fees) |
 | `rr_ratio` | `net_reward / net_loss` — should be ≥ 0.8 to be `actionable` |
 | `breakeven_pct` | what % the price needs to move just to cover fees (~0.43% at ACBS) |
 | `actionable` | `True` only when `net_reward > 0` AND `rr_ratio ≥ 0.8` |
@@ -436,8 +424,6 @@ commission_pct: 0.15       # per side
 vat_pct: 10                # VAT on commission
 pit_pct: 0.10              # PIT on the SELL transaction value
 min_fee_vnd: 0
-lot_size: 100
-default_position_units: 100
 ```
 
 Round-trip cost ≈ **0.43%** of trade value:
@@ -449,7 +435,7 @@ total    ≈ 0.43%
 
 If you have a different broker, edit the percentages.
 
-### Worked example (today's run, `--units 100`)
+### Worked example (today's run, per share)
 
 ```
 symbol entry_vnd target_vnd stop_vnd fees   net_reward net_loss   rr   actionable
@@ -460,11 +446,10 @@ ABB    14,900    14,925     14,457   6,414  -3,914     50,714     -0.08 False
 
 Reading this:
 - **Buy DXG at 15,350 VND/share, sell at 15,376 VND/share, stop at 14,534.**
-- 100 units = 1,535,000 VND position.
-- Round-trip fees: 6,607 VND.
-- Predicted net P&L: **−4,007 VND** (loss). Why? `pred_mean=+0.0017` → only
-  +26 VND/share gain × 100 units = 2,600 VND gross, which doesn't cover the
-  6,607 VND fees.
+- All figures are per share — you size the position yourself.
+- Round-trip fees (per share): 6,607 VND.
+- Predicted net P&L: **−4,007 VND/share** (loss). Why? `pred_mean=+0.0017` → only
+  +26 VND/share gross, which doesn't cover the ACBS round-trip fees per share.
 - `actionable=False` — don't trade.
 
 This is the tool doing its job. Most days the model's T+N predictions are
@@ -478,11 +463,8 @@ that does.
 
 ### Tuning
 
-- Want to size bigger? Pass `--units 500` (or 1000).
-  Fees scale linearly with trade value, so the % cost stays at 0.43% — but
-  the absolute predicted-net dollars scale up.
-- Prefer to size by money instead of share count? Pass `--budget 5000000` to
-  size every pick to ~5,000,000 VND each (mutually exclusive with `--units`).
+- All P&L figures are per share — you size the position yourself. Fees scale
+  linearly with trade value, so the % cost stays at 0.43% regardless of size.
 - Want to relax the actionable gate? Lower `pricing.min_rr_ratio` in
   config.yaml (default 0.8). Setting it to 0.0 would only require positive
   net_reward.
@@ -673,14 +655,16 @@ filename, the news plan filename, the resolved `--days end` target,
 
 Every saved artifact (picks JSON, news plan markdown, candidates
 parquet, meta JSON) is suffixed with a **run signature** that captures
-the parameters that affect the picks: `mode_d{horizon}_{u<units>|b<budget>}[_HOSE]`.
+the parameters that affect the picks: `mode_d{horizon}_u100[_HOSE][_x<TICKERS>]`.
+The `u100` token is a fixed constant (position sizing was removed; pricing is
+per share) kept so filenames and ledger IDs stay backward-compatible.
 
 Examples:
 
 ```
 reports/picks_2026-05-05_base_d2_u100.json
-reports/picks_2026-05-05_claude_d18_u200_HOSE.json
-reports/claude_news_plan_2026-05-05_claude_d18_u200_HOSE.md
+reports/picks_2026-05-05_claude_d18_u100_HOSE.json
+reports/claude_news_plan_2026-05-05_claude_d18_u100_HOSE.md
 ```
 
 So if you run multiple predictions in a single day with different
@@ -688,7 +672,7 @@ parameters, none of them overwrite each other. A re-run of the **exact
 same parameters** does override (idempotent within the day).
 
 The same signature is the basis for the ledger's `run_id` (e.g.
-`20260505_claude_d18_u200_HOSE`) and gets stored in a dedicated
+`20260505_claude_d18_u100_HOSE`) and gets stored in a dedicated
 `signature` column. That powers the next section.
 
 ## Self-correction (Claude mode only)
@@ -705,9 +689,9 @@ block. The block now has three apples-to-apples views, in order of
 specificity:
 
 1. **By full run signature** — exact parameter match (mode + horizon +
-   units + hose-only). The row matching today's signature is marked
+   hose-only). The row matching today's signature is marked
    `← THIS RUN`. This is the highest-fidelity comparison: what your
-   `claude_d18_u200` runs have actually returned.
+   `claude_d18_u100` runs have actually returned.
 2. **By horizon** — broader cross-run comparison. Useful when the exact
    signature has too few data points yet.
 3. **By news_score** — pooled across runs, but lets Claude see whether

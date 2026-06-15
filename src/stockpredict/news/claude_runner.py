@@ -27,7 +27,7 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     """Emit the markdown plan file. `candidates` must include columns
     [symbol, pred_mean, pred_std, close, rsi_14, mom_5, mom_20].
     `run_signature` is appended to the filename so distinct same-day
-    runs (different horizon / units / hose-only) don't override each
+    runs (different horizon / hose-only) don't override each
     other — pass it from the mode caller for full uniqueness."""
     on = on or dt.date.today()
     cfg = load_config().modes["claude"]
@@ -171,7 +171,7 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
                      f"(±{row.get('pred_std', 0):.4f})  close={row.get('close', float('nan')):.0f}  "
                      f"rsi={row.get('rsi_14', float('nan')):.0f}  "
                      f"mom20={row.get('mom_20', float('nan')):+.3f}")
-        # Position-sized pricing if available
+        # Per-share pricing if available
         if "entry_vnd" in row and pd.notna(row.get("entry_vnd")):
             entry = int(row["entry_vnd"])
             tgt = int(row["target_vnd"])
@@ -179,11 +179,10 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
             fees = int(row.get("fees_round_trip_vnd", 0))
             net = int(row.get("net_reward_vnd", 0))
             rr = row.get("rr_ratio", float("nan"))
-            pos = int(row.get("position_units", 100))
             actionable = bool(row.get("actionable", False))
             net_sign = "+" if net >= 0 else ""
             lines.append(
-                f"Trade ({pos} units): entry={entry:,}  target={tgt:,}  stop={stop:,}  "
+                f"Trade (per share): entry={entry:,}  target={tgt:,}  stop={stop:,}  "
                 f"fees={fees:,}  net={net_sign}{net:,}  rr={rr:.2f}  "
                 f"{'ACTIONABLE' if actionable else 'skip (rr/net too low)'}"
             )

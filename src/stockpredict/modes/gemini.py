@@ -26,16 +26,13 @@ from ..tracking import effective_today_for_trading, run_signature
 
 
 def run(on: str | None = None,
-        units: int | None = None,
-        budget_vnd: int | None = None,
         exit_offset_days: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
         exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
     """Always emits a prompt file; returns (candidates, prompt_path, 'prompt-only')."""
-    candidates, prompt_path = emit_prompt(on=on, units=units,
-                                          budget_vnd=budget_vnd,
+    candidates, prompt_path = emit_prompt(on=on,
                                           exit_offset_days=exit_offset_days,
                                           symbols=symbols, hose_only=hose_only,
                                           include_etfs=include_etfs,
@@ -44,15 +41,12 @@ def run(on: str | None = None,
 
 
 def emit_prompt(on: str | None = None,
-                units: int | None = None,
-                budget_vnd: int | None = None,
                 exit_offset_days: int | None = None,
                 symbols: list[str] | None = None,
                 hose_only: bool = False,
                 include_etfs: bool = True,
                 exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
     candidates = rank_today(actionable_only=True, on=on,
-                            units=units, budget_vnd=budget_vnd,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     if on:
         on_date = dt.date.fromisoformat(on)
@@ -60,16 +54,12 @@ def emit_prompt(on: str | None = None,
         on_date = effective_today_for_trading().date()
 
     full_cfg = load_config()
-    eff_units = None if budget_vnd is not None else (
-        int(units) if units is not None
-        else int(full_cfg.broker.get("default_position_units", 100))
-    )
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         full_cfg.target["exit_offset_days"]
     )
     excl_list = sorted({s.upper() for s in (exclude or [])})
     sig = run_signature(mode="gemini", exit_offset_days=eff_horizon,
-                        units=eff_units, budget_vnd=budget_vnd, hose_only=hose_only,
+                        hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
 
     # write_prompt currently uses the date in the filename; we suffix with sig
@@ -87,9 +77,6 @@ def emit_prompt(on: str | None = None,
     meta_path.write_text(
         json.dumps({
             "exit_offset_days": eff_horizon,
-            "sizing_mode": "budget" if budget_vnd is not None else "units",
-            "units": eff_units,
-            "budget_vnd": budget_vnd,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
             "exclude": excl_list,
@@ -153,10 +140,7 @@ def finalize(prompt_path: str | Path,
         except Exception:
             exit_off = None
 
-    # Pull units / hose_only / include_etfs / exclude / signature from sidecar meta if present.
-    eff_units = None
-    eff_budget = None
-    sizing_mode = "units"
+    # Pull hose_only / include_etfs / exclude / signature from sidecar meta if present.
     eff_hose = False
     # Legacy meta files (pre-ETF) lack `include_etfs`; default to True so
     # the recovered signature matches what the original emit_prompt produced.
@@ -168,10 +152,6 @@ def finalize(prompt_path: str | Path,
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            eff_units = meta.get("units")
-            eff_budget = meta.get("budget_vnd")
-            sizing_mode = meta.get("sizing_mode") or (
-                "budget" if eff_budget is not None else "units")
             eff_hose = bool(meta.get("hose_only", False))
             eff_etfs = bool(meta.get("include_etfs", True))
             eff_excl = list(meta.get("exclude") or [])
@@ -181,8 +161,6 @@ def finalize(prompt_path: str | Path,
     if sig is None:
         sig = run_signature(mode="gemini",
                             exit_offset_days=int(exit_off or 2),
-                            units=(None if eff_budget is not None else int(eff_units or 100)),
-                            budget_vnd=eff_budget,
                             hose_only=eff_hose,
                             include_etfs=eff_etfs,
                             exclude=eff_excl)
@@ -194,9 +172,6 @@ def finalize(prompt_path: str | Path,
         "as_of": today,
         "mode": "gemini",
         "exit_offset_days": exit_off,
-        "sizing_mode": sizing_mode,
-        "units": eff_units,
-        "budget_vnd": eff_budget,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
@@ -212,6 +187,6 @@ def finalize(prompt_path: str | Path,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="gemini", as_of=today_ts,
-           exit_offset_days=exit_off, units=eff_units, budget_vnd=eff_budget,
+           exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out

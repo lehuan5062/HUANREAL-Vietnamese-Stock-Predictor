@@ -1,5 +1,5 @@
-"""Translate ML predictions into actionable buy/target/stop prices, sized for
-the user's actual trade (default 100 units) and net of broker fees.
+"""Translate ML predictions into actionable buy/target/stop prices, on a
+per-share basis and net of broker fees.
 
 vnstock prices are in **thousand VND** (e.g. close=15.35 means 15,350 VND).
 We expose all suggestion columns in absolute VND (integer) since that's how
@@ -16,9 +16,10 @@ Two entries are surfaced:
   the user can compare quoted entry against the close even when the
   limit-prediction shifts ``entry_vnd`` below it.
 
-All position sizing, risk-reward, fees, and the ``actionable`` gate use
-``entry_vnd`` (the realistic limit price), so what the user sees is
-exactly the trade they'd place if the limit fills.
+All risk-reward, fees, and the ``actionable`` gate use ``entry_vnd`` (the
+realistic limit price), so what the user sees is exactly the trade they'd
+place if the limit fills. All P&L figures are per share — the user decides
+their own position size; the gate is size-invariant.
 
 ACBS fee model (default — override in config.yaml):
   buy  cost = trade_value * commission_pct * (1 + vat_pct/100)
@@ -58,8 +59,7 @@ def _broker_costs(buy_value: pd.Series, sell_value: pd.Series, broker: dict
     return buy_fee, sell_fee, total, sell_pit  # last is just for audit if needed
 
 
-def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
-                          budget_vnd: int | None = None) -> pd.DataFrame:
+def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     """Append entry / target / stop / fees / net P&L columns to a candidates frame.
 
     Required input columns (already produced by the feature pipeline):
@@ -76,34 +76,23 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
                      stop_atr_mult * ATR risk distance is exact). When
                      absent, ``entry_vnd = close * 1000`` (legacy).
 
-    Sizing:
-        ``units`` (default from config) sizes every row to that share count,
-        floored to whole lots. Pass ``budget_vnd`` instead to size each row so
-        the cash to enter — shares + buy-side fee — stays within the budget
-        (``floor(budget_vnd / (entry + buy fee))`` lots). A pick whose minimum
-        lot already exceeds the budget is kept at one lot and flagged
-        ``over_budget`` (shown, never dropped). Exactly one of ``units`` /
-        ``budget_vnd`` is meaningful;
-        ``budget_vnd`` takes precedence if both are given.
+    All P&L is computed PER SHARE — there is no position-size input. Position
+    sizing is left entirely to the user; the ``actionable`` gate (and rr_ratio /
+    breakeven_pct) is size-invariant, so a per-share view is sufficient.
 
-    Output columns appended (all VND, integer where applicable):
-        position_units, position_value_vnd
+    Output columns appended (all VND per share, integer where applicable):
         entry_vnd                limit-buy price (= close*(1+pred_low) when present)
         close_vnd                reference: today's close in VND
         entry_limit_pct          predicted dip relative to close (clipped <= 0)
         target_vnd, target_low_vnd, target_high_vnd, stop_vnd
-        gross_reward_vnd         target - entry, scaled by position_units
-        max_loss_vnd             entry - stop, scaled by position_units
+        gross_reward_vnd         target - entry (per share)
+        max_loss_vnd             entry - stop (per share)
         fees_round_trip_vnd      buy commission+VAT + sell commission+VAT + sell PIT
         net_reward_vnd           gross_reward - fees   (the headline number)
         net_loss_vnd             max_loss + fees       (worst-case if stopped out)
         rr_ratio                 net_reward / net_loss
         breakeven_pct            price move needed just to cover fees
         actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
-        over_budget              budget mode only: the cash to enter (position
-                                 value + buy-side fee) still exceeds budget_vnd
-                                 — only when even one lot doesn't fit. Always
-                                 False in unit mode.
     """
     if df is None or len(df) == 0:
         return df
@@ -112,19 +101,8 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
     pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
 
-    pos_units = int(units) if units is not None else int(broker.get("default_position_units", 100))
-    default_lot = int(broker.get("lot_size", 100))
-    etf_lot = int(broker.get("etf_lot_size", 100))
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
-    # Buy-side fee rate (commission + VAT on commission) — mirrors the buy leg
-    # of ``_broker_costs``. Budget mode sizes against the cash to ENTER, i.e.
-    # shares + buy fee, so the position stays within the budget. (The sell fee
-    # comes out of proceeds at exit, not the entry budget.) ``min_fee_vnd`` is 0
-    # at ACBS; if set, the over_budget check below still catches any shortfall.
-    _commission = float(broker.get("commission_pct", 0.0)) / 100.0
-    _vat = float(broker.get("vat_pct", 0.0)) / 100.0
-    buy_fee_rate = _commission * (1.0 + _vat)
 
     out = df.copy()
 
@@ -155,40 +133,13 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     entry_k = entry_v / 1000.0
     stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
 
-    # Per-row lot size. Stocks and HOSE ETFs both trade in 100-unit lots; we
-    # still consult the cached universe's instrument_type (symbol-shape regex
-    # fallback) so the split survives if a future config re-separates them.
-    # ``symbol`` is optional per this function's contract — when absent
-    # (unit tests, legacy callers) every row uses the stock lot.
-    from .data.universe import is_etf
-    if "symbol" in out.columns:
-        sym = out["symbol"].astype(str)
-    else:
-        sym = pd.Series("", index=out.index)
-    row_lots = sym.map(lambda s: etf_lot if is_etf(s) else default_lot).astype(int)
+    # Per-share P&L. The user sizes the position themselves; everything below
+    # is one share's worth of reward / risk / fees. The actionable gate and
+    # rr_ratio are size-invariant, so a per-share view is sufficient.
+    gross_reward = target_v - entry_v
+    max_loss_units = entry_v - stop_v
 
-    # Size each row down to whole lots, never below one lot (VN exchange rule):
-    #   units mode  — round the requested ``pos_units`` down.
-    #   budget mode — floor ``budget_vnd / (entry + buy fee)`` down, so the cash
-    #                 to enter (shares + buy-side fee) stays within the budget.
-    #                 A pick too pricey for even one lot is clipped UP to one lot
-    #                 and flagged ``over_budget`` below (shown, never dropped).
-    if budget_vnd is not None:
-        cost_per_share = entry_v * (1.0 + buy_fee_rate)
-        raw_shares = np.floor(float(budget_vnd) / cost_per_share.where(cost_per_share > 0))
-        row_pos_units = ((raw_shares.fillna(0) // row_lots) * row_lots
-                         ).clip(lower=row_lots).astype(int)
-    else:
-        row_pos_units = ((pos_units // row_lots) * row_lots).clip(lower=row_lots).astype(int)
-
-    # Position-level P&L (sized per row using row_pos_units, which differs
-    # for ETFs vs stocks due to the different lot sizes).
-    position_v = entry_v * row_pos_units
-    target_position_v = target_v * row_pos_units
-    gross_reward = (target_v - entry_v) * row_pos_units
-    max_loss_units = (entry_v - stop_v) * row_pos_units
-
-    buy_fee, sell_fee, fees_total, _ = _broker_costs(position_v, target_position_v, broker)
+    buy_fee, sell_fee, fees_total, _ = _broker_costs(entry_v, target_v, broker)
     net_reward = gross_reward - fees_total
     net_loss = max_loss_units + fees_total
 
@@ -197,20 +148,9 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     valid = (max_loss_units > 0) & net_loss.notna()
     rr[valid] = net_reward[valid] / net_loss[valid]
 
-    breakeven_pct = (fees_total / position_v).round(4)
+    breakeven_pct = (fees_total / entry_v).round(4)
     actionable = (net_reward > 0) & (rr >= min_rr) & valid
 
-    # Budget mode: flag picks whose cash-to-enter (position value + buy fee)
-    # still exceeds the budget. That only happens when even one lot doesn't fit
-    # (we clip up to one lot rather than drop), so the user can see a real pick
-    # they'd need a bigger budget for. False for every row in unit mode.
-    if budget_vnd is not None:
-        over_budget = (position_v + buy_fee) > float(budget_vnd)
-    else:
-        over_budget = pd.Series(False, index=out.index)
-
-    out["position_units"] = row_pos_units.astype("Int64")
-    out["position_value_vnd"] = position_v.round(0).astype("Int64")
     out["entry_vnd"] = entry_v.astype("Int64")
     out["close_vnd"] = close_v.astype("Int64")
     out["entry_limit_pct"] = pred_low_eff.round(6)
@@ -226,5 +166,4 @@ def add_price_suggestions(df: pd.DataFrame, units: int | None = None,
     out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
     out["actionable"] = actionable
-    out["over_budget"] = over_budget.astype(bool)
     return out

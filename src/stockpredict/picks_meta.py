@@ -8,8 +8,8 @@ Categories:
   - best_adjusted   : top by ``adjusted`` (= pred_mean × (1 + 0.05 × news_score))
                       — the system's overall conviction.
   - best_rr         : top by ``rr_ratio`` — most asymmetric upside-vs-downside.
-  - best_net        : top by ``net_reward_vnd`` — biggest absolute dollar edge
-                      at the configured ``--units`` size.
+  - best_net        : top by ``net_reward_vnd`` — biggest per-share dollar edge
+                      (net of round-trip fees).
   - best_composite  : top by mean of the three rank columns above. Use this
                       when no single metric should dominate.
 

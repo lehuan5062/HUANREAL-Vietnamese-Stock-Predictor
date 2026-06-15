@@ -211,10 +211,10 @@ def test_pricing_recomputes_rr_against_limit_entry():
                    "pred_std": 0.005, "atr_14": 0.40}
     no_low = add_price_suggestions(pd.DataFrame([base_kwargs])).iloc[0]
     with_low = add_price_suggestions(pd.DataFrame([{**base_kwargs, "pred_low": -0.01}])).iloc[0]
-    # gross_reward at close-entry: (21000 - 20000) × 100 = 100,000
-    # gross_reward at limit-entry (-1%): (21000 - 19800) × 100 = 120,000
+    # gross_reward per share at close-entry: 21000 - 20000 = 1,000
+    # gross_reward per share at limit-entry (-1%): 21000 - 19800 = 1,200
     assert int(with_low["gross_reward_vnd"]) > int(no_low["gross_reward_vnd"])
-    assert int(with_low["gross_reward_vnd"]) == 120_000
+    assert int(with_low["gross_reward_vnd"]) == 1_200
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ def test_record_captures_pred_low_and_entry_limit_price(monkeypatch, tmp_path):
     }])
     n = tracking.record(picks, mode="claude",
                         as_of=pd.Timestamp("2026-05-05"),
-                        exit_offset_days=2, units=100)
+                        exit_offset_days=2)
     assert n == 1
     df = tracking._read()
     assert df.iloc[0]["pred_low"] == -0.012
@@ -259,7 +259,7 @@ def test_record_no_pred_low_leaves_limit_nan(monkeypatch, tmp_path):
     }])
     tracking.record(picks, mode="base",
                     as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2, units=100)
+                    exit_offset_days=2)
     df = tracking._read()
     assert pd.isna(df.iloc[0]["pred_low"])
     assert pd.isna(df.iloc[0]["entry_limit_price"])
