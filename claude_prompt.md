@@ -168,6 +168,18 @@ and move on.
     (State Bank of Vietnam)
   - Cross-check claims across at least 2 sources before scoring.
 
+- **Headless web access ONLY. Never launch a GUI browser.** All web
+  research must go through the `WebSearch` and `WebFetch` tools, or headless
+  HTTP from a script (e.g. `Invoke-WebRequest`/`curl` reading the response
+  body). You and any sub-agent or sub-workflow you spawn are FORBIDDEN from
+  opening a visible browser to "verify" anything. Specifically, never run
+  `Start-Process`, `start`, `explorer`, `Invoke-Item`, `rundll32 url.dll`,
+  `os.startfile`, `webbrowser.open`, `msedge`/`chrome` launches, or any
+  `computer-use`/preview tool against an `http(s)` URL. These hand the URL to
+  the user's default browser and pop real tabs on their desktop — which looks
+  like a browser hijack. If a tool returns no usable content, move on or note
+  the gap; do not fall back to opening a browser window.
+
 - **Score** based on what you actually found:
   - `+1` material bullish news (earnings beat, sector tailwind, contract win,
     favourable policy, supply scarcity benefiting margin)
