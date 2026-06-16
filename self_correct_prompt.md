@@ -179,7 +179,7 @@ D:\stock\.venv\Scripts\python.exe -c "import pandas as pd; df = pd.read_parquet(
 ```
 
 Where `<RUN_ID>` is `<YYYYMMDD>_<run_signature>` — e.g.
-`20260506_claude_d11_u100`. Compute it from `as_of` (strip dashes) and
+`20260506_claude_d11`. Compute it from `as_of` (strip dashes) and
 `run_signature`.
 
 **Stage gates** (pick the highest stage that fully passes):

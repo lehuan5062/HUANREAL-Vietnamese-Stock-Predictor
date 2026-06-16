@@ -100,14 +100,14 @@ def test_run_signature_idempotent():
     a = tracking.run_signature("claude", 18, hose_only=True)
     b = tracking.run_signature("claude", 18, hose_only=True)
     assert a == b
-    assert a == "claude_d18_u100_HOSE"
+    assert a == "claude_d18_HOSE"
 
 
 def test_run_signature_no_hose_tag_when_off():
     """hose_only=False omits the HOSE tag — keeps signatures readable."""
     sig = tracking.run_signature("base", 2, hose_only=False)
     assert "HOSE" not in sig
-    assert sig == "base_d2_u100"
+    assert sig == "base_d2"
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def test_feedback_block_with_unseen_horizon(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_record_uses_run_signature_for_default_run_id(monkeypatch, tmp_path):
-    """When run_id is not passed, it's built from mode/horizon/units/hose_only."""
+    """When run_id is not passed, it's built from mode/horizon/hose_only."""
     monkeypatch.setattr(tracking, "ledger_path", lambda: tmp_path / "predictions.parquet")
     picks = pd.DataFrame([{
         "symbol": "AAA", "pred_mean": 0.01, "rank": 1,
@@ -265,7 +265,7 @@ def test_record_uses_run_signature_for_default_run_id(monkeypatch, tmp_path):
     tracking.record(picks, mode="base", as_of=pd.Timestamp("2026-05-05"),
                     exit_offset_days=18, hose_only=True)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
-    assert df.iloc[0]["run_id"] == "20260505_base_d18_u100_HOSE"
+    assert df.iloc[0]["run_id"] == "20260505_base_d18_HOSE"
 
 
 def test_record_distinct_runs_coexist(monkeypatch, tmp_path):
@@ -285,7 +285,7 @@ def test_record_distinct_runs_coexist(monkeypatch, tmp_path):
                     exit_offset_days=18)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert len(df) == 2
-    assert set(df["run_id"]) == {"20260505_base_d2_u100", "20260505_base_d18_u100"}
+    assert set(df["run_id"]) == {"20260505_base_d2", "20260505_base_d18"}
 
 
 def test_record_same_run_id_replaces(monkeypatch, tmp_path):

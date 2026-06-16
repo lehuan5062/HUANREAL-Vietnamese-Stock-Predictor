@@ -463,13 +463,8 @@ def run_signature(mode: str, exit_offset_days: int,
     ``exclude`` is the per-session blacklist of tickers. When non-empty, the
     signature is suffixed with ``x{TICKERS}`` (sorted, dash-joined) so an
     excluded-rerun produces a distinct picks file from the same-day full run.
-
-    The ``u100`` size token is kept as a fixed constant for backward
-    compatibility: position sizing was removed (pricing is per share), but the
-    filename / ledger ``run_id`` format stays ``mode_d{horizon}_u100[...]`` so
-    new runs keep grouping with — and replacing — historical artifacts.
     """
-    parts = [mode, f"d{int(exit_offset_days)}", "u100"]
+    parts = [mode, f"d{int(exit_offset_days)}"]
     if hose_only:
         parts.append("HOSE")
     if not include_etfs:
@@ -855,9 +850,9 @@ def _entry_slippage_stats(df: pd.DataFrame) -> dict | None:
 
 def _by_run_signature(df: pd.DataFrame) -> dict:
     """Group evaluated picks by full run signature (mode + horizon + hose
-    flag). Lets the LLM see, for example, that its `claude_d2_u100` runs hit
-    60% but `claude_d18_u100` runs hit 40% — finer-grained than horizon alone,
-    since hose-only / exclude filters change the population."""
+    flag). Lets the LLM see, for example, that its `claude_d2` runs hit 60%
+    but `claude_d18` runs hit 40% — finer-grained than horizon alone, since
+    hose-only / exclude filters change the population."""
     if "signature" not in df.columns:
         return {}
     out: dict = {}
@@ -924,7 +919,7 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
     If ``current_horizon`` (the T+N being predicted right now) is provided,
     its line in the by-horizon table is highlighted — those rows are the
     apples-to-apples comparison and the LLM should weight them most.
-    If ``current_signature`` (full param set, e.g. ``claude_d18_u100_HOSE``)
+    If ``current_signature`` (full param set, e.g. ``claude_d18_HOSE``)
     is provided, an additional by-signature table highlights the EXACT
     parameter combination history — the most apples-to-apples view."""
     perf = recent_performance(window_days=window_days, mode=mode)

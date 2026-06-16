@@ -301,7 +301,7 @@ predicting (mode=base)...
 === #1 DCL  [BEST rr | BEST net | BEST composite]
   Trade: buy 100 @ 37,500 VND  |  target 40,155  |  stop 34,747
   P&L (after ACBS fees 16,829): net +248,671  rr 0.85  -> ACTIONABLE
-saved -> reports/picks_<date>_base_d11_u100.json
+saved -> reports/picks_<date>_base_d11.json
 ```
 
 Cost: each iteration trains a model from scratch (~20-30s on the
@@ -654,16 +654,14 @@ filename, the news plan filename, the resolved `--days end` target,
 
 Every saved artifact (picks JSON, news plan markdown, candidates
 parquet, meta JSON) is suffixed with a **run signature** that captures
-the parameters that affect the picks: `mode_d{horizon}_u100[_HOSE][_x<TICKERS>]`.
-The `u100` token is a fixed constant (position sizing was removed; pricing is
-per share) kept so filenames and ledger IDs stay backward-compatible.
+the parameters that affect the picks: `mode_d{horizon}[_HOSE][_x<TICKERS>]`.
 
 Examples:
 
 ```
-reports/picks_2026-05-05_base_d2_u100.json
-reports/picks_2026-05-05_claude_d18_u100_HOSE.json
-reports/claude_news_plan_2026-05-05_claude_d18_u100_HOSE.md
+reports/picks_2026-05-05_base_d2.json
+reports/picks_2026-05-05_claude_d18_HOSE.json
+reports/claude_news_plan_2026-05-05_claude_d18_HOSE.md
 ```
 
 So if you run multiple predictions in a single day with different
@@ -671,7 +669,7 @@ parameters, none of them overwrite each other. A re-run of the **exact
 same parameters** does override (idempotent within the day).
 
 The same signature is the basis for the ledger's `run_id` (e.g.
-`20260505_claude_d18_u100_HOSE`) and gets stored in a dedicated
+`20260505_claude_d18_HOSE`) and gets stored in a dedicated
 `signature` column. That powers the next section.
 
 ## Self-correction (Claude mode only)
@@ -690,7 +688,7 @@ specificity:
 1. **By full run signature** — exact parameter match (mode + horizon +
    hose-only). The row matching today's signature is marked
    `← THIS RUN`. This is the highest-fidelity comparison: what your
-   `claude_d18_u100` runs have actually returned.
+   `claude_d18` runs have actually returned.
 2. **By horizon** — broader cross-run comparison. Useful when the exact
    signature has too few data points yet.
 3. **By news_score** — pooled across runs, but lets Claude see whether
