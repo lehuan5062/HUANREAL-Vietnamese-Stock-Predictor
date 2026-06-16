@@ -411,7 +411,12 @@ filename identifies the report and the ledger holds the data. Structure:
      melt-up regime (low fills market-wide ≠ miscalibration). The
      trailing window auto-sizes with alpha via
      `pricing.entry_low_target_tail_obs` (default 15); an alpha change
-     needs a `train` to take effect.**
+     needs a `train` to take effect. Before any of this, check the picks
+     JSON: if `adj_entry_vnd != entry_vnd` for a pick, the news stage
+     overrode the entry and the user likely placed the ADJUSTED order —
+     the ledger's mechanical `entry_limit_price` / `fill_margin` for that
+     row reflects a limit that was never placed, so exclude those rows
+     before judging fill calibration or tuning this knob.**
    - `universe.liquidity_filter.min_adv_active_days` (currently 15 of 20)
      — raise if the user reports a pick was effectively untradeable (thin
      volume / "I was the only buyer"). That's a universe-liquidity problem,
@@ -514,5 +519,10 @@ treating any change as confirmed.
   in every per-pick table you present; do not silently omit it.
 - Don't propose changes to `dimensions_cited` parsing or the ledger
   schema unless you've shown a concrete bug, not a stylistic preference.
+- Don't tune `entry_low_alpha` (or read Stage-1 fill calibration) off
+  rows where the news stage overrode the entry (`adj_entry_vnd !=
+  entry_vnd` in the picks JSON). The ledger records only the mechanical
+  `entry_limit_price`, so its `fill_margin` for those rows describes a
+  limit the user didn't place — it says nothing about the low head.
 
 Now, ask the user for the picks path and begin.
