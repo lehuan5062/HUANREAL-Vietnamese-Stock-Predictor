@@ -130,6 +130,28 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         "today is geopolitically quiet, say so in `global_summary` and move on."
     )
     parts.append("")
+    parts.append(
+        f"**VN-Index trend call — do this ONCE, before scoring any ticker.** "
+        f"Research where the VN-Index is likely headed over the next ~{horizon} "
+        f"trading day(s) (the holding window). Look at: the index's recent trend "
+        f"and momentum (last few sessions + last few weeks), where it sits vs its "
+        f"50/200-day moving averages and recent support/resistance, market breadth "
+        f"(are most stocks rising or is the index propped up by a few large caps — "
+        f"'xanh vỏ đỏ lòng'), foreign-investor net buy/sell, liquidity, and any "
+        f"scheduled macro events (SBV rates, FX, FTSE/MSCI review, big earnings). "
+        f"Use cafef.vn, vietstock.vn, fialda/fireant, tradingview VNINDEX, plus the "
+        f"VN-Index news search above. **State an explicit directional view in "
+        f"`global_summary`: UP / SIDEWAYS / DOWN for the next {horizon} session(s), "
+        f"with a confidence (low/med/high) and one line of reasoning.** Then let it "
+        f"tilt EVERY ticker: in a likely-DOWN tape be more conservative (favour "
+        f"defensive / counter-trend names, lower `news_score` for high-beta names "
+        f"that just track the index, and don't chase); in a likely-UP tape be more "
+        f"constructive and remember dip-limits may not fill (consider raising "
+        f"`adj_entry_vnd`). A stock that usually moves OPPOSITE the index, or has a "
+        f"strong company-specific catalyst, can override the index call — say so in "
+        f"its rationale."
+    )
+    parts.append("")
 
     parts.append("## Candidates")
     parts.append("")
@@ -167,7 +189,7 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("```json")
     parts.append("{")
     parts.append('  "as_of": "YYYY-MM-DD",')
-    parts.append('  "global_summary": "1-2 sentences on macro drivers relevant to VN-Index today",')
+    parts.append('  "global_summary": "1-2 sentences on macro drivers, and your explicit VN-Index trend call: UP/SIDEWAYS/DOWN for the holding window + confidence + one-line reason",')
     parts.append('  "picks": [')
     parts.append('    {"symbol": "XYZ",')
     parts.append('     "business": "1-line description of what the company does",')

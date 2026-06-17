@@ -165,6 +165,28 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "so raise the adjusted entry; a risk-off shock means gaps down). If "
         "today is geopolitically quiet, say so and move on.",
         "",
+        "**VN-Index trend call — do this ONCE, before scoring any ticker.** "
+        f"Research where the VN-Index is likely headed over the next "
+        f"{('~' + str(int(current_horizon)) + ' trading day(s)') if current_horizon else 'holding window'} "
+        "(the holding window). Look at: the index's recent trend and momentum "
+        "(last few sessions + last few weeks), where it sits vs its 50/200-day "
+        "moving averages and recent support/resistance, market breadth (are most "
+        "stocks rising, or is the index propped up by a few large caps — 'xanh vỏ "
+        "đỏ lòng'?), foreign-investor net buy/sell, liquidity, and scheduled macro "
+        "events (SBV rates, FX, FTSE/MSCI review, big earnings). Use WebSearch + "
+        "WebFetch on cafef.vn, vietstock.vn, fireant/fialda, TradingView VNINDEX, "
+        "plus the VN-Index news sources below. **State an explicit directional "
+        "view — UP / SIDEWAYS / DOWN for the holding window, with a confidence "
+        "(low/med/high) and one line of reasoning — in the global context, and "
+        "echo it in `global_summary` at finalize.** Then let it tilt EVERY ticker: "
+        "in a likely-DOWN tape be more conservative (favour defensive / "
+        "counter-trend names, lower `news_score` for high-beta names that just "
+        "track the index, don't chase); in a likely-UP tape be more constructive "
+        "and remember dip-limits may not fill (consider raising `adj_entry_vnd`). "
+        "A stock that usually moves OPPOSITE the index, or has a strong "
+        "company-specific catalyst, can override the index call — say so in its "
+        "rationale.",
+        "",
     ])
     for name, url in global_urls().items():
         lines.append(f"- [{name}]({url})")
