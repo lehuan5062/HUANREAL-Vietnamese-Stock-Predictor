@@ -597,6 +597,18 @@ researched (its own words), plus `key_news` with findings, dates, and
 sources. The CLI prints both in the explained view so you can see what
 the LLM thought was relevant for that specific name on that day.
 
+**VN-Index trend call.** Before scoring tickers, the Claude plan and the
+Gemini prompt both ask the LLM to research where the VN-Index is likely
+headed over the holding window — trend / momentum, position vs the
+50/200-day MAs, market breadth (incl. *xanh vỏ đỏ lòng*, where a few
+large caps prop up the index while most stocks fall), foreign flows, and
+scheduled macro — and state an explicit **UP / SIDEWAYS / DOWN** call with
+a confidence in `global_summary`. That call then tilts every pick (more
+conservative in a likely-down tape, more constructive in a likely-up one),
+though a counter-trend or strongly-catalysed name can override it. This is
+a purely LLM-judgement signal — there is no quantitative index model or
+automated regime gate in the pipeline.
+
 ## What each mode actually searches
 
 | mode | search mechanism | scope |
