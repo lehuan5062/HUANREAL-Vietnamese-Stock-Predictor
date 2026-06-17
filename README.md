@@ -71,6 +71,7 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 | `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
 | `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
+| `--include-etfs` | Include HOSE ETFs (e.g. `E1VFVN30`, `FUEVFVND`) in the pickable universe. Off by default — ETFs are classified as a separate security type and excluded unless this is set. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
 | `--top N` | cap how many picks to print | _(off — lists all actionable picks dynamically)_ |
 | `--skip-train` | reuse cached `models/latest.pkl` (only works at `days=2`; otherwise ignored) | off |
@@ -401,6 +402,23 @@ basis. You size the position yourself:
 | `rr_ratio` | `net_reward / net_loss` — should be ≥ 0.8 to be `actionable` |
 | `breakeven_pct` | what % the price needs to move just to cover fees (~0.43% at ACBS) |
 | `actionable` | `True` only when `net_reward > 0` AND `rr_ratio ≥ 0.8` |
+| `suggested_max_units` | **Advisory liquidity cap** — `floor(pricing.max_participation_pct% × adv_vnd_20 / entry_vnd)`. Stay at or below this to avoid dominating the tape on entry/exit. Purely informational; never feeds the actionable gate. Null when `adv_vnd_20` is missing or the cap is disabled (`max_participation_pct: 0`). |
+
+### News-adjusted entry/target (claude / gemini)
+
+The mechanical `entry_vnd` is a per-ticker dip limit that the news layer can
+*not* move — on a news-driven melt-up the dip never comes and the limit never
+fills. So Claude and Gemini can optionally quote their own entry/target informed
+by the catalyst, which the pipeline turns into a **parallel** set of `adj_*`
+columns alongside the mechanical ones:
+
+| column | meaning |
+| ------ | ------- |
+| `adj_entry_vnd` / `adj_target_vnd` | LLM-supplied entry and exit (in VND). `adj_entry_vnd` is **not** clipped at the close — a strong catalyst can quote an entry above today's close to guarantee a fill. |
+| `adj_stop_vnd`, `adj_gross_reward_vnd`, `adj_max_loss_vnd`, `adj_fees_round_trip_vnd`, `adj_net_reward_vnd`, `adj_net_loss_vnd`, `adj_rr_ratio`, `adj_breakeven_pct`, `adj_actionable` | The full risk-reward stack recomputed against `adj_entry_vnd` / `adj_target_vnd`, so you can compare the news-adjusted trade against the mechanical one side by side. |
+
+If the LLM didn't override a row, its `adj_*` columns mirror the mechanical
+ones — they're always populated. `base` mode never sets adjusted values.
 
 ### Diagnostic columns (for sanity-checking the signal)
 
@@ -531,8 +549,8 @@ The same fields are also stored in the saved picks JSON
 | mode | how it runs | source of explanation |
 | ---- | ----------- | --------------------- |
 | **base** | `predict_base.bat` or CLI | None — pure ML, no narrative. Compact table only. |
-| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. After finalize, **Claude offers to schedule a sell reminder for the target day in GMT+7 (Vietnamese ICT).** |
-| **gemini** | `predict_gemini.bat` (two-step) | `predict --mode gemini` writes a prompt; you paste into Gemini Chat (web with browsing); save Gemini's JSON response to `reports/gemini_response_<date>.json`; run `gemini-finalize` to merge it into explained picks. After finalize, **you receive a `SELL-REMINDER` block with the target exit day in GMT+7 (Vietnamese ICT), and Gemini prompts you about scheduling a reminder.** |
+| **claude** | Paste [`claude_prompt.md`](claude_prompt.md) into Claude Desktop (Claude Code or Cowork) | Claude in-session uses `WebSearch` + `WebFetch` to research per-ticker emergent dimensions, fills the plan, runs `claude-finalize`. After finalize, **Claude offers to schedule a sell reminder for 15:00 ICT on T+(N−1)** — 30 min after the VN market close, so you can review the day's close and queue exit orders for the next-day open. |
+| **gemini** | `predict_gemini.bat` (two-step) | `predict --mode gemini` writes a prompt; you paste into Gemini Chat (web with browsing); save Gemini's JSON response to `reports/gemini_response_<date>.json`; run `gemini-finalize` to merge it into explained picks. After finalize, **you receive a `SELL-REMINDER` block keyed to 15:00 ICT on T+(N−1)** (post-close on the day before the sell day), and Gemini prompts you about scheduling a reminder. |
 
 ### Gemini two-step flow
 
@@ -860,6 +878,9 @@ Key knobs:
 - `pricing.ceiling_limits` / `ceiling_tol` — names locked limit-up (closed at
   the daily price-band ceiling) are excluded from the pickable universe, since a
   limit-buy can't fill against an all-buyers queue.
+- `pricing.max_participation_pct: 1.0` — advisory cap, as a % of `adv_vnd_20`,
+  for the per-pick `suggested_max_units` column. Purely informational — never
+  affects the actionable gate. Set to `0` to disable the column.
 
 ## Layout
 
