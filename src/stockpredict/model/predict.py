@@ -148,7 +148,7 @@ def rank_today(model: TrainedModel | None = None,
             "target_vnd", "target_low_vnd", "target_high_vnd",
             "stop_vnd", "gross_reward_vnd", "max_loss_vnd",
             "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
-            "rr_ratio", "breakeven_pct", "actionable",
+            "rr_ratio", "breakeven_pct", "actionable", "suggested_max_units",
             "pred_mean", "pred_std", "pred_low", "pred_low_alpha", "rank",
             "rsi_14", "mom_5", "mom_20", "vol_z_20", "adv_vnd_20", "atr_14"]
     cols = [c for c in cols if c in out.columns]

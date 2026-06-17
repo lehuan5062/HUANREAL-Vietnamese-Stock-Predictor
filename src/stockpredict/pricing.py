@@ -78,7 +78,9 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
 
     All P&L is computed PER SHARE — there is no position-size input. Position
     sizing is left entirely to the user; the ``actionable`` gate (and rr_ratio /
-    breakeven_pct) is size-invariant, so a per-share view is sufficient.
+    breakeven_pct) is size-invariant, so a per-share view is sufficient. The one
+    sizing hint we surface is ``suggested_max_units`` — an *advisory* liquidity
+    cap derived from ``adv_vnd_20`` (see below) that never touches the gate.
 
     Output columns appended (all VND per share, integer where applicable):
         entry_vnd                limit-buy price (= close*(1+pred_low) when present)
@@ -93,6 +95,10 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
         rr_ratio                 net_reward / net_loss
         breakeven_pct            price move needed just to cover fees
         actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
+        suggested_max_units      advisory liquidity cap = floor(
+                                 max_participation_pct% * adv_vnd_20*1000 / entry_vnd);
+                                 null when adv_vnd_20 absent or the cap is disabled.
+                                 Informational only — never feeds the actionable gate.
     """
     if df is None or len(df) == 0:
         return df
@@ -103,6 +109,7 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
 
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
+    max_participation_pct = float(pricing_cfg.get("max_participation_pct", 0.0))
 
     out = df.copy()
 
@@ -151,6 +158,19 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     breakeven_pct = (fees_total / entry_v).round(4)
     actionable = (net_reward > 0) & (rr >= min_rr) & valid
 
+    # Advisory liquidity-driven unit cap. adv_vnd_20 is the 20-day average daily
+    # traded value in THOUSAND-VND (close-in-thousand-VND * shares), so *1000 to
+    # get VND, then participation_pct% of that, divided by the per-share entry,
+    # gives the max number of shares that stays within the participation rate.
+    # Purely informational; never feeds the actionable gate. Null when ADV is
+    # missing or the cap is disabled (max_participation_pct <= 0).
+    max_units = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    if max_participation_pct > 0 and "adv_vnd_20" in out.columns:
+        adv_vnd = out["adv_vnd_20"].astype(float) * 1000.0
+        budget = (max_participation_pct / 100.0) * adv_vnd
+        units = (budget / entry_v).where((entry_v > 0) & adv_vnd.notna())
+        max_units = np.floor(units)
+
     out["entry_vnd"] = entry_v.astype("Int64")
     out["close_vnd"] = close_v.astype("Int64")
     out["entry_limit_pct"] = pred_low_eff.round(6)
@@ -166,6 +186,7 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
     out["actionable"] = actionable
+    out["suggested_max_units"] = pd.array(max_units, dtype="Int64")
     return out
 
 

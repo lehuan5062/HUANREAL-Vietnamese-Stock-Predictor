@@ -247,6 +247,11 @@ Show every explained pick with these fields per pick:
 - Symbol, company, business one-liner
 - Trade economics: entry / target / stop in VND, fees round-trip, net P&L
   for 100-unit position, risk-reward ratio, `actionable: True/False`
+- If `suggested_max_units` is present (non-null), show it as an advisory
+  liquidity cap — the largest position that stays within
+  `pricing.max_participation_pct`% of the stock's 20-day average daily
+  traded value. Call it a ceiling, not a recommended size; the user picks
+  their own size below it. Omit the line when the field is null.
 - **If you set a news-adjusted entry/target** for this pick, also show the
   `adj_*` trade (adj_entry / adj_target / adj_stop, adj_rr_ratio,
   `adj_actionable`) on its own line and say in one sentence why the news

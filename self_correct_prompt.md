@@ -423,6 +423,15 @@ filename identifies the report and the ledger holds the data. Structure:
      NOT a scoring or `entry_low_alpha` problem — don't tune alpha for it.
      Note: this isn't ledger-observable (a thin name can still fill), so it
      only surfaces via user-supplied extra context in Step 1.
+   - `pricing.max_participation_pct` (currently 1.0) — the advisory unit-cap
+     participation rate (% of `adv_vnd_20`) that drives `suggested_max_units`.
+     Lower it if the user reports they couldn't exit a position near the quoted
+     target without walking the price down (the suggested cap was too generous
+     for the real book); raise it if the cap is so small it's not useful.
+     Like `min_adv_active_days`, this is a liquidity/sizing knob — it's advisory
+     and never feeds the actionable gate, so it isn't ledger-observable and only
+     surfaces via user-supplied extra context in Step 1. Set to 0 to disable the
+     suggestion entirely.
 3. Source files (e.g. `src/stockpredict/news/claude_runner.py`,
    `src/stockpredict/tracking.py`, `src/stockpredict/model/train.py`)
    — **only** when there's a concrete structural defect (parser bug,

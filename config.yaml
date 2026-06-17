@@ -113,6 +113,14 @@ pricing:
   # entry_low_alpha is retuned. Tickers with fewer than this many observations
   # fall back to the pooled (market-wide) alpha-quantile, then to entry = close.
   entry_low_target_tail_obs: 15
+  # Advisory position-size cap, expressed as a participation rate against the
+  # stock's 20-day average daily traded value (adv_vnd_20). The program suggests
+  # suggested_max_units = max_participation_pct/100 * adv_vnd_20_in_VND / entry_vnd
+  # so a position can be entered/exited without dominating the tape. Absolute
+  # percent (1.0 means 1% of ADV). Purely informational — it does NOT affect the
+  # actionable gate (which stays size-invariant). When adv_vnd_20 is missing the
+  # cap column is left null. Set to 0 to disable the suggestion entirely.
+  max_participation_pct: 1.0
 
 modes:
   claude:
