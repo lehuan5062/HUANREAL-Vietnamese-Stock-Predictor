@@ -392,6 +392,20 @@ filename identifies the report and the ledger holds the data. Structure:
    tag-naming rule; add a "what NOT to do" line; expand the dimension
    examples). Additive, narrowly scoped — never rewrite a section
    wholesale.
+   - **Per-run plan/prompt guidance** (the research method, the
+     geopolitical check, and the **VN-Index trend call**) is generated
+     by `src/stockpredict/news/claude_runner.py` (`write_plan`) and
+     `src/stockpredict/news/gemini_prompt.py` (`build_prompt`), NOT
+     `claude_prompt.md`. Refining that wording is a legitimate
+     narrowly-scoped **prose** edit there — treat it like prompt
+     guidance, not as the "structural defect only" gate on #3. The
+     VN-Index trend call is the LLM's own UP/SIDEWAYS/DOWN view (there
+     is no quantitative index model). It surfaces in each run's
+     `global_summary`: sanity-check it against what the index actually
+     did over the holding window — if the call is consistently wrong or
+     the pick-tilt is too strong/weak, tighten that instruction (e.g.
+     demand a confidence threshold, or tell it to lean less on the index
+     for counter-trend names). Don't add a config knob or model for it.
 2. `config.yaml` — for tunable knobs:
    - `modes.claude.news_weight` (current 0.05) — raise / lower if
      news_score is consistently mis-weighted relative to ML.
