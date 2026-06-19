@@ -294,12 +294,11 @@ How to find both dates:
 If the user accepts:
 
 - Schedule the reminder for **T+N at 11:30 ICT** (the sell day, late
-  morning). Use whatever scheduler you have (Claude Code's scheduled-tasks
-  tool, cron, Windows `schtasks /create`, etc.) and confirm the resulting
-  trigger time in GMT+7.
-- If no scheduler is available, hand the user a copy-pasteable ICS event
-  with `TZID=Asia/Ho_Chi_Minh` so they can drop it into Google Calendar /
-  Outlook / their phone.
+  morning). **Always use the Claude reminder** — the `scheduled-tasks`
+  tool (`mcp__scheduled-tasks__create_scheduled_task`). Do **NOT** use or
+  offer Windows `schtasks`, cron, `at`, or an ICS calendar event unless
+  the user explicitly asks for one of those instead. Confirm the
+  resulting trigger time in GMT+7.
 - Always re-state both dates (reminder + sell), the time, tickers, and
   method before scheduling — never schedule silently.
 
