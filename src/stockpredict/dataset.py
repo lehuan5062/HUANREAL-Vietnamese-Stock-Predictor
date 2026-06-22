@@ -75,4 +75,14 @@ def build_panel(symbols: list[str] | None = None,
     panel = panel.dropna(subset=FEATURE_COLS)
     if require_target:
         panel = panel.dropna(subset=["target"])
-    return panel.sort_index()
+    # Canonical (date, symbol) row order. A plain ``sort_index()`` orders by
+    # date only, leaving same-date rows in concat (i.e. input-symbol) order —
+    # so the row layout depended on the order symbols were passed in. Because
+    # the LightGBM trainer subsamples rows/features BY POSITION
+    # (bagging_fraction / feature_fraction), that made the trained model — and
+    # every prediction — depend on incidental symbol ordering (selector order
+    # vs warm+stale order vs alphabetical), which is a reproducibility bug.
+    # Sorting by symbol first, then a stable sort by date, gives a total order
+    # keyed on (date, symbol) that is invariant to input order. Date stays
+    # primary, so the temporal train/validation split is unchanged.
+    return panel.sort_values("symbol", kind="stable").sort_index(kind="stable")
