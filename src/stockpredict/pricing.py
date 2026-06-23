@@ -92,9 +92,13 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
         fees_round_trip_vnd      buy commission+VAT + sell commission+VAT + sell PIT
         net_reward_vnd           gross_reward - fees   (the headline number)
         net_loss_vnd             max_loss + fees       (worst-case if stopped out)
-        rr_ratio                 net_reward / net_loss
+        rr_ratio                 net_reward / net_loss (≈ target_atr_mult/stop_atr_mult)
         breakeven_pct            price move needed just to cover fees
-        actionable               net_reward > 0 AND rr_ratio >= min_rr_ratio
+        actionable               pred_mean >= min_edge_over_cost*breakeven_pct
+                                 AND net_reward > 0 AND rr_ratio >= min_rr_ratio.
+                                 The take-profit is entry + target_atr_mult*ATR
+                                 (NOT close*(1+pred_mean)); pred_mean only drives
+                                 ranking and the directional edge gate.
         suggested_max_units      advisory liquidity cap = floor(
                                  max_participation_pct% * adv_vnd_20*1000 / entry_vnd);
                                  null when adv_vnd_20 absent or the cap is disabled.
@@ -108,7 +112,9 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
 
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
+    target_mult = float(pricing_cfg.get("target_atr_mult", 2.0))
     min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
+    min_edge_over_cost = float(pricing_cfg.get("min_edge_over_cost", 1.0))
     max_participation_pct = float(pricing_cfg.get("max_participation_pct", 0.0))
 
     out = df.copy()
@@ -130,14 +136,18 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     # the configured dip); ``close_v`` keeps the close-in-VND for display.
     close_v = (close_k * 1000.0).round(0)
     entry_v = (close_k * (1.0 + pred_low_eff) * 1000.0).round(0)
-    target_v = (close_k * (1.0 + pred) * 1000.0).round(0)
-    target_low_v = (close_k * (1.0 + pred - pred_std) * 1000.0).round(0)
-    target_high_v = (close_k * (1.0 + pred + pred_std) * 1000.0).round(0)
-    # Stop is anchored on the LIMIT entry (not on close), so the risk
-    # distance is exactly ``stop_atr_mult * ATR`` regardless of where the
-    # entry lands. Without this, a deep-dip limit could put the stop
-    # ABOVE the entry on rare configs.
+    # Take-profit and stop are BOTH anchored on the LIMIT entry and scaled by
+    # ATR(14), so the realized risk-reward (target_atr_mult / stop_atr_mult) is
+    # controlled by config rather than hostage to the model's near-zero 2-day
+    # return forecast. ``pred_mean`` no longer sets the target price — it only
+    # drives ranking and the directional edge gate (see ``actionable`` below).
+    # ``target_low/high`` keep a forecast-uncertainty band (±pred_std) around the
+    # ATR target so the displayed range still reflects model dispersion.
     entry_k = entry_v / 1000.0
+    band_k = pred_std * entry_k
+    target_v = ((entry_k + target_mult * atr_k) * 1000.0).round(0)
+    target_low_v = ((entry_k + target_mult * atr_k - band_k) * 1000.0).round(0)
+    target_high_v = ((entry_k + target_mult * atr_k + band_k) * 1000.0).round(0)
     stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
 
     # Per-share P&L. The user sizes the position themselves; everything below
@@ -156,7 +166,13 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     rr[valid] = net_reward[valid] / net_loss[valid]
 
     breakeven_pct = (fees_total / entry_v).round(4)
-    actionable = (net_reward > 0) & (rr >= min_rr) & valid
+    # Directional edge gate: the model's predicted forward return must clear
+    # ``min_edge_over_cost`` times the round-trip cost (breakeven_pct). With the
+    # ATR-scaled target, net_reward is structurally positive and rr is ~constant,
+    # so this edge gate — not rr — is what selects how many tickers are
+    # actionable. rr >= min_rr remains as a sanity floor (e.g. a degenerate ATR).
+    edge_ok = pred >= (min_edge_over_cost * breakeven_pct)
+    actionable = edge_ok & (net_reward > 0) & (rr >= min_rr) & valid
 
     # Advisory liquidity-driven unit cap. adv_vnd_20 is the 20-day average daily
     # traded value in THOUSAND-VND (close-in-thousand-VND * shares), so *1000 to

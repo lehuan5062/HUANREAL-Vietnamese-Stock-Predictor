@@ -85,6 +85,32 @@ def test_actionable_only_lists_all_actionable(monkeypatch):
     assert out["pred_mean"].is_monotonic_decreasing
 
 
+class _GlitchMeanModel:
+    """First symbol gets an implausible forecast (split/corp-action artifact);
+    the rest are normal. Used to verify the max_abs_pred_mean sanity filter."""
+
+    def predict(self, snap):
+        # +50% in 2 days for GLITCH (a data artifact, must be dropped); a
+        # normal +2% for everyone else. Keyed by symbol so it's robust to the
+        # cross-section row order.
+        sym = snap["symbol"].astype(str)
+        preds = np.where(sym.values == "GLITCH", 0.50, 0.02)
+        return {"pred_mean": preds, "pred_std": np.full(len(snap), 0.001)}
+
+
+def test_glitch_pred_mean_is_filtered_before_ranking(monkeypatch):
+    """A row whose |pred_mean| exceeds pricing.max_abs_pred_mean (default 0.05)
+    is dropped before pricing/ranking, so a data artifact can't become the top
+    actionable pick."""
+    panel = _fake_panel(["GLITCH", "AAA", "BBB"])
+    _wire(monkeypatch, panel, _price_stub(None))  # everything else actionable
+
+    out = predict_mod.rank_today(model=_GlitchMeanModel(), actionable_only=True,
+                                 low_model=None)
+    assert "GLITCH" not in set(out["symbol"].astype(str))
+    assert set(out["symbol"].astype(str)) == {"AAA", "BBB"}
+
+
 def test_legacy_top_k_path_ignores_actionable(monkeypatch):
     """actionable_only=False keeps the legacy cut-to-top_k behavior, returning
     rows regardless of the actionable flag."""

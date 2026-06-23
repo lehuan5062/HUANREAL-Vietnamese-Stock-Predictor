@@ -84,9 +84,33 @@ pricing:
   # 1.0 = very tight (often stopped out by noise);
   # 1.5 = moderate; 2.0 = loose (expensive when wrong).
   stop_atr_mult: 1.5
+  # Take-profit distance, in multiples of ATR(14). The reward leg is ATR-scaled
+  # (like the stop) rather than derived from the model's tiny 2-day return
+  # forecast. This is the fix for the "only one actionable pick" pathology: the
+  # old target = close*(1+pred_mean) put reward on the scale of a ~0.1% forecast
+  # while risk sat on a ~4% ATR stop, so rr_ratio was structurally ~0.2 and the
+  # 0.8 gate was reachable ONLY by prediction outliers — which are almost always
+  # split / corporate-action data glitches (hence low accuracy too). With an
+  # ATR-scaled target, rr_ratio ≈ target_atr_mult / stop_atr_mult is controlled,
+  # and selection comes from the directional edge gate below.
+  target_atr_mult: 2.0
   # Minimum required net risk-reward (after fees) to flag a pick as actionable.
-  # The CLI shows `actionable: True/False` based on this gate.
+  # The CLI shows `actionable: True/False` based on this gate. With an ATR-scaled
+  # target this is now a sanity floor (rr is ~target_atr_mult/stop_atr_mult);
+  # the real selectivity is the directional edge gate (min_edge_over_cost).
   min_rr_ratio: 0.8
+  # Directional edge gate. A pick is actionable only if the model's predicted
+  # forward return clears this multiple of the round-trip cost (fees as a % of
+  # entry, i.e. breakeven_pct). 1.0 = the forecast must at least beat breakeven;
+  # higher = demand a stronger signal and surface fewer names. This is what
+  # decides HOW MANY tickers are actionable now that rr no longer does.
+  min_edge_over_cost: 1.0
+  # Sanity guard against unadjusted split / corporate-action artifacts. The mean
+  # head is a calibrated 2-day return predictor; a |forecast| above this fraction
+  # is almost never a real signal — it's the model extrapolating a huge bounce
+  # off a broken price (e.g. mom_20 ≈ -0.9 from a missed split). Such rows are
+  # dropped from the candidate set before ranking/pricing. Set to 0 to disable.
+  max_abs_pred_mean: 0.05
   # Quantile alpha used by the "low" head to predict the next-day dip
   # the user can place as a limit-buy. The low head computes, per ticker, the
   # alpha-th empirical quantile of that ticker's OWN recent next-day-low

@@ -391,17 +391,17 @@ basis. You size the position yourself:
 | `close_vnd` | today's close, for reference |
 | `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile (`pricing.entry_low_alpha`) of recent next-day-low returns (clipped never above the close). Falls back to the close when no low head is present. |
 | `entry_limit_pct` | the predicted dip vs close (≤ 0) baked into `entry_vnd` |
-| `target_vnd` | price to sell at on the exit day T+N (`entry × (1 + pred_mean)`) |
-| `target_low_vnd` / `target_high_vnd` | mean ± 1 ensemble-std target band |
+| `target_vnd` | take-profit to sell at on the exit day T+N — **ATR-scaled**: `entry + target_atr_mult × ATR(14)`. (Was `entry × (1 + pred_mean)`; that put reward on the scale of a ~0.1% forecast against a ~4% ATR stop, so `rr_ratio` was structurally ~0.2 and only prediction outliers — usually split/corp-action data glitches — ever cleared the gate.) `pred_mean` now drives only ranking and the edge gate. |
+| `target_low_vnd` / `target_high_vnd` | ATR target ± 1 ensemble-std band |
 | `stop_vnd` | stop-loss (`entry − stop_atr_mult × ATR(14)`) |
 | `gross_reward_vnd` | `target − entry` per share (before fees) |
 | `max_loss_vnd` | `entry − stop` per share (before fees) |
 | `fees_round_trip_vnd` | ACBS commission + VAT + PIT for this round trip, per share |
 | `net_reward_vnd` | **predicted per-share profit after all fees** — the headline number |
 | `net_loss_vnd` | worst-case per-share loss if stopped out (max_loss + fees) |
-| `rr_ratio` | `net_reward / net_loss` — should be ≥ 0.8 to be `actionable` |
+| `rr_ratio` | `net_reward / net_loss` — with the ATR-scaled target this is ≈ `target_atr_mult / stop_atr_mult` (a sanity floor), not the selector |
 | `breakeven_pct` | what % the price needs to move just to cover fees (~0.43% at ACBS) |
-| `actionable` | `True` only when `net_reward > 0` AND `rr_ratio ≥ 0.8` |
+| `actionable` | `True` when the **directional edge gate** passes (`pred_mean ≥ min_edge_over_cost × breakeven_pct`) AND `net_reward > 0` AND `rr_ratio ≥ min_rr_ratio`. The edge gate — not `rr` — now decides how many tickers are actionable. Names whose `\|pred_mean\|` exceeds `pricing.max_abs_pred_mean` are dropped as data glitches before they even reach this stage. |
 | `suggested_max_units` | **Advisory liquidity cap** — `floor(pricing.max_participation_pct% × adv_vnd_20 / entry_vnd)`. Stay at or below this to avoid dominating the tape on entry/exit. Purely informational; never feeds the actionable gate. Null when `adv_vnd_20` is missing or the cap is disabled (`max_participation_pct: 0`). |
 
 ### News-adjusted entry/target (claude / gemini)
@@ -483,9 +483,12 @@ that does.
 
 - All P&L figures are per share — you size the position yourself. Fees scale
   linearly with trade value, so the % cost stays at 0.43% regardless of size.
-- Want to relax the actionable gate? Lower `pricing.min_rr_ratio` in
-  config.yaml (default 0.8). Setting it to 0.0 would only require positive
-  net_reward.
+- Want more / fewer actionable picks? The **directional edge gate** is the
+  knob now: lower `pricing.min_edge_over_cost` (default 1.0) to surface more
+  names, raise it to demand a stronger forecast. `pricing.target_atr_mult`
+  (default 2.0) sets the reward distance and hence `rr_ratio ≈
+  target_atr_mult / stop_atr_mult`; `pricing.min_rr_ratio` is now just a
+  sanity floor.
 - Different broker? Edit the `broker:` section in config.yaml.
 
 ### Sanity checks before trading

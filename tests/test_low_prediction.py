@@ -168,8 +168,9 @@ def test_pricing_uses_pred_low_when_present():
     assert int(out["close_vnd"]) == 20_000
     # Stop = entry - 1.5 × ATR = 19.76 - 0.6 = 19.16 → 19,160
     assert int(out["stop_vnd"]) == 19_160
-    # Target unchanged: 20 × 1.05 × 1000 = 21,000
-    assert int(out["target_vnd"]) == 21_000
+    # Target is ATR-scaled, anchored on the limit entry:
+    # entry + target_atr_mult × ATR = 19.76 + 2 × 0.40 = 20.56 → 20,560
+    assert int(out["target_vnd"]) == 20_560
     # Limit-pct surfaced
     assert abs(float(out["entry_limit_pct"]) - (-0.012)) < 1e-9
 
@@ -204,17 +205,25 @@ def test_pricing_falls_back_to_close_when_pred_low_absent():
     assert float(out["entry_limit_pct"]) == 0.0
 
 
-def test_pricing_recomputes_rr_against_limit_entry():
-    """Filling at a cheaper limit makes net_reward_vnd LARGER than the same
-    trade at close: same target, lower entry."""
+def test_pricing_anchors_atr_target_and_stop_on_limit_entry():
+    """Target and stop are both ATR-scaled and anchored on the entry, so the
+    limit fill shifts the whole bracket DOWN by the dip while keeping the risk
+    and reward distances fixed at stop_atr_mult/target_atr_mult × ATR. The
+    benefit of the limit-buy is a cheaper fill, not a wider reward."""
     base_kwargs = {"close": 20.0, "pred_mean": 0.05,
                    "pred_std": 0.005, "atr_14": 0.40}
     no_low = add_price_suggestions(pd.DataFrame([base_kwargs])).iloc[0]
     with_low = add_price_suggestions(pd.DataFrame([{**base_kwargs, "pred_low": -0.01}])).iloc[0]
-    # gross_reward per share at close-entry: 21000 - 20000 = 1,000
-    # gross_reward per share at limit-entry (-1%): 21000 - 19800 = 1,200
-    assert int(with_low["gross_reward_vnd"]) > int(no_low["gross_reward_vnd"])
-    assert int(with_low["gross_reward_vnd"]) == 1_200
+    # Limit entry is cheaper: 20 × (1 - 0.01) × 1000 = 19,800 vs 20,000.
+    assert int(with_low["entry_vnd"]) == 19_800
+    assert int(no_low["entry_vnd"]) == 20_000
+    # Reward and risk distances are ATR-scaled, hence identical for both:
+    # gross_reward = 2 × 0.40 × 1000 = 800, max_loss = 1.5 × 0.40 × 1000 = 600.
+    assert int(with_low["gross_reward_vnd"]) == int(no_low["gross_reward_vnd"]) == 800
+    assert int(with_low["max_loss_vnd"]) == int(no_low["max_loss_vnd"]) == 600
+    # The whole bracket shifts down with the entry.
+    assert int(with_low["target_vnd"]) == 19_800 + 800
+    assert int(with_low["stop_vnd"]) == 19_800 - 600
 
 
 # ---------------------------------------------------------------------------

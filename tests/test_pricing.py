@@ -10,8 +10,10 @@ def _frame(rows):
 
 
 def test_low_predicted_return_is_not_actionable():
-    """Tiny predicted return + ATR-based stop -> rr near zero, net negative,
-    actionable=False. This is the typical case for our model output."""
+    """A tiny predicted return fails the directional edge gate (pred_mean must
+    clear the round-trip cost), so the pick is NOT actionable — even though the
+    ATR-scaled target now gives it a healthy rr. This is the typical case for
+    our model output."""
     df = _frame([{
         "close": 15.35,            # thousand VND
         "pred_mean": 0.0017,
@@ -19,17 +21,17 @@ def test_low_predicted_return_is_not_actionable():
         "atr_14": 0.30,
     }])
     out = add_price_suggestions(df).iloc[0]
-    # Per-share VND prices
+    # Per-share VND prices. Target is ATR-scaled: entry + 2 × ATR.
     assert out["entry_vnd"] == 15_350
-    assert out["target_vnd"] == round(15_350 * (1 + 0.0017))      # 15376
-    assert out["stop_vnd"] == round((15.35 - 1.5 * 0.30) * 1000)   # 14,900
-    # Gross reward per share: 15376 - 15350 = 26
-    assert out["gross_reward_vnd"] == 26
-    # Fees per share: buy commission 0.15% on 15,350 + VAT 10% + sell
-    # commission on ~target + sell PIT 0.10% on target. Roughly 66.
-    assert 60 < out["fees_round_trip_vnd"] < 70
-    # Net is negative — model's predicted return doesn't cover ACBS fees.
-    assert out["net_reward_vnd"] < 0
+    assert out["target_vnd"] == round((15.35 + 2.0 * 0.30) * 1000)   # 15,950
+    assert out["stop_vnd"] == round((15.35 - 1.5 * 0.30) * 1000)     # 14,900
+    # Gross reward per share = 2 × ATR = 600
+    assert out["gross_reward_vnd"] == 600
+    # rr is healthy now (reward/risk ≈ 2/1.5), but...
+    assert out["rr_ratio"] >= 1.0
+    # ...the forecast (0.17%) is below breakeven (~0.43%), so the edge gate
+    # rejects it. Low signal ⇒ not actionable.
+    assert float(out["pred_mean"]) < float(out["breakeven_pct"])
     assert not bool(out["actionable"])
 
 
@@ -44,18 +46,37 @@ def test_strong_predicted_return_is_actionable():
     }])
     out = add_price_suggestions(df).iloc[0]
     assert out["entry_vnd"] == 20_000
-    assert out["target_vnd"] == 21_000
+    # Target is ATR-scaled: entry + 2 × ATR = 20,000 + 800 = 20,800
+    assert out["target_vnd"] == 20_800
     assert out["stop_vnd"] == 19_400
-    # Gross reward per share: 21000 - 20000 = 1,000
-    assert out["gross_reward_vnd"] == 1_000
+    # Gross reward per share: 2 × ATR = 800
+    assert out["gross_reward_vnd"] == 800
     # Fees per share still ~0.4% of the per-share trade value: order of ~90
     assert out["fees_round_trip_vnd"] < 200
     # Net should be comfortably positive
-    assert out["net_reward_vnd"] > 800
+    assert out["net_reward_vnd"] > 600
     # rr ratio: net_reward / net_loss; net_loss = (20-19.4)*1000 + fees
     # = 600 + ~90 = ~690; rr ~= 910/690 ~= 1.3
     assert out["rr_ratio"] >= 1.0
     assert bool(out["actionable"])
+
+
+def test_edge_gate_rejects_forecast_below_cost_despite_good_rr():
+    """A pick with a healthy ATR-scaled rr but a forecast that barely beats
+    zero (below breakeven) must be rejected by the directional edge gate.
+    This is what keeps the actionable set selective now that rr no longer is."""
+    df = _frame([{
+        "close": 20.0,
+        "pred_mean": 0.002,    # +0.2%, below the ~0.43% breakeven
+        "pred_std": 0.001,
+        "atr_14": 0.40,
+    }])
+    out = add_price_suggestions(df).iloc[0]
+    # rr is fine (ATR-scaled reward vs ATR-scaled risk)...
+    assert out["rr_ratio"] >= 1.0
+    # ...but the forecast doesn't clear the cost, so it's not actionable.
+    assert float(out["pred_mean"]) < float(out["breakeven_pct"])
+    assert not bool(out["actionable"])
 
 
 def test_breakeven_pct_around_43bps():

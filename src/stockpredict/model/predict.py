@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from ..config import load_config
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
 from ..filters import ceiling_lock_mask, liquidity_mask
@@ -122,6 +123,17 @@ def rank_today(model: TrainedModel | None = None,
 
     preds = model.predict(snap)
     snap = snap.assign(**preds)
+    # Sanity guard against unadjusted split / corporate-action artifacts: the
+    # mean head is a calibrated 2-day return predictor, so a |pred_mean| far
+    # outside its real range is the model extrapolating a huge bounce off a
+    # broken price (e.g. mom_20 ≈ -0.9 from a missed split). Drop those rows
+    # before ranking/pricing so a data glitch can't become the top — and, under
+    # the old gate, the ONLY — actionable pick. Configurable; 0 disables.
+    max_abs_pred = float(load_config().pricing.get("max_abs_pred_mean", 0.0))
+    if max_abs_pred > 0:
+        snap = snap[snap["pred_mean"].abs() <= max_abs_pred].copy()
+        if snap.empty:
+            return snap
     if low_model is not None:
         # ``pred_low`` is the per-ticker empirical ``low[T+1]/close[T] - 1`` at
         # the configured quantile alpha. add_price_suggestions consumes this to
