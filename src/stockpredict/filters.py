@@ -64,3 +64,54 @@ def ceiling_lock_mask(df: pd.DataFrame) -> pd.Series:
         & limit.notna()
     )
     return ~locked.fillna(False)
+
+
+# Margin above the legal price band before a 1-day move is called a corporate
+# action. A legitimate limit move sits exactly AT the band (e.g. HOSE +7%), so a
+# small margin keeps real limit days from being flagged while still catching the
+# physically-impossible moves (VVS's -38% ex-rights gap is 5x the HOSE band).
+_CORP_ACTION_MARGIN = 0.02
+
+
+def _row_band_threshold(df: pd.DataFrame) -> pd.Series:
+    """Per-row corporate-action threshold = that symbol's exchange price band +
+    margin. Symbols whose exchange is unknown fall back to the WIDEST band
+    (UPCOM 15%), so only moves impossible on EVERY exchange ever trip the
+    filter. Vietnamese exchanges cap a single session's close-to-close move at
+    the band (HOSE 7% / HNX 10% / UPCOM 15%); anything beyond it is a corporate
+    action (split / rights / special dividend) showing through as an unadjusted
+    price jump."""
+    limits, _tol = _ceiling_params()
+    widest = max(limits.values()) if limits else 0.15
+    from .data.universe import load_universe
+    uni = load_universe()
+    ex_map = (dict(zip(uni["symbol"].astype(str), uni["exchange"]))
+              if uni is not None and len(uni) else {})
+    band = (df["symbol"].astype(str).map(ex_map).map(limits)
+            .astype(float).fillna(widest))
+    return band + _CORP_ACTION_MARGIN
+
+
+def corporate_action_mask(df: pd.DataFrame) -> pd.Series:
+    """Boolean Series aligned to df.index: True where the row is NOT polluted by
+    a recent corporate action.
+
+    ``max_abs_ret_20`` carries the worst 1-day move over the feature window; a
+    row is dropped while that worst move exceeds its exchange band + margin (see
+    :func:`_row_band_threshold`) — i.e. a band-breaking corporate action sits
+    inside the look-back window and has poisoned mom_*/atr_14/rsi_14. Frames
+    lacking the support column are left untouched."""
+    if "max_abs_ret_20" not in df.columns or "symbol" not in df.columns:
+        return pd.Series(True, index=df.index)
+    artifact = df["max_abs_ret_20"].astype(float) > _row_band_threshold(df)
+    return ~artifact.fillna(False)
+
+
+def band_break_flags(df: pd.DataFrame) -> pd.Series:
+    """Per-row boolean: True where THAT bar's own 1-day move broke the price band
+    — i.e. a corporate action happened on that bar. Used to detect contamination
+    in a forward (target) window, where a single break makes the realized
+    forward return a fake move. Frames lacking ``ret_1d`` are treated as clean."""
+    if "ret_1d" not in df.columns or "symbol" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return (df["ret_1d"].abs() > _row_band_threshold(df)).fillna(False)

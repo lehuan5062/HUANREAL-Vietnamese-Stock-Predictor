@@ -138,6 +138,14 @@ pricing:
   # bit below the nominal band).
   ceiling_limits: {HSX: 0.07, HNX: 0.10, UPCOM: 0.15}
   ceiling_tol: 0.015
+  # Corporate-action guard. Vietnamese exchanges cap a single day's close-to-close
+  # move at the band above (HOSE 7% / HNX 10% / UPCOM 15%), so any 1-day return
+  # beyond the band is impossible without a corporate action (split, rights issue,
+  # special dividend) — the unadjusted feed then shows a phantom crash/spike that
+  # poisons mom_*/atr_14/rsi_14. A ticker is dropped from the candidate set while
+  # a band-breaking move sits inside this lookback window (matches the longest
+  # feature window, mom_20, so contamination is fully covered). Set to 0 to disable.
+  corp_action_lookback: 20
   # Target number of observations the alpha-quantile should rest on in the tail.
   # The per-ticker trailing window auto-sizes to lookback =
   # clip(ceil(target_tail_obs / alpha), 30, 120) trading days, so a deeper alpha

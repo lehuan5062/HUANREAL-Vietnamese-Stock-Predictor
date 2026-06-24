@@ -262,7 +262,8 @@ search, you tell the program **how many picks** you want and it returns
 exactly that many:
 
 1. Trains the T+2 model (once), predicts the whole liquid / tradable /
-   glitch-filtered universe, and ranks every name by `pred_mean`.
+   glitch-filtered universe (also dropping names with an unadjusted
+   corporate-action gap — see below), and ranks every name by `pred_mean`.
 2. Keeps the **top N** by predicted return. Taking the top N is the same as
    auto-tuning the edge gate to admit exactly N — the cutoff floats to the
    Nth pick's score.
@@ -806,6 +807,16 @@ Key knobs:
 - `pricing.ceiling_limits` / `ceiling_tol` — names locked limit-up (closed at
   the daily price-band ceiling) are excluded from the pickable universe, since a
   limit-buy can't fill against an all-buyers queue.
+- `pricing.corp_action_lookback: 20` — corporate-action guard. A single-day
+  close-to-close move beyond the exchange price band (`ceiling_limits`: HOSE 7%
+  / HNX 10% / UPCOM 15%) is physically impossible without a corporate action, so
+  it's an unadjusted split / rights / special-dividend gap in the raw feed — not
+  a real crash. Such a gap poisons mom_*/atr_14/rsi_14 (and, in the target
+  window, fakes the label), so a ticker is dropped from both the candidate set
+  and the training panel while a band-breaking move sits inside this lookback
+  window (matches the longest feature window, mom_20). This is what keeps the
+  model from chasing phantom oversold bounces (e.g. a −38% ex-rights gap). Set
+  to `0` to disable.
 - `pricing.max_participation_pct: 1.0` — advisory cap, as a % of `adv_vnd_20`,
   for the per-pick `suggested_max_units` column. Purely informational — never
   affects selection. Set to `0` to disable the column.

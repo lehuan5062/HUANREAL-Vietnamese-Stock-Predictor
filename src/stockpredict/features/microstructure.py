@@ -84,4 +84,18 @@ def add_all(df: pd.DataFrame) -> pd.DataFrame:
     # (no sellers) — the next session opens unbuyable.
     out["ret_1d"] = df["close"].pct_change()
     out["close_at_high"] = df["close"] >= df["high"]
+    # Gate-support column (not a model feature) for the corporate-action filter:
+    # the worst (largest-magnitude) close-to-close move over the last
+    # ``corp_action_lookback`` bars. Vietnamese exchanges cap a single day's
+    # legal move at the price band (HOSE 7% / HNX 10% / UPCOM 15%), so any
+    # |ret_1d| beyond the band is physically impossible without a corporate
+    # action (split, rights issue, big special dividend). When such a bar sits
+    # inside the feature window it poisons mom_*/atr_14/rsi_14, so the filter
+    # drops the ticker until the artifact ages out. We carry the MAX here and
+    # let the mask apply the per-exchange band (the lookback matches the longest
+    # feature window, mom_20, so contamination is fully covered).
+    lookback = int(load_config().pricing.get("corp_action_lookback", 20))
+    out["max_abs_ret_20"] = (
+        out["ret_1d"].abs().rolling(lookback, min_periods=1).max()
+    )
     return out

@@ -7,7 +7,7 @@ from tqdm import tqdm
 from .config import load_config
 from .data.cache import cached_symbols, read_ohlcv
 from .features import microstructure, technical
-from .filters import has_enough_history
+from .filters import band_break_flags, corporate_action_mask, has_enough_history
 from .model.target import attach_target
 
 
@@ -38,6 +38,45 @@ def engineer_one(symbol: str, df: pd.DataFrame | None = None,
     out = attach_target(out, exit_offset_days=exit_offset_days)
     out["symbol"] = symbol
     return out
+
+
+def _drop_corporate_action_rows(panel: pd.DataFrame,
+                                exit_offset_days: int | None) -> pd.DataFrame:
+    """Remove rows poisoned by an unadjusted corporate action so the model never
+    trains on them — the proper companion to the prediction-time
+    ``corporate_action_mask``.
+
+    A band-breaking 1-day move (split / rights / special dividend showing
+    through the raw feed) corrupts a row two ways:
+
+    * **Look-back** — it sits inside the feature window, so mom_*/atr_14/rsi_14
+      read a phantom crash/spike (``corporate_action_mask`` flags this via
+      ``max_abs_ret_20``).
+    * **Look-forward** — if it lands in the (t, t+H] target window, the realized
+      forward return is a fake move, so the *label* mis-teaches the model.
+
+    We drop a row when either window is contaminated. The latest (prediction)
+    rows have no future bars, so they can only be look-back-contaminated — which
+    keeps this consistent with the snapshot mask. Disabled when
+    ``pricing.corp_action_lookback`` is 0 or the support columns are absent."""
+    cfg = load_config()
+    lookback = int(cfg.pricing.get("corp_action_lookback", 20))
+    if lookback <= 0 or "ret_1d" not in panel.columns or "symbol" not in panel.columns:
+        return panel
+    # Sort so groupby.shift walks each symbol's bars in date order.
+    panel = panel.sort_values("symbol", kind="stable").sort_index(kind="stable")
+    # Look-back contamination (per-exchange, over the feature window).
+    contaminated = ~corporate_action_mask(panel)
+    # Look-forward contamination: a band-break anywhere in (t, t+H] fakes the label.
+    horizon = int(exit_offset_days if exit_offset_days is not None
+                  else cfg.target["exit_offset_days"])
+    brk = band_break_flags(panel)
+    g = brk.groupby(panel["symbol"], sort=False)
+    for k in range(1, horizon + 1):
+        # fill_value=False keeps the shifted series boolean (no NaN -> no object
+        # downcast); the tail of each symbol has no future bar to break.
+        contaminated = contaminated | g.shift(-k, fill_value=False)
+    return panel[~contaminated]
 
 
 def build_panel(symbols: list[str] | None = None,
@@ -72,6 +111,7 @@ def build_panel(symbols: list[str] | None = None,
         min_adv = load_config().universe["liquidity_filter"]["min_adv_vnd"]
         panel["adv_active_days_20"] = microstructure.active_days_calendar(
             panel, min_adv, 20)
+    panel = _drop_corporate_action_rows(panel, exit_offset_days)
     panel = panel.dropna(subset=FEATURE_COLS)
     if require_target:
         panel = panel.dropna(subset=["target"])

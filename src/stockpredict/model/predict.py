@@ -15,7 +15,7 @@ import pandas as pd
 from ..config import load_config
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
-from ..filters import ceiling_lock_mask, liquidity_mask
+from ..filters import ceiling_lock_mask, corporate_action_mask, liquidity_mask
 from ..pricing import add_price_suggestions
 from .train import (
     RollingEmpiricalQuantileModel,
@@ -117,6 +117,14 @@ def rank_today(model: TrainedModel | None = None,
     # Drop names locked limit-up: they closed at the daily ceiling, so the buy
     # session opens with a queue and no sellers and a limit-buy can't fill.
     snap = snap[ceiling_lock_mask(snap)].copy()
+    if snap.empty:
+        return snap
+
+    # Drop names whose recent history holds a band-breaking 1-day move: that's
+    # an unadjusted corporate action (split / rights / special dividend), not a
+    # real crash, and it poisons mom_*/atr_14/rsi_14 — the model misreads it as
+    # an oversold bounce (e.g. VVS's -38% ex-rights gap).
+    snap = snap[corporate_action_mask(snap)].copy()
     if snap.empty:
         return snap
 
