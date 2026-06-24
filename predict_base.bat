@@ -1,9 +1,9 @@
 @echo off
-title Vietnamese T+N Predictor - BASE mode
+title Vietnamese T+2 Predictor - BASE mode
 cd /d "%~dp0"
 
 echo.
-echo === Vietnamese T+N Stock Predictor (BASE mode) ===
+echo === Vietnamese T+2 Stock Predictor (BASE mode) ===
 echo Pure ML + technical filter. No news, no LLM.
 echo.
 
@@ -14,21 +14,10 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-set /p DAYS=Exit horizon: integer T+N (min 2) / 'end' (last trading day of month) / 'earliest' (smallest horizon with an actionable pick -- runs until found, no upper cap) [earliest]:
-if "%DAYS%"=="" set DAYS=earliest
+rem Horizon is always T+2 (Vietnamese settlement). Choose how many picks.
+set /p PICKS=Number of picks to return [1]:
+if "%PICKS%"=="" set PICKS=1
 
-rem When days=earliest, ask for the starting T+N of the search.
-rem Ignored otherwise.
-set EARLIEST_START_FLAG=
-if /I "%DAYS%"=="earliest" goto ask_earliest_start
-goto skip_earliest_start
-
-:ask_earliest_start
-set /p EARLIEST_START=Earliest-start: T+N to begin the search (min 2) [2]:
-if "%EARLIEST_START%"=="" set EARLIEST_START=2
-set EARLIEST_START_FLAG=--earliest-start %EARLIEST_START%
-
-:skip_earliest_start
 rem Pricing is per share; position sizing is left to the user.
 
 set HOSE_FLAG=
@@ -63,10 +52,10 @@ if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
 echo.
-echo Running: days=%DAYS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
+echo Running: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --days %DAYS% %EARLIEST_START_FLAG% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
+.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
 
 echo.
 echo === Done. Picks saved to reports\ ===

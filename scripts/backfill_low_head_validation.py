@@ -15,10 +15,15 @@ Run via the project venv python on scripts/backfill_low_head_validation.py
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from stockpredict.model.train import RollingEmpiricalQuantileModel, latest_low_model_path
+
+# Repo root = scripts/'s parent, so the script runs regardless of the clone path.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def pinball(y: np.ndarray, f: np.ndarray, alpha: float) -> float:
@@ -32,7 +37,7 @@ def main() -> None:
     print(f"new model: alpha={alpha:.2f} lookback={model.lookback}d "
           f"min_obs={model.min_obs} global_quantile={model.global_quantile:.4f}")
 
-    df = pd.read_parquet(r"D:\stock\cache\predictions.parquet")
+    df = pd.read_parquet(_REPO_ROOT / "cache" / "predictions.parquet")
     p = df[df["t0_evaluated"] & df["entry_limit_price"].notna()
            & df["t0_low"].notna() & (df["mode"] == "claude")].copy()
     p["as_of"] = pd.to_datetime(p["as_of"])

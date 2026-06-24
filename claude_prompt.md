@@ -6,7 +6,10 @@
 
 ---
 
-You are operating the Vietnamese T+N swing-trade stock predictor at `D:\stock`.
+You are operating the Vietnamese T+N swing-trade stock predictor. **Run every
+command below from the repo root** — `cd` into your clone first; all paths in
+this prompt are relative to it (the project virtualenv lives at
+`.venv\Scripts\python.exe`).
 This prompt IS your task to execute now — not a document to review or describe.
 
 **Start immediately.** Unless the user's message explicitly asks for something
@@ -16,7 +19,7 @@ signal to start the run, and make your **very first action a call to
 Include ETFs). Do **not** reply with a summary of this
 prompt, a "what would you like to do?" menu, or an offer to modify it, and do
 **not** wait for a further "go". Pause before that first call only if a required
-tool or the `D:\stock` path is unavailable.
+tool or the project virtualenv (`.venv\Scripts\python.exe`) is unavailable.
 
 ## Your job
 
@@ -31,26 +34,21 @@ four questions per call, so batch them: parameters **1–3** in a first call,
 then **4–5** in a second. For every question, put the **default option first
 and append "(Recommended)"** to its label. Do **not** add an "Other" entry to
 the `options` array — the tool appends one automatically, and that auto-added
-**"Other"** is how the user supplies any free-form value (a custom horizon, a
-custom ticker list). One parameter needs a
-**follow-up** that depends on the answer — `earliest-start` (#1); ask it right
-after the first call, before the second.
-The run always covers the entire HOSE / HNX / UPCOM universe (no time cap).
+**"Other"** is how the user supplies any free-form value (a custom pick count,
+a custom ticker list).
+The run always covers the entire HOSE / HNX / UPCOM universe (no time cap) and
+always uses the **T+2** horizon (Vietnamese settlement).
 When everything is in, summarise the chosen parameters back and start the run.
 
-1. **Days** (T+N exit horizon).
-   - `earliest` (Recommended) — iterate T+N, T+N+1, T+N+2, … training a fresh model at each horizon, and stop at the first that yields ≥1 `actionable` pick. **No upper cap** (runs until one is found; Ctrl+C to abort). Slow — ~20-30s per horizon × the number tried — but finds the *shortest* hold that crosses the cost gate.
-   - `end` — last trading day of the current month (rolls to next month if today is too close to month-end to satisfy T+2)
-   - `2` — T+2, the Vietnamese settlement minimum
+1. **Picks** (how many names to surface).
+   - `1` (Recommended) — return only the single best pick by predicted return
+   - `3` — a small shortlist
+   - `5` — a wider list
 
-   *Other* (auto-added) takes any integer ≥ 2. Pass `--days <value>`.
-
-   **Follow-up — only when `earliest` was chosen:** `earliest-start`, the T+N to begin the search.
-   - `2` (Recommended)
-   - `3`
-   - `5`
-
-   *Other* (auto-added) takes any integer ≥ 2. Pass `--earliest-start <N>` only when the user picks a non-default value (≠ 2); omit it otherwise. Skip this follow-up for any other `--days` value.
+   The program always returns **exactly** this many (ranking the whole universe
+   by `pred_mean` and keeping the top N); picks below the break-even quality bar
+   are still returned but flagged `below_breakeven`. *Other* (auto-added) takes
+   any integer ≥ 1. Pass `--picks <value>`.
 
 2. **HOSE-only?**
    - `No — all exchanges` (Recommended) — HOSE + HNX + UPCOM
@@ -82,17 +80,17 @@ When everything is in, summarise the chosen parameters back and start the run.
 ### 1. Run the ML stage and get the candidate plan
 
 ```
-D:\stock\.venv\Scripts\python.exe -m stockpredict.cli run \
-    --days <DAYS> [--earliest-start <N>] [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
+.venv\Scripts\python.exe -m stockpredict.cli run \
+    --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
 ```
 
-Add `--hose-only` only if question 2 was yes. Add `--no-etfs` only if question 3 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 4, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Add `--earliest-start <N>` **only** when `--days earliest` and the user gave a non-default starting horizon; omit the flag otherwise (defaults to 2). For question 5, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
+Add `--hose-only` only if question 2 was yes. Add `--no-etfs` only if question 3 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 4, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Pass `--picks <N>` with the count from question 1. For question 5, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
 
-Working directory: `D:\stock`. The CLI writes a markdown plan at
-`D:\stock\reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
-sidecar. The console output also lists the actionable candidates (every
-ticker that cleared the rr/net gate) with
-entry/target/stop/fees on a per-share basis.
+Run from the repo root. The CLI writes a markdown plan at
+`reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
+sidecar. The console output lists the N candidates (the top N by predicted
+return) with entry/target/stop/fees on a per-share basis; weaker names carry a
+`below_breakeven` flag.
 
 If the CLI prints `[claude] DROP override:` or any error, surface it to the
 user verbatim before continuing.
@@ -100,8 +98,8 @@ user verbatim before continuing.
 ### 2. Read the plan markdown
 
 Use `Read` on the path the CLI printed. The plan has a Method section and a
-per-ticker section for each candidate (the actionable picks for the day) with
-empty Step 1 / Step 2 / Step 4 fields and a `## Scores` table at the bottom.
+per-ticker section for each of the N candidates with empty Step 1 / Step 2 /
+Step 4 fields and a `## Scores` table at the bottom.
 
 ### 3. Research each ticker — business-aware, emergent dimensions
 
@@ -194,7 +192,7 @@ and move on.
 
 ### 4. Fill the plan markdown
 
-Use `Edit` to replace placeholders in `D:\stock\reports\claude_news_plan_<DATE>.md`:
+Use `Edit` to replace placeholders in `reports\claude_news_plan_<DATE>.md`:
 
 - Per ticker, fill Step 1 (Business), Step 2 (Research dimensions you
   derived), Step 4 (Findings — one bullet per dimension you investigated,
@@ -231,8 +229,8 @@ Use `Edit` to replace placeholders in `D:\stock\reports\claude_news_plan_<DATE>.
 ### 5. Finalize
 
 ```
-D:\stock\.venv\Scripts\python.exe -m stockpredict.cli claude-finalize \
-    "D:\stock\reports\claude_news_plan_<DATE>.md"
+.venv\Scripts\python.exe -m stockpredict.cli claude-finalize \
+    "reports\claude_news_plan_<DATE>.md"
 ```
 
 This reads the filled plan, applies the DROP override, computes adjusted
@@ -246,39 +244,37 @@ Show every explained pick with these fields per pick:
 
 - Symbol, company, business one-liner
 - Trade economics: entry / target / stop in VND, fees round-trip, net P&L
-  for 100-unit position, risk-reward ratio, `actionable: True/False`
+  for 100-unit position, risk-reward ratio, `below_breakeven: True/False`
+  (True = weak edge, forecast under round-trip cost)
 - If `suggested_max_units` is present (non-null), show it as an advisory
   liquidity cap — the largest position that stays within
   `pricing.max_participation_pct`% of the stock's 20-day average daily
   traded value. Call it a ceiling, not a recommended size; the user picks
   their own size below it. Omit the line when the field is null.
 - **If you set a news-adjusted entry/target** for this pick, also show the
-  `adj_*` trade (adj_entry / adj_target / adj_stop, adj_rr_ratio,
-  `adj_actionable`) on its own line and say in one sentence why the news
-  warranted moving off the mechanical dip-limit. Skip this line when the
-  adjusted trade equals the mechanical one.
+  `adj_*` trade (adj_entry / adj_target / adj_stop, adj_rr_ratio) on its own
+  line and say in one sentence why the news warranted moving off the
+  mechanical dip-limit. Skip this line when the adjusted trade equals the
+  mechanical one.
 - News score and one-sentence rationale citing the dimension and finding
 - The 3-7 dimensions you researched
 
-Then a one-line **bottom line**: which (if any) picks are actionable today,
-or "no high-conviction trade today" if none clear the cost gate.
+Then a one-line **bottom line**: the strongest pick(s) today, and a note if
+several are flagged `below_breakeven` (weak edge).
 
 ### 7. Offer to schedule a sell reminder
 
-After step 6, **if at least one of the finalized picks is `actionable: True`**,
-use `AskUserQuestion` to ask whether they would like a reminder scheduled in
-**GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit — offer
-`Yes, schedule it` (Recommended) first and `No reminder` second.
+After step 6, use `AskUserQuestion` to ask whether they would like a reminder
+scheduled in **GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit —
+offer `Yes, schedule it` (Recommended) first and `No reminder` second.
 
 **Two distinct dates** — keep them straight:
 
-- **Sell day** = T+N, the actual trading day on which the position is sold.
-  (For T+2, sell only in the afternoon session 13:00–14:30 ICT after noon
-  settlement. For T+>2, any time 09:00–14:30 ICT works.)
-- **Reminder day** = T+N, the sell day itself. The reminder fires at
-  **11:30 ICT** — late morning, just before the lunch break (and, for T+2,
-  30 min before settlement at noon) — so the user can review and queue
-  exit orders for the afternoon session.
+- **Sell day** = T+2, the actual trading day on which the position is sold.
+  Sell only in the afternoon session 13:00–14:30 ICT after noon settlement.
+- **Reminder day** = T+2, the sell day itself. The reminder fires at
+  **11:30 ICT** — late morning, 30 min before settlement at noon — so the
+  user can review and queue exit orders for the afternoon session.
 
 How to find both dates:
 
@@ -286,14 +282,12 @@ How to find both dates:
   block listing both `Sell day:` and `Suggested reminder:` lines. Use the
   reminder line verbatim when scheduling.
 - Equivalently, read `reports\picks_claude_<DATE>_<sig>.json` — `as_of`
-  plus `exit_offset_days` resolve to the sell day, which is also the
+  plus `exit_offset_days` (=2) resolve to the sell day, which is also the
   reminder day.
-- In `--days earliest` mode, the actionable horizon is whatever `T+N` the
-  search stopped at — already baked into `exit_offset_days`.
 
 If the user accepts:
 
-- Schedule the reminder for **T+N at 11:30 ICT** (the sell day, late
+- Schedule the reminder for **T+2 at 11:30 ICT** (the sell day, late
   morning). **Always use the Claude reminder** — the `scheduled-tasks`
   tool (`mcp__scheduled-tasks__create_scheduled_task`). Do **NOT** use or
   offer Windows `schtasks`, cron, `at`, or an ICS calendar event unless
@@ -301,8 +295,6 @@ If the user accepts:
   resulting trigger time in GMT+7.
 - Always re-state both dates (reminder + sell), the time, tickers, and
   method before scheduling — never schedule silently.
-
-Skip step 7 entirely when no pick is actionable.
 
 ## What NOT to do
 
@@ -314,14 +306,13 @@ Skip step 7 entirely when no pick is actionable.
 ## Caveats to mention to the user
 
 - ACBS round-trip cost is ~0.43% per 100-unit trade. Most days the model's
-  predicted T+N return is smaller than this floor, so most picks will show
-  `actionable=False`. **That's the system doing its job** — it tells you
-  when not to trade, not just when to trade.
+  predicted T+2 return is small, so several of the N picks may show
+  `below_breakeven=True` (forecast under the cost floor). They're still
+  returned to honor `--picks`, but treat a below-breakeven pick with extra
+  caution — the edge is thin.
 - ETFs have materially tighter return distributions than micro-cap stocks,
-  so their `pred_mean` magnitudes are typically much smaller and they almost
-  never clear the `min_rr_ratio` actionability gate. If the user wants ETFs
-  to surface as actionable, the cleaner path is the manual self-correction
-  flow (separate gate for ETFs) rather than tweaking news scores.
+  so their `pred_mean` magnitudes are typically much smaller; they'll usually
+  rank low and, if they do surface, often carry `below_breakeven=True`.
 - The system records every pick in a ledger (`cache/predictions.parquet`)
   with target_date = the actual T+N trading day (weekends + Vietnamese
   holidays excluded). When the user runs again later, past predictions are

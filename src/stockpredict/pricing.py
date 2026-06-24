@@ -94,15 +94,18 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
         net_loss_vnd             max_loss + fees       (worst-case if stopped out)
         rr_ratio                 net_reward / net_loss (≈ target_atr_mult/stop_atr_mult)
         breakeven_pct            price move needed just to cover fees
-        actionable               pred_mean >= min_edge_over_cost*breakeven_pct
-                                 AND net_reward > 0 AND rr_ratio >= min_rr_ratio.
-                                 The take-profit is entry + target_atr_mult*ATR
+        below_breakeven          True when the pick does NOT clear the quality
+                                 bar (pred_mean < min_edge_over_cost*breakeven_pct,
+                                 OR net_reward <= 0, OR rr invalid). Informational
+                                 only — selection is exactly-N by pred_mean, so a
+                                 below_breakeven pick is still returned but flagged
+                                 weak. The take-profit is entry + target_atr_mult*ATR
                                  (NOT close*(1+pred_mean)); pred_mean only drives
-                                 ranking and the directional edge gate.
+                                 ranking and this quality flag.
         suggested_max_units      advisory liquidity cap = floor(
                                  max_participation_pct% * adv_vnd_20*1000 / entry_vnd);
                                  null when adv_vnd_20 absent or the cap is disabled.
-                                 Informational only — never feeds the actionable gate.
+                                 Informational only — never feeds selection.
     """
     if df is None or len(df) == 0:
         return df
@@ -166,13 +169,15 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     rr[valid] = net_reward[valid] / net_loss[valid]
 
     breakeven_pct = (fees_total / entry_v).round(4)
-    # Directional edge gate: the model's predicted forward return must clear
-    # ``min_edge_over_cost`` times the round-trip cost (breakeven_pct). With the
-    # ATR-scaled target, net_reward is structurally positive and rr is ~constant,
-    # so this edge gate — not rr — is what selects how many tickers are
-    # actionable. rr >= min_rr remains as a sanity floor (e.g. a degenerate ATR).
+    # Quality bar (informational only — selection is now exactly-N by pred_mean):
+    # a pick "clears the bar" when the model's predicted forward return beats
+    # ``min_edge_over_cost`` times the round-trip cost (breakeven_pct), has
+    # positive net reward, and a valid rr. ``below_breakeven`` flags the picks
+    # that DON'T — they're still returned (to honor the exact-N count) but
+    # surfaced as weak so the user knows the difficulty was loosened to reach N.
     edge_ok = pred >= (min_edge_over_cost * breakeven_pct)
-    actionable = edge_ok & (net_reward > 0) & (rr >= min_rr) & valid
+    clears_bar = edge_ok & (net_reward > 0) & (rr >= min_rr) & valid
+    below_breakeven = ~clears_bar.fillna(False)
 
     # Advisory liquidity-driven unit cap. adv_vnd_20 is the 20-day average daily
     # traded value in THOUSAND-VND (close-in-thousand-VND * shares), so *1000 to
@@ -201,7 +206,7 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     out["net_loss_vnd"] = net_loss.round(0).astype("Int64")
     out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
-    out["actionable"] = actionable
+    out["below_breakeven"] = below_breakeven
     out["suggested_max_units"] = pd.array(max_units, dtype="Int64")
     return out
 
@@ -240,7 +245,6 @@ def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
         adj_net_reward_vnd, adj_net_loss_vnd
         adj_rr_ratio
         adj_breakeven_pct
-        adj_actionable
     """
     if df is None or len(df) == 0:
         return df
@@ -249,7 +253,6 @@ def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
     pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
     stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
-    min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
 
     out = df.copy()
 
@@ -282,7 +285,6 @@ def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     adj_rr[valid] = adj_net_reward[valid] / adj_net_loss[valid]
 
     adj_breakeven_pct = (adj_fees_total / adj_entry_v).round(4)
-    adj_actionable = (adj_net_reward > 0) & (adj_rr >= min_rr) & valid
 
     out["adj_entry_vnd"] = adj_entry_v.astype("Int64")
     out["adj_target_vnd"] = adj_target_v.astype("Int64")
@@ -294,5 +296,4 @@ def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     out["adj_net_loss_vnd"] = adj_net_loss.round(0).astype("Int64")
     out["adj_rr_ratio"] = adj_rr.round(2)
     out["adj_breakeven_pct"] = adj_breakeven_pct
-    out["adj_actionable"] = adj_actionable
     return out

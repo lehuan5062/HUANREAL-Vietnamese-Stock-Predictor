@@ -60,24 +60,23 @@ def _try_load_low_model() -> RollingEmpiricalQuantileModel | None:
 
 def rank_today(model: TrainedModel | None = None,
                on: str | pd.Timestamp | None = None,
-               top_k: int = 5,
-               actionable_only: bool = False,
+               n_picks: int = 5,
                panel: pd.DataFrame | None = None,
                exit_offset_days: int | None = None,
                symbols: list[str] | None = None,
                low_model: RollingEmpiricalQuantileModel | None = None) -> pd.DataFrame:
     """Compute predicted return for every eligible symbol on the given date,
-    apply the liquidity filter, and return the candidate picks as a DataFrame.
+    apply the liquidity / tradable / ceiling / glitch filters, and return
+    EXACTLY ``n_picks`` picks — the top ``n_picks`` rows by ``pred_mean``,
+    priced.
 
-    Two selection modes:
-
-    * ``actionable_only=False`` (legacy) — cut to the ``top_k`` highest
-      ``pred_mean`` rows first, then price just those.
-    * ``actionable_only=True`` — price the WHOLE scored universe and return
-      every row that clears the ``actionable`` gate (``net_reward > 0 &
-      rr >= min_rr``), sorted by ``pred_mean`` descending. There is no cap; a
-      ticker is no longer hidden just because it ranks below ``top_k`` by
-      predicted return.
+    Selection is exactly-N: the whole scored universe is ranked by
+    ``pred_mean`` descending and the top ``n_picks`` are kept, so the implicit
+    difficulty (the edge cutoff) floats to whatever admits exactly that count.
+    Picks below the break-even quality bar are still returned but carry
+    ``below_breakeven=True`` so the caller can warn. If the eligible universe
+    holds fewer than ``n_picks`` rows (a tiny cache / heavy --exclude /
+    --hose-only), fewer rows are returned — the caller surfaces the shortfall.
     """
     if model is None:
         model = TrainedModel.load(latest_model_path())
@@ -144,23 +143,17 @@ def rank_today(model: TrainedModel | None = None,
         snap["pred_low_alpha"] = float(low_model.alpha)
     snap["rank"] = snap["pred_mean"].rank(ascending=False, method="dense").astype(int)
     ordered = snap.sort_values("pred_mean", ascending=False)
-    if actionable_only:
-        # Price the WHOLE liquid/tradable universe (both heads already scored it
-        # above, so this only adds vectorized pricing math), then return every
-        # row that clears the actionable gate — no cap. The predicted return
-        # drives the target price (hence the gate) and the pred_mean sort order.
-        out = add_price_suggestions(ordered)
-        out = out[out["actionable"].fillna(False).astype(bool)]
-    else:
-        # Legacy path: cut to the top_k by pred_mean first, then price just those.
-        out = ordered.head(top_k)
-        out = add_price_suggestions(out)
+    # Keep the top n_picks by pred_mean, then price just those. Taking the top
+    # N is the same as auto-tuning the edge gate to admit exactly N — the
+    # cutoff floats to the Nth pick's score. Pricing flags any of these N that
+    # fall below the break-even quality bar (below_breakeven=True).
+    out = add_price_suggestions(ordered.head(int(n_picks)))
     cols = ["symbol", "close",
             "entry_vnd", "close_vnd", "entry_limit_pct",
             "target_vnd", "target_low_vnd", "target_high_vnd",
             "stop_vnd", "gross_reward_vnd", "max_loss_vnd",
             "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
-            "rr_ratio", "breakeven_pct", "actionable", "suggested_max_units",
+            "rr_ratio", "breakeven_pct", "below_breakeven", "suggested_max_units",
             "pred_mean", "pred_std", "pred_low", "pred_low_alpha", "rank",
             "rsi_14", "mom_5", "mom_20", "vol_z_20", "adv_vnd_20", "atr_14"]
     cols = [c for c in cols if c in out.columns]

@@ -1,4 +1,4 @@
-# Vietnamese T+N Stock Predictor — Self-correction prompt
+# Vietnamese T+2 Stock Predictor — Self-correction prompt
 
 Paste the contents of this file into a Claude Code or Cowork session in Claude
 Desktop. Claude will then run a one-shot **self-correction** pass over a picks
@@ -23,11 +23,11 @@ elapsed since the picks were emitted:
   Fires the trading day after `as_of`. The buy day's OHLC is now in the
   ledger (`t0_evaluated=True`), which means we know whether each pick's
   `entry_limit_price` (from the low-prediction quantile head) actually
-  filled. We do **not** know the realized return yet — that needs T+N
+  filled. We do **not** know the realized return yet — that needs T+2
   to elapse. Diagnoses focus narrowly on **entry calibration**: was the
   predicted dip too aggressive (limits unreachable, no fill) or too
   conservative (limits filled cheaply but only a tiny dip captured)?
-* **Stage 2 — Full self-correction (after T+N closes)**. The original
+* **Stage 2 — Full self-correction (after T+2 closes)**. The original
   flow. All rows have `evaluated=True` and `t0_evaluated=True`. You can
   now diagnose **everything**: scoring, entry calibration, dimension-tag
   patterns, news_score weighting, and how all of those interact with
@@ -40,7 +40,10 @@ the chosen picks report is eligible for, then proceed accordingly. Stage
 
 ---
 
-You are operating the Vietnamese T+N swing-trade stock predictor at `D:\stock`.
+You are operating the Vietnamese T+2 swing-trade stock predictor. **Run every
+command below from the repo root** — `cd` into your clone first; all paths in
+this prompt are relative to it (the project virtualenv lives at
+`.venv\Scripts\python.exe`).
 Your tools: `Bash`, `Read`, `Edit`. No `WebFetch`/`WebSearch` needed — the
 evidence for self-correction lives entirely on disk.
 
@@ -75,8 +78,8 @@ stage readiness. Don't just `ls reports/` and dump the list — the user
 shouldn't have to compute eligibility in their head.
 
 ```
-D:\stock\.venv\Scripts\python.exe -c "import glob, json, os, pandas as pd; df = pd.read_parquet(r'D:\stock\cache\predictions.parquet')
-for p in sorted(glob.glob(r'D:\stock\reports\picks_claude_*.json'))[-8:]:
+.venv\Scripts\python.exe -c "import glob, json, os, pandas as pd; df = pd.read_parquet(r'cache\predictions.parquet')
+for p in sorted(glob.glob(r'reports\picks_claude_*.json'))[-8:]:
     d = json.load(open(p, encoding='utf-8')); rid = d['as_of'].replace('-','') + '_' + d['run_signature']; sub = df[df['run_id'] == rid]
     if len(sub) == 0: print(os.path.basename(p), 'as_of=' + d['as_of'], 'no ledger rows'); continue
     n = len(sub); t0 = int(sub['t0_evaluated'].sum()); ev = int(sub['evaluated'].sum())
@@ -84,7 +87,7 @@ for p in sorted(glob.glob(r'D:\stock\reports\picks_claude_*.json'))[-8:]:
 ```
 
 **Get the wall clock first.** The harness only injects today's date,
-not the time. Run `date` (or `D:\stock\.venv\Scripts\python.exe -c
+not the time. Run `date` (or `.venv\Scripts\python.exe -c
 "import pandas as pd; print(pd.Timestamp.now(tz='Asia/Ho_Chi_Minh'))"`)
 and pin `now_vn`. HOSE closes 15:00 Asia/Ho_Chi_Minh. T+0 (buy day) =
 `as_of` itself (see `tracking.py:581`), so a report's buy day has
@@ -112,7 +115,7 @@ Classify each row:
     that, refresh just the picked symbols:
 
     ```
-    D:\stock\.venv\Scripts\python.exe -m stockpredict.cli update-data -s <SYM1> -s <SYM2>
+    .venv\Scripts\python.exe -m stockpredict.cli update-data -s <SYM1> -s <SYM2>
     ```
 
     (symbols from the report's `picks[].symbol`).
@@ -137,7 +140,7 @@ Then ask in plain conversation, one question at a time:
    report is currently stage-eligible.
 
 2. **Stage** (optional). Either `1` (limit-fill only) or `2` (full
-   T+N realized). If the user doesn't specify, infer from the ledger
+   T+2 realized). If the user doesn't specify, infer from the ledger
    classification above and tell them what you decided.
 3. **Extra context** (optional). Anything the user wants weighted into the
    diagnosis (e.g. "ignore VNM, it was a known data issue", "I executed only
@@ -149,11 +152,11 @@ After all are collected, summarise back and start Step 2.
 
 `Read` the picks JSON. Pull these fields from it:
 
-- `as_of`, `mode`, `exit_offset_days`, `hose_only`, `include_etfs`, `exclude`, `run_signature`, `selection`, `n_actionable` (plus mode-specific extras like `weight`, `global_summary`)
+- `as_of`, `mode`, `exit_offset_days`, `hose_only`, `include_etfs`, `exclude`, `run_signature`, `selection`, `requested_picks`, `n_picks`, `n_below_breakeven` (plus mode-specific extras like `weight`, `global_summary`)
 - `weight` (the `news_weight` that was active at finalize time)
 - `plan_file` (interactive mode only — points at the news plan markdown)
 - `picks` (the array; each item has `symbol`, `pred_mean`, `news_score`,
-  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `actionable`, plus the
+  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `below_breakeven`, plus the
   `business`, `dimensions`, `drivers`, `key_news`, `dimensions_cited` fields
   Claude wrote at finalize time)
 
@@ -172,10 +175,10 @@ Then:
 
 ## Step 3 — Pull outcomes from the ledger and choose the stage
 
-Read `D:\stock\cache\predictions.parquet` directly. The cleanest one-liner:
+Read `cache\predictions.parquet` directly. The cleanest one-liner:
 
 ```
-D:\stock\.venv\Scripts\python.exe -c "import pandas as pd; df = pd.read_parquet(r'D:\stock\cache\predictions.parquet'); df = df[df['run_id'] == '<RUN_ID>']; print(df[['symbol','pred_mean','news_score','adjusted','entry_price','entry_limit_price','pred_low','t0_low','entry_limit_filled','t0_evaluated','actual_exit','realized_return','evaluated','entry_slippage','dimensions_cited','target_date']].to_string(index=False))"
+.venv\Scripts\python.exe -c "import pandas as pd; df = pd.read_parquet(r'cache\predictions.parquet'); df = df[df['run_id'] == '<RUN_ID>']; print(df[['symbol','pred_mean','news_score','adjusted','entry_price','entry_limit_price','pred_low','t0_low','entry_limit_filled','t0_evaluated','actual_exit','realized_return','evaluated','entry_slippage','dimensions_cited','target_date']].to_string(index=False))"
 ```
 
 Where `<RUN_ID>` is `<YYYYMMDD>_<run_signature>` — e.g.
@@ -184,13 +187,13 @@ Where `<RUN_ID>` is `<YYYYMMDD>_<run_signature>` — e.g.
 
 **Stage gates** (pick the highest stage that fully passes):
 
-- **Stage 2 gate**: every row has `evaluated=True`. → run the full T+N
+- **Stage 2 gate**: every row has `evaluated=True`. → run the full T+2
   diagnosis below.
 - **Stage 1 gate**: every row has `t0_evaluated=True` (but at least one
   row has `evaluated=False`). → run the limit-fill-only diagnosis.
 - **Neither gate passes**: stop. Tell the user:
 
-  > Run `D:\stock\.venv\Scripts\python.exe -m stockpredict.cli evaluate-fills`
+  > Run `.venv\Scripts\python.exe -m stockpredict.cli evaluate-fills`
   > to stamp T+0 limit-fill outcomes (need only the buy day to have
   > closed), or `evaluate.bat` to run the full evaluation. Then rerun
   > this prompt, or pick an older report whose data has fully landed.
@@ -255,7 +258,7 @@ Pull the broader by-dimension and by-news_score stats so the diagnosis isn't
 based solely on one report. Use the existing helper:
 
 ```
-D:\stock\.venv\Scripts\python.exe -c "from stockpredict.tracking import recent_performance; import json; print(json.dumps(recent_performance(window_days=90, mode='claude'), indent=2, default=str))"
+.venv\Scripts\python.exe -c "from stockpredict.tracking import recent_performance; import json; print(json.dumps(recent_performance(window_days=90, mode='claude'), indent=2, default=str))"
 ```
 
 **Fallback if `limit_fill` returns null.** The `recent_performance`
@@ -266,8 +269,8 @@ returns `null` again, compute pool fill stats directly from the
 parquet:
 
 ```
-D:\stock\.venv\Scripts\python.exe -c "import pandas as pd
-df = pd.read_parquet(r'D:\stock\cache\predictions.parquet')
+.venv\Scripts\python.exe -c "import pandas as pd
+df = pd.read_parquet(r'cache\predictions.parquet')
 pool = df[df['t0_evaluated'] & df['entry_limit_price'].notna()].copy()
 pool['fill_margin'] = (pool['entry_limit_price'] - pool['t0_low']) / pool['entry_limit_price']
 print('n=' + str(len(pool)), 'fill_rate=' + str(round(pool['entry_limit_filled'].mean(), 3)), 'mean_fm=' + str(round(pool['fill_margin'].mean(), 4)))
@@ -350,7 +353,7 @@ outcome — say "no systemic pattern found" and stop, don't manufacture one.
 ## Step 6 — Propose edits
 
 Write the diagnosis and proposals to
-`D:\stock\reports\self_correction_<YYYY-MM-DD>_<sig>_stage<N>.md` (use the
+`reports\self_correction_<YYYY-MM-DD>_<sig>_stage<N>.md` (use the
 picks report's `as_of` and `run_signature`, plus the stage you ran, so
 naming aligns and re-runs at a different stage don't clobber). Keep the
 report lean — findings + proposed edits + applied tracking only. Don't
@@ -409,8 +412,25 @@ filename identifies the report and the ledger holds the data. Structure:
 2. `config.yaml` — for tunable knobs:
    - `modes.claude.news_weight` (current 0.05) — raise / lower if
      news_score is consistently mis-weighted relative to ML.
-   - `pricing.stop_atr_mult` (current 1.5), `pricing.min_rr_ratio`
-     (current 0.8) — for entry/exit rule mismatches.
+   - `pricing.stop_atr_mult` (current 1.5), `pricing.target_atr_mult`
+     (current 2.0) — the stop/take-profit distances in ATR multiples. The
+     take-profit is `entry + target_atr_mult × ATR`, so `rr_ratio ≈
+     target_atr_mult / stop_atr_mult`. Tune these for entry/exit rule
+     mismatches (e.g. stops too tight → frequent stop-outs before the move).
+     `pricing.min_rr_ratio` (current 0.8) is now only a sanity floor on rr,
+     not the selection gate.
+   - **Selection is exactly-N, not a gate.** The program returns the top
+     `pricing.default_picks` (current 1) names by `pred_mean` — there is no
+     "actionable" filter anymore. `--picks N` overrides it. A pick is flagged
+     `below_breakeven` when `pred_mean < pricing.min_edge_over_cost × breakeven_pct`
+     (current `min_edge_over_cost` 1.0): a weak-edge name surfaced only because
+     the count had to be filled. If a report's picks are mostly
+     `below_breakeven` and realized returns are poor, the lever is to advise the
+     user to request fewer picks (lower `--picks` / `default_picks`) or raise
+     `min_edge_over_cost` to make the flag stricter — NOT to fabricate an
+     actionability gate. `pricing.max_abs_pred_mean` (current 0.05) drops
+     split/corp-action glitch forecasts before ranking; widen only if a
+     legitimate high-conviction name is being filtered.
    - **`pricing.entry_low_alpha` (currently 0.25) — sets the quantile
      level of the per-ticker rolling empirical low head (since
      2026-06-05; see memory `project_low_head_negative_skill.md` — do
@@ -443,7 +463,7 @@ filename identifies the report and the ledger holds the data. Structure:
      target without walking the price down (the suggested cap was too generous
      for the real book); raise it if the cap is so small it's not useful.
      Like `min_adv_active_days`, this is a liquidity/sizing knob — it's advisory
-     and never feeds the actionable gate, so it isn't ledger-observable and only
+     and never feeds selection, so it isn't ledger-observable and only
      surfaces via user-supplied extra context in Step 1. Set to 0 to disable the
      suggestion entirely.
 3. Source files (e.g. `src/stockpredict/news/claude_runner.py`,
@@ -491,7 +511,7 @@ After all edits are applied (or skipped), suggest the user run a small
 dry pass to confirm nothing broke:
 
 ```
-D:\stock\.venv\Scripts\python.exe -m stockpredict.cli predict --mode claude --top 3 --days 2 --skip-train
+.venv\Scripts\python.exe -m stockpredict.cli predict --mode claude --picks 3 --skip-train
 ```
 
 Don't run it for them — they may want to inspect diffs first.
@@ -500,7 +520,7 @@ If the user changed `pricing.entry_low_alpha`, also remind them they'll
 need to **retrain the low head** before the new alpha takes effect:
 
 ```
-D:\stock\.venv\Scripts\python.exe -m stockpredict.cli train
+.venv\Scripts\python.exe -m stockpredict.cli train
 ```
 
 Remind the user: one report ≠ a backtest — a knob tweak that helps

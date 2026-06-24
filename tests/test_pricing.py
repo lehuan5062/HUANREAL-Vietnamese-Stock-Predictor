@@ -29,10 +29,10 @@ def test_low_predicted_return_is_not_actionable():
     assert out["gross_reward_vnd"] == 600
     # rr is healthy now (reward/risk ≈ 2/1.5), but...
     assert out["rr_ratio"] >= 1.0
-    # ...the forecast (0.17%) is below breakeven (~0.43%), so the edge gate
-    # rejects it. Low signal ⇒ not actionable.
+    # ...the forecast (0.17%) is below breakeven (~0.43%), so the quality bar
+    # flags it. Low signal ⇒ below_breakeven.
     assert float(out["pred_mean"]) < float(out["breakeven_pct"])
-    assert not bool(out["actionable"])
+    assert bool(out["below_breakeven"])
 
 
 def test_strong_predicted_return_is_actionable():
@@ -58,13 +58,13 @@ def test_strong_predicted_return_is_actionable():
     # rr ratio: net_reward / net_loss; net_loss = (20-19.4)*1000 + fees
     # = 600 + ~90 = ~690; rr ~= 910/690 ~= 1.3
     assert out["rr_ratio"] >= 1.0
-    assert bool(out["actionable"])
+    assert not bool(out["below_breakeven"])
 
 
-def test_edge_gate_rejects_forecast_below_cost_despite_good_rr():
+def test_quality_flag_marks_forecast_below_cost_despite_good_rr():
     """A pick with a healthy ATR-scaled rr but a forecast that barely beats
-    zero (below breakeven) must be rejected by the directional edge gate.
-    This is what keeps the actionable set selective now that rr no longer is."""
+    zero (below breakeven) is flagged below_breakeven. Selection is exactly-N,
+    so it'd still be returned — but the flag warns it's a weak-edge pick."""
     df = _frame([{
         "close": 20.0,
         "pred_mean": 0.002,    # +0.2%, below the ~0.43% breakeven
@@ -74,9 +74,9 @@ def test_edge_gate_rejects_forecast_below_cost_despite_good_rr():
     out = add_price_suggestions(df).iloc[0]
     # rr is fine (ATR-scaled reward vs ATR-scaled risk)...
     assert out["rr_ratio"] >= 1.0
-    # ...but the forecast doesn't clear the cost, so it's not actionable.
+    # ...but the forecast doesn't clear the cost, so it's flagged weak.
     assert float(out["pred_mean"]) < float(out["breakeven_pct"])
-    assert not bool(out["actionable"])
+    assert bool(out["below_breakeven"])
 
 
 def test_breakeven_pct_around_43bps():
@@ -92,9 +92,9 @@ def test_breakeven_pct_around_43bps():
     assert 0.0040 < float(out["breakeven_pct"]) < 0.0046
 
 
-def test_missing_atr_marks_rr_nan_not_actionable():
-    """If ATR is NaN we can't compute the stop, so rr is undefined and we
-    should never flag the trade as actionable."""
+def test_missing_atr_marks_rr_nan_and_below_breakeven():
+    """If ATR is NaN we can't compute the stop, so rr is undefined and the
+    pick is flagged below_breakeven (invalid trade economics)."""
     import numpy as np
     df = _frame([{
         "close": 15.0,
@@ -104,7 +104,7 @@ def test_missing_atr_marks_rr_nan_not_actionable():
     }])
     out = add_price_suggestions(df).iloc[0]
     assert pd.isna(out["rr_ratio"])
-    assert not bool(out["actionable"])
+    assert bool(out["below_breakeven"])
 
 
 def test_vnd_columns_are_integers():

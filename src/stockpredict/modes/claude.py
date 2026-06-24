@@ -14,12 +14,13 @@ import pandas as pd
 from ..config import load_config, reports_dir
 from ..model.predict import rank_today
 from ..news.claude_runner import parse_plan, write_plan
-from ..picks_meta import actionable_suffix, annotate_best
+from ..picks_meta import picks_suffix
 from ..tracking import effective_today_for_trading, run_signature
 
 
 def run(on: str | None = None,
         exit_offset_days: int | None = None,
+        n_picks: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
@@ -27,6 +28,7 @@ def run(on: str | None = None,
     """Emit the interactive plan. Returns (candidates_df, plan_path, 'interactive')."""
     candidates, plan_path = emit_plan(on=on,
                                       exit_offset_days=exit_offset_days,
+                                      n_picks=n_picks,
                                       symbols=symbols, hose_only=hose_only,
                                       include_etfs=include_etfs,
                                       exclude=exclude)
@@ -35,18 +37,20 @@ def run(on: str | None = None,
 
 def emit_plan(on: str | None = None,
               exit_offset_days: int | None = None,
+              n_picks: int | None = None,
               symbols: list[str] | None = None,
               hose_only: bool = False,
               include_etfs: bool = True,
               exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
-    candidates = rank_today(actionable_only=True, on=on,
+    full_cfg = load_config()
+    requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
+    candidates = rank_today(n_picks=requested_n, on=on,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     if on is not None:
         on_date = dt.date.fromisoformat(on)
     else:
         on_date = effective_today_for_trading().date()
 
-    full_cfg = load_config()
     eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         full_cfg.target["exit_offset_days"]
     )
@@ -69,6 +73,7 @@ def emit_plan(on: str | None = None,
     meta_path.write_text(
         json.dumps({
             "exit_offset_days": eff_horizon,
+            "n_picks": requested_n,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
             "exclude": excl_list,
@@ -116,11 +121,13 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         merged = scored
     merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
     # Parallel news-adjusted entry/target economics (adj_* columns). Purely
-    # additive — the mechanical entry/target/rr/actionable are untouched.
+    # additive — the mechanical entry/target/rr columns are untouched.
     from ..pricing import add_adjusted_price_suggestions
     merged = add_adjusted_price_suggestions(merged)
+    # News re-orders the SAME N candidates emitted upstream; it never adds or
+    # drops names, so there's no re-slicing here — just re-rank by the
+    # news-adjusted score.
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
-    merged = annotate_best(merged)
 
     # Recover horizon / hose_only from the sidecar metadata (if present).
     meta_path = plan_path.with_suffix(".meta.json")
@@ -145,9 +152,11 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         exclude=eff_excl,
     )
 
+    requested_n = meta.get("n_picks")
+    n_below = int(merged["below_breakeven"].fillna(True).sum()) if "below_breakeven" in merged.columns else 0
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
-    out = reports_dir() / f"picks_claude_{today}_{sig}{actionable_suffix(merged)}.json"
+    out = reports_dir() / f"picks_claude_{today}_{sig}{picks_suffix(merged)}.json"
     payload = {
         "as_of": today,
         "mode": "claude",
@@ -156,8 +165,10 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
         "run_signature": sig,
-        "selection": "actionable_only",
-        "n_actionable": int(len(merged)),
+        "selection": "top_n",
+        "requested_picks": requested_n,
+        "n_picks": int(len(merged)),
+        "n_below_breakeven": n_below,
         "plan_file": str(plan_path),
         "weight": weight,
         "picks": json.loads(merged.to_json(orient="records")),

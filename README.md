@@ -1,13 +1,11 @@
-# HUANREAL Vietnamese T+N Stock Predictor
+# HUANREAL Vietnamese T+2 Stock Predictor
 
 A swing-trade screener for the Vietnamese stock market. Buy on day **T**, hold
-**N trading days**, sell on the exit day. The minimum is **T+2** (Vietnamese
-settlement happens at noon on T+2, so the earliest legal sell is the T+2
-afternoon session); longer holds (T+5, T+11, T+18, last-trading-day-of-month,
-or *earliest-actionable* — see [`--days`](#run-command-flags)) are configurable
-per run. The program ranks the most liquid HOSE / HNX / UPCOM tickers by
-predicted T+N forward return and tracks every prediction so it can grade
-itself later.
+**2 trading days**, sell on the **T+2** afternoon session (Vietnamese
+settlement happens at noon on T+2, so that's the earliest legal sell). The
+program ranks the most liquid HOSE / HNX / UPCOM tickers by predicted T+2
+forward return, returns **exactly the number of picks you ask for** (`--picks
+N`, top by score), and tracks every prediction so it can grade itself later.
 
 ## Two ways to run
 
@@ -17,9 +15,9 @@ itself later.
 | ---- | ------------ |
 | [`predict_base.bat`](predict_base.bat) | Pure ML + technical filter. No news. |
 | [`predict_gemini.bat`](predict_gemini.bat) | ML + writes a prompt file you paste into Gemini Chat (web, with browsing). Opens the prompt in Notepad automatically. |
-| [`evaluate.bat`](evaluate.bat) | Refreshes data and grades any past predictions whose T+N has now passed. |
+| [`evaluate.bat`](evaluate.bat) | Refreshes data and grades any past predictions whose T+2 has now passed. |
 
-Each predict .bat asks for days / hose-only / etfs / exclude / warm-only and runs the entire universe.
+Each predict .bat asks for picks / hose-only / etfs / exclude / warm-only and runs the entire universe.
 
 ### B. Claude mode — paste a prompt into Claude Desktop
 
@@ -31,7 +29,7 @@ tools, which only exist inside Claude.
 
 1. Open Claude Code or Cowork in Claude Desktop.
 2. Paste the contents of [`claude_prompt.md`](claude_prompt.md) into the chat.
-3. Claude will ask you for `days`, then drive the entire
+3. Claude will ask you for the number of `picks`, then drive the entire
    pipeline (run the ML stage → research each candidate across emergent
    per-ticker dimensions → fill the plan → finalize → report explained
    picks).
@@ -44,14 +42,11 @@ emergent, not a fixed checklist), and the ACBS fee model.
 ### C. CLI (advanced)
 
 ```bash
-# Standard daily run (entire universe, T+2 horizon)
+# Standard daily run (entire universe, T+2, default pick count)
 .venv\Scripts\python -m stockpredict.cli run --mode base
 
-# Longer hold horizon (T+5, automatically retrains)
-.venv\Scripts\python -m stockpredict.cli run --days 5 --mode base
-
-# Last trading day of the month
-.venv\Scripts\python -m stockpredict.cli run --days end --mode base
+# Ask for exactly 8 picks
+.venv\Scripts\python -m stockpredict.cli run --picks 8 --mode base
 
 # Other commands
 .venv\Scripts\python -m stockpredict.cli evaluate
@@ -68,13 +63,11 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 
 | flag | meaning | default |
 | ---- | ------- | ------- |
-| `--days N`, `--days end`, or `--days earliest` | T+N exit window. Min 2 (Vietnamese T+2 settlement). `end` = last trading day of the month, rolling to next month if too close. `earliest` = iterative search: trains+predicts at T+N, T+N+1, T+N+2, … (starting at `--earliest-start`) and stops at the first horizon with at least one actionable pick. **No upper cap** — runs until found, Ctrl+C to abort. Slow — minutes per iteration. The model is horizon-specific, so non-`2` horizons force a retrain. | `earliest` |
-| `--earliest-start N` | Only used when `--days earliest`. Integer ≥ 2; the search begins at T+N. Ignored for any other `--days` value. | `2` |
+| `--picks N`, `-n N` | How many picks to surface. The program always returns **exactly N** — it ranks the whole scored universe by predicted return and keeps the top N, so the difficulty (the implicit edge cutoff) floats to whatever admits exactly N. Picks below the break-even quality bar are still returned but flagged `below_breakeven`, with a count in the `==> QUALITY` warning. If the eligible universe is smaller than N (heavy `--exclude` / `--hose-only` / tiny cache), fewer are returned and a `==> SHORTFALL` warning prints. Horizon is always T+2. | `pricing.default_picks` (1) |
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
 | `--include-etfs` | Include HOSE ETFs (e.g. `E1VFVN30`, `FUEVFVND`) in the pickable universe. Off by default — ETFs are classified as a separate security type and excluded unless this is set. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
-| `--top N` | cap how many picks to print | _(off — lists all actionable picks dynamically)_ |
-| `--skip-train` | reuse cached `models/latest.pkl` (only works at `days=2`; otherwise ignored) | off |
+| `--skip-train` | reuse cached `models/latest.pkl` instead of retraining | off |
 
 ## Universe coverage
 
@@ -243,16 +236,16 @@ Same atomicity for the watermark files. The 70 tickers you fetched
 before hitting Ctrl+C *are* persisted; the next run picks up from
 there instead of starting over.
 
-## Trading-day calendar (T+N math)
+## Trading-day calendar (T+2 math)
 
-T+N is computed using the **actual Vietnamese trading-day calendar** built
+T+2 is computed using the **actual Vietnamese trading-day calendar** built
 from cached OHLCV data — weekends AND every Vietnamese holiday the market
 historically closed for (Tết, Reunification Day, Labor Day, National Day,
 plus ad-hoc closures) are skipped.
 
 | computation | weekends | Vietnamese holidays |
 | ----------- | -------- | ------------------- |
-| ML training target (`shift(-N)` on OHLCV index) | excluded | excluded |
+| ML training target (`shift(-2)` on OHLCV index) | excluded | excluded |
 | `target_date` in the predictions ledger ([`tracking._next_trading_offset`](src/stockpredict/tracking.py)) | excluded | excluded |
 | Realized-return evaluation (`evaluate_pending`) | excluded | excluded |
 
@@ -262,117 +255,44 @@ Reunification + Labor Day cluster), T+2 lands on **2025-05-06**, not
 against the real cache in
 [`tests/test_trading_calendar.py`](tests/test_trading_calendar.py).
 
-## Horizon search: `--days earliest`
+## Exact-N picks (`--picks N`)
 
-Pass `--days earliest` (or type `earliest` at the .bat prompt) to find
-the **shortest hold period** that produces an actionable trade. The
-program:
+The horizon is always **T+2** (Vietnamese settlement). Instead of a horizon
+search, you tell the program **how many picks** you want and it returns
+exactly that many:
 
-1. Trains a fresh model at T+`earliest_start` (default T+2), predicts,
-   checks for `actionable=True`.
-2. If found, stops and emits picks at that horizon.
-3. Otherwise repeats at T+`start+1`, T+`start+2`, … with **no upper
-   cap** — the loop runs until at least one actionable pick is found.
-   The user can hit Ctrl+C to abort if it takes too long, and a
-   "still searching past T+N" callout prints every 30 horizons so the
-   process is never silent.
-4. The only safety net: if the panel comes back empty for 60
-   consecutive horizons (history too short or symbol set too narrow),
-   the loop bails with an error rather than spinning forever.
+1. Trains the T+2 model (once), predicts the whole liquid / tradable /
+   glitch-filtered universe, and ranks every name by `pred_mean`.
+2. Keeps the **top N** by predicted return. Taking the top N is the same as
+   auto-tuning the edge gate to admit exactly N — the cutoff floats to the
+   Nth pick's score.
+3. Flags any of those N that fall below the **break-even quality bar**
+   (`pred_mean < min_edge_over_cost × breakeven_pct`) with
+   `below_breakeven=True`. They're still returned (to honor the count) but a
+   `==> QUALITY: K of N pick(s) are below the break-even bar` warning prints.
+4. If the eligible universe is smaller than N (heavy `--exclude` /
+   `--hose-only` / tiny cache), it returns all available and prints a
+   `==> SHORTFALL` warning. Retraining can't manufacture more candidates, so
+   there's no search loop.
 
-The starting horizon is configurable: `--earliest-start <N>` (or the
-follow-up `Earliest-start: T+N` prompt in the `.bat` files). Minimum
-is 2 (Vietnamese T+2 settlement floor); default is 2. Use a higher
-start when you already know shorter horizons aren't going to clear
-the cost gate (e.g. on illiquid tickers where T+2 < ACBS round-trip
-cost is structurally guaranteed).
+`--picks N` (or `-n N`) overrides the default in `pricing.default_picks`
+(config.yaml, default 1).
 
 Typical output:
 
 ```
---days earliest -> will iterate T+2, T+3, T+4, ... after data fetch (NO upper cap), stopping at the first horizon with >=1 actionable pick. Ctrl+C to abort.
-searching for earliest actionable horizon (starting T+2, no upper cap; trains a fresh model per horizon — Ctrl+C to abort)...
-  T+2... none
-  T+3... none
-  T+4... none
-  ...
-  T+11... found 1 actionable pick(s)
+mode=base  universe=entire (no cap)  picks=5
+  horizon: T+2  (T+2: sell in afternoon session only — settlement noon T+2)
 
-predicting (mode=base)...
-=== #1 DCL  [BEST rr | BEST net | BEST composite]
-  Trade: buy 100 @ 37,500 VND  |  target 40,155  |  stop 34,747
-  P&L (after ACBS fees 16,829): net +248,671  rr 0.85  -> ACTIONABLE
-saved -> reports/picks_<date>_base_d11.json
+symbol  close_vnd  entry_vnd  target_vnd  stop_vnd  net_reward_vnd  rr_ratio  below_breakeven  pred_mean
+   VVS     80,900     78,973      96,054    66,162         +16,696      1.27            False   0.028708
+   PAN     22,750     22,464      25,123    20,470          +2,555      1.22            False   0.014885
+   ...
+saved -> reports/picks_<date>_base_d2_VVS-PAN-KLB-NAB-VJC.json
 ```
 
-Cost: each iteration trains a model from scratch (~20-30s on the
-default 50-ticker universe, longer on full). Best case (T+`start` is
-already actionable) is one cycle. Worst case is unbounded — on a low-
-volatility week the search may traverse dozens of horizons before
-something clears the ACBS cost gate.
-
-The discovered horizon is captured in the picks filename and ledger
-signature (`d11` in the example above), so the self-correction layer
-keeps separate hit-rate stats per horizon found this way.
-
-## Horizon (`--days N`)
-
-| `--days` | meaning | constraint |
-| -------- | ------- | ---------- |
-| `2` (default) | sell at the close of T+2 | **afternoon session only** — Vietnamese T+2 settlement happens at noon, shares are deliverable from ~13:00 |
-| `3`, `4`, `5`… | sell at the close of T+N | any time on the exit day |
-| `end` | sell on the last trading day of the month | rolls to the **next** month if today is too close to month-end to satisfy T+2 (e.g. last day, last day −1) |
-
-`--days end` resolves at CLI entry against the actual trading-day calendar
-(weekends + Vietnamese holidays excluded). Future trading days are
-projected forward as weekdays. Examples (today = 2026-05-05):
-
-```
-T=2026-05-05  -> T+18 = 2026-05-29   (last trading day of May)
-T=2026-05-27  -> T+2  = 2026-05-29   (T+2 satisfied within May)
-T=2026-05-28  -> T+23 = 2026-06-30   (rolled to June, T+1 < 2)
-T=2026-05-29  -> T+22 = 2026-06-30   (rolled to June, T+0 < 2)
-```
-
-The trading-day calendar **auto-extends** for any horizon — past days
-come from the cached OHLCV index, future days are projected as weekdays.
-You don't need to refresh the cache or pass extra flags for long
-horizons. Worst case: a future weekday turns out to be an unannounced
-holiday, the resolved target_date is off by 1 day, and `evaluate_pending`
-still finds the right close from the OHLCV cache once the date arrives.
-
-The trained model is **horizon-specific**: passing `--days 5` retrains on
-T+5 forward returns. The `--skip-train` flag is therefore ignored when
-`--days != 2`. The first run at a new horizon will take a couple of extra
-minutes for training; subsequent runs at the same horizon can use
-`--skip-train`.
-
-Predicted returns at longer horizons are typically larger (more time for
-moves), which improves the chance of clearing the ~43-bps round-trip fee
-floor. But the variance also grows — verify with the backtest.
-
-## "Best choice" badges
-
-When at least one pick has `actionable=True`, the explained view tags the
-leader in each of four categories. A single ticker can win multiple
-badges:
-
-```
-=== #1 ASP  —  An Pha Petroleum  [BEST adjusted | BEST rr | BEST net | BEST composite]
-  Trade: buy 200 @ 6,510 VND  |  target 6,913  |  stop 6,209
-  ...
-```
-
-| badge | criterion |
-| ----- | --------- |
-| `BEST adjusted` | Highest `adjusted` (= `pred_mean × (1 + 0.05 × news_score)`). The system's overall conviction. |
-| `BEST rr` | Highest `rr_ratio = net_reward / net_loss`. Most asymmetric upside-vs-downside. |
-| `BEST net` | Highest `net_reward_vnd`. Biggest per-share dollar edge (net of fees). |
-| `BEST composite` | Lowest sum of (rank by adjusted) + (rank by rr) + (rank by net). The all-rounder. |
-
-The four boolean fields (`best_adjusted`, `best_rr`, `best_net`,
-`best_composite`) also persist into `picks_<mode>_<date>.json`. If no
-pick is actionable, no badges are set.
+The picks JSON records `selection: "top_n"`, `requested_picks`, `n_picks`,
+and `n_below_breakeven`. The filename suffix lists the returned tickers.
 
 ## Reading the output
 
@@ -391,7 +311,7 @@ basis. You size the position yourself:
 | `close_vnd` | today's close, for reference |
 | `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile (`pricing.entry_low_alpha`) of recent next-day-low returns (clipped never above the close). Falls back to the close when no low head is present. |
 | `entry_limit_pct` | the predicted dip vs close (≤ 0) baked into `entry_vnd` |
-| `target_vnd` | take-profit to sell at on the exit day T+N — **ATR-scaled**: `entry + target_atr_mult × ATR(14)`. (Was `entry × (1 + pred_mean)`; that put reward on the scale of a ~0.1% forecast against a ~4% ATR stop, so `rr_ratio` was structurally ~0.2 and only prediction outliers — usually split/corp-action data glitches — ever cleared the gate.) `pred_mean` now drives only ranking and the edge gate. |
+| `target_vnd` | take-profit to sell at on the exit day T+2 — **ATR-scaled**: `entry + target_atr_mult × ATR(14)`. (Was `entry × (1 + pred_mean)`; that put reward on the scale of a ~0.1% forecast against a ~4% ATR stop, so `rr_ratio` was structurally ~0.2.) `pred_mean` now drives only ranking and the `below_breakeven` quality flag. |
 | `target_low_vnd` / `target_high_vnd` | ATR target ± 1 ensemble-std band |
 | `stop_vnd` | stop-loss (`entry − stop_atr_mult × ATR(14)`) |
 | `gross_reward_vnd` | `target − entry` per share (before fees) |
@@ -399,10 +319,10 @@ basis. You size the position yourself:
 | `fees_round_trip_vnd` | ACBS commission + VAT + PIT for this round trip, per share |
 | `net_reward_vnd` | **predicted per-share profit after all fees** — the headline number |
 | `net_loss_vnd` | worst-case per-share loss if stopped out (max_loss + fees) |
-| `rr_ratio` | `net_reward / net_loss` — with the ATR-scaled target this is ≈ `target_atr_mult / stop_atr_mult` (a sanity floor), not the selector |
+| `rr_ratio` | `net_reward / net_loss` — with the ATR-scaled target this is ≈ `target_atr_mult / stop_atr_mult`, a sanity number, not the selector |
 | `breakeven_pct` | what % the price needs to move just to cover fees (~0.43% at ACBS) |
-| `actionable` | `True` when the **directional edge gate** passes (`pred_mean ≥ min_edge_over_cost × breakeven_pct`) AND `net_reward > 0` AND `rr_ratio ≥ min_rr_ratio`. The edge gate — not `rr` — now decides how many tickers are actionable. Names whose `\|pred_mean\|` exceeds `pricing.max_abs_pred_mean` are dropped as data glitches before they even reach this stage. |
-| `suggested_max_units` | **Advisory liquidity cap** — `floor(pricing.max_participation_pct% × adv_vnd_20 / entry_vnd)`. Stay at or below this to avoid dominating the tape on entry/exit. Purely informational; never feeds the actionable gate. Null when `adv_vnd_20` is missing or the cap is disabled (`max_participation_pct: 0`). |
+| `below_breakeven` | `True` when the pick does **not** clear the quality bar (`pred_mean < min_edge_over_cost × breakeven_pct`, OR `net_reward ≤ 0`, OR rr invalid). Informational only — selection is exactly-N by `pred_mean`, so a `below_breakeven` pick is still returned but flagged weak (and counted in the `==> QUALITY` warning). Names whose `\|pred_mean\|` exceeds `pricing.max_abs_pred_mean` are dropped as data glitches before ranking. |
+| `suggested_max_units` | **Advisory liquidity cap** — `floor(pricing.max_participation_pct% × adv_vnd_20 / entry_vnd)`. Stay at or below this to avoid dominating the tape on entry/exit. Purely informational; never feeds selection. Null when `adv_vnd_20` is missing or the cap is disabled (`max_participation_pct: 0`). |
 
 ### News-adjusted entry/target (claude / gemini)
 
@@ -415,7 +335,7 @@ columns alongside the mechanical ones:
 | column | meaning |
 | ------ | ------- |
 | `adj_entry_vnd` / `adj_target_vnd` | LLM-supplied entry and exit (in VND). `adj_entry_vnd` is **not** clipped at the close — a strong catalyst can quote an entry above today's close to guarantee a fill. |
-| `adj_stop_vnd`, `adj_gross_reward_vnd`, `adj_max_loss_vnd`, `adj_fees_round_trip_vnd`, `adj_net_reward_vnd`, `adj_net_loss_vnd`, `adj_rr_ratio`, `adj_breakeven_pct`, `adj_actionable` | The full risk-reward stack recomputed against `adj_entry_vnd` / `adj_target_vnd`, so you can compare the news-adjusted trade against the mechanical one side by side. |
+| `adj_stop_vnd`, `adj_gross_reward_vnd`, `adj_max_loss_vnd`, `adj_fees_round_trip_vnd`, `adj_net_reward_vnd`, `adj_net_loss_vnd`, `adj_rr_ratio`, `adj_breakeven_pct` | The full risk-reward stack recomputed against `adj_entry_vnd` / `adj_target_vnd`, so you can compare the news-adjusted trade against the mechanical one side by side. |
 
 If the LLM didn't override a row, its `adj_*` columns mirror the mechanical
 ones — they're always populated. `base` mode never sets adjusted values.
@@ -424,7 +344,7 @@ ones — they're always populated. `base` mode never sets adjusted values.
 
 | column | meaning | how to read it |
 | ------ | ------- | -------------- |
-| `pred_mean` | predicted T+N return for the chosen horizon | `+0.0017` = +0.17% before costs |
+| `pred_mean` | predicted T+2 return | `+0.0017` = +0.17% before costs |
 | `pred_std` | dispersion across 5 model seeds | high std relative to mean = low confidence |
 | `rsi_14` | 14-day RSI | < 30 = oversold, > 70 = overbought |
 | `mom_5`, `mom_20` | log-momentum over 5 / 20 trading days | – |
@@ -456,39 +376,32 @@ If you have a different broker, edit the percentages.
 ### Worked example (today's run, per share)
 
 ```
-symbol entry_vnd target_vnd stop_vnd fees   net_reward net_loss   rr   actionable
-AMS    10,100    10,119     9,062    4,348  -2,448     108,148    -0.02 False
-DXG    15,350    15,376     14,534   6,607  -4,007     88,207     -0.05 False
-ABB    14,900    14,925     14,457   6,414  -3,914     50,714     -0.08 False
+symbol close_vnd entry_vnd target_vnd stop_vnd net_reward rr   below_breakeven pred_mean
+VVS    80,900    78,973    96,054     66,162   +16,696    1.27 False           0.0287
+PAN    22,750    22,464    25,123     20,470   +2,555     1.22 False           0.0149
+KLB    15,500    15,339    16,061     14,797   +654       1.07 False           0.0071
 ```
 
 Reading this:
-- **Buy DXG at 15,350 VND/share, sell at 15,376 VND/share, stop at 14,534.**
+- **Buy PAN at 22,464 VND/share (a dip limit below the 22,750 close), target
+  25,123, stop 20,470.**
 - All figures are per share — you size the position yourself.
-- Round-trip fees (per share): 6,607 VND.
-- Predicted net P&L: **−4,007 VND/share** (loss). Why? `pred_mean=+0.0017` → only
-  +26 VND/share gross, which doesn't cover the ACBS round-trip fees per share.
-- `actionable=False` — don't trade.
-
-This is the tool doing its job. Most days the model's T+N predictions are
-smaller than ACBS round-trip costs (especially at the T+2 minimum where the
-horizon is shortest), so almost everything will show `actionable=False`.
-**That's a feature.** The bar to clear before placing a real trade is
-`pred_mean > breakeven_pct + risk-reward gate`, which today's picks don't.
-Longer horizons (T+5, T+11, …) give pred_mean more room to clear the cost
-gate — see `--days earliest` for a search that finds the *shortest* horizon
-that does.
+- With the ATR-scaled target, `rr_ratio` sits near `target_atr_mult /
+  stop_atr_mult` (~1.3) by construction, so the **ranking** (`pred_mean`) is
+  what decides the order, and the top N you asked for are returned.
+- `below_breakeven=False` means the forecast clears the round-trip-cost bar.
+  When it's `True`, the pick is still returned (to honor `--picks`) but flagged
+  weak and counted in the `==> QUALITY` warning — treat those with caution.
 
 ### Tuning
 
 - All P&L figures are per share — you size the position yourself. Fees scale
   linearly with trade value, so the % cost stays at 0.43% regardless of size.
-- Want more / fewer actionable picks? The **directional edge gate** is the
-  knob now: lower `pricing.min_edge_over_cost` (default 1.0) to surface more
-  names, raise it to demand a stronger forecast. `pricing.target_atr_mult`
+- Want more / fewer picks? Use `--picks N` (or set `pricing.default_picks`).
+  The quality bar that drives the `below_breakeven` flag is
+  `pricing.min_edge_over_cost` (default 1.0). `pricing.target_atr_mult`
   (default 2.0) sets the reward distance and hence `rr_ratio ≈
-  target_atr_mult / stop_atr_mult`; `pricing.min_rr_ratio` is now just a
-  sanity floor.
+  target_atr_mult / stop_atr_mult`; `pricing.min_rr_ratio` is a sanity floor.
 - Different broker? Edit the `broker:` section in config.yaml.
 
 ### Sanity checks before trading
@@ -513,7 +426,7 @@ None of these clear the cost-of-trading bar with confidence. The honest reading
 of this output is **"no high-conviction trade today"** — and that's a feature,
 not a bug. The system's job is to tell you when to act *and* when to wait.
 
-### After the exit day (T+N)
+### After the exit day (T+2)
 
 Run `evaluate.bat` (or the next predict_*.bat — it auto-evaluates). The ledger
 fills in `actual_exit` and `realized_return` for each pick whose `target_date`
@@ -638,7 +551,7 @@ ML input. Instead the prompt forces a four-step business-aware analysis:
    from the universe parquet). Example: `CTCP Đường Quảng Ngãi` → sugar /
    dairy producer.
 2. **Identify the news drivers** that move *that specific business* on the
-   chosen T+N horizon. Real estate cares about mortgage rates and sector policy;
+   T+2 horizon. Real estate cares about mortgage rates and sector policy;
    sugar producers care about commodity prices and FX; banks care about SBV
    policy moves and NPL data; rubber and mining care about input prices and
    China industrial demand; pangasius exporters care about US/EU tariffs;
@@ -680,8 +593,8 @@ automatically:
 
 The detection happens at CLI entry via [`tracking.effective_today_for_trading`](src/stockpredict/tracking.py).
 Every downstream date stamp (`as_of` in the ledger, the picks JSON
-filename, the news plan filename, the resolved `--days end` target,
-`target_date`) uses the same cutoff-aware date.
+filename, the news plan filename, the T+2 `target_date`) uses the same
+cutoff-aware date.
 
 ## Same-day re-runs: distinct parameters → distinct files
 
@@ -798,7 +711,7 @@ itself — `claude_prompt.md`, `config.yaml`, source code — never changes.
 
 For an **active** loop that mutates the program based on a chosen report,
 use [`self_correct_prompt.md`](self_correct_prompt.md). Open Claude Code
-(or Cowork) in `D:\stock`, paste the file's contents, and supply a
+(or Cowork) in your clone of the repo, paste the file's contents, and supply a
 `reports\picks_claude_<date>_<sig>.json` whose target date has fully
 elapsed. Claude Code cross-references the picks with the ledger's realized
 returns, diagnoses systematic errors (≥3 on-report or ≥5 in the pooled
@@ -813,7 +726,7 @@ local files, which the prompt-only Gemini path can't do.
 ## Setup (one-time)
 
 ```bash
-# from D:\stock
+# from the repo root (your clone)
 py -3.13 -m venv .venv
 .venv\Scripts\python -m pip install -U pip
 .venv\Scripts\python -m pip install -e ".[dev,llm]"
@@ -836,9 +749,9 @@ to set them. The .bat files load `.env` automatically.
                      |   you trade off picks   |
                      +-----------+-------------+
                                  |
-                                 v  (T+N morning, N = your --days)
+                                 v  (T+2 morning)
                      +-------------------------+
-                     |   predict_*.bat (T+N)   |
+                     |   predict_*.bat (T+2)   |
                      |   - auto-evaluates T's  |
                      |     picks               |
                      |   - feeds Claude with   |
@@ -895,12 +808,12 @@ Key knobs:
   limit-buy can't fill against an all-buyers queue.
 - `pricing.max_participation_pct: 1.0` — advisory cap, as a % of `adv_vnd_20`,
   for the per-pick `suggested_max_units` column. Purely informational — never
-  affects the actionable gate. Set to `0` to disable the column.
+  affects selection. Set to `0` to disable the column.
 
 ## Layout
 
 ```
-D:\stock\
+<repo root>/
   predict_base.bat         double-click entry: ML only
   claude_prompt.md         paste into Claude Desktop for ML + Claude research
   predict_gemini.bat       double-click entry: ML + Gemini prompt

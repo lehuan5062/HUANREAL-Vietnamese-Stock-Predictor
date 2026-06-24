@@ -66,7 +66,7 @@ def test_rank_today_drops_non_tradable_symbols(monkeypatch, tmp_path):
                             entry_limit_pct=-0.05,
                         ))
 
-    out = predict_mod.rank_today(model=_FakeMeanModel(), top_k=10,
+    out = predict_mod.rank_today(model=_FakeMeanModel(), n_picks=10,
                                   low_model=None)
     syms = set(out["symbol"].astype(str))
     assert "HTK" not in syms, f"HTK leaked through despite not being tradable: {out}"
@@ -90,7 +90,7 @@ def test_rank_today_skips_filter_when_universe_missing(monkeypatch):
                             close_vnd=df["close"] * 1000, entry_limit_pct=-0.05,
                         ))
 
-    out = predict_mod.rank_today(model=_FakeMeanModel(), top_k=10,
+    out = predict_mod.rank_today(model=_FakeMeanModel(), n_picks=10,
                                   low_model=None)
     syms = set(out["symbol"].astype(str))
     # All three survive — no tradable set to filter against.

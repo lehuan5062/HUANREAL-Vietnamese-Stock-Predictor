@@ -35,7 +35,7 @@ def _format_picks(picks) -> str:
     show_cols = [c for c in [
         "symbol", "close_vnd", "entry_vnd", "target_vnd", "stop_vnd",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
-        "rr_ratio", "actionable",
+        "rr_ratio", "below_breakeven",
         "pred_mean", "news_score", "adjusted",
     ] if c in picks.columns]
     if not show_cols:
@@ -69,16 +69,6 @@ def _format_picks_explained(picks) -> str:
             header += f"  —  {organ}"
         elif business:
             header += f"  —  {business[:60]}"
-        # Multi-category BEST CHOICE badges (only set on actionable rows).
-        badges = []
-        for col, label in [("best_adjusted", "BEST adjusted"),
-                           ("best_rr", "BEST rr"),
-                           ("best_net", "BEST net"),
-                           ("best_composite", "BEST composite")]:
-            if bool(r.get(col, False)):
-                badges.append(label)
-        if badges:
-            header += "  [" + " | ".join(badges) + "]"
         parts.append(header)
 
         if "entry_vnd" in r and pd.notna(r["entry_vnd"]):
@@ -86,8 +76,8 @@ def _format_picks_explained(picks) -> str:
             fees = int(r.get("fees_round_trip_vnd", 0))
             net = int(r.get("net_reward_vnd", 0))
             rr = r.get("rr_ratio", float("nan"))
-            actionable = bool(r.get("actionable", False))
-            verdict = "ACTIONABLE" if actionable else "skip (rr/net too low)"
+            below = bool(r.get("below_breakeven", False))
+            verdict = "BELOW-BAR (weak edge)" if below else "OK"
             close_v = r.get("close_vnd", None)
             dip_pct = r.get("entry_limit_pct", None)
             if close_v is not None and pd.notna(close_v) and dip_pct is not None and pd.notna(dip_pct) and float(dip_pct) < 0:
@@ -153,31 +143,34 @@ def _has_explanations(picks) -> bool:
     return any(c in picks.columns for c in ("rationale", "business", "key_news"))
 
 
-def _has_best_badges(picks) -> bool:
-    """True when at least one row carries any of the four BEST flags —
-    means we should print the verbose view to surface the badges."""
-    if picks is None or len(picks) == 0:
-        return False
-    cols = [c for c in ("best_adjusted", "best_rr", "best_net", "best_composite")
-            if c in picks.columns]
-    if not cols:
-        return False
-    return bool(picks[cols].any().any())
+def _print_pick_warnings(picks, requested_n: int) -> None:
+    """Surface the two exact-N caveats: a SHORTFALL when the eligible universe
+    couldn't supply ``requested_n`` names, and a QUALITY note counting picks
+    below the break-even bar (returned anyway to honor the exact count)."""
+    n = int(len(picks)) if picks is not None else 0
+    if requested_n and n < int(requested_n):
+        click.echo("")
+        click.echo(f"==> SHORTFALL: only {n} of {requested_n} requested pick(s) "
+                   f"available — the eligible universe is smaller than N "
+                   f"(heavy --exclude / --hose-only / tiny cache).")
+    if picks is None or n == 0 or "below_breakeven" not in picks.columns:
+        return
+    k = int(picks["below_breakeven"].fillna(True).astype(bool).sum())
+    if k > 0:
+        click.echo("")
+        click.echo(f"==> QUALITY: {k} of {n} pick(s) are below the break-even "
+                   f"bar (weak edge — forecast under round-trip cost). They're "
+                   f"shown to honor --picks; treat them with extra caution.")
 
 
 def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
-    """If at least one pick is actionable, surface a structured sell-reminder
-    block. Both the LLM (Claude / Gemini) running in the surrounding session
-    and the user reading the terminal can act on this: schedule a reminder
-    for the target sell day, in GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)."""
+    """Surface a structured sell-reminder block for the returned picks. Both
+    the LLM (Claude / Gemini) running in the surrounding session and the user
+    reading the terminal can act on this: schedule a reminder for the target
+    sell day, in GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)."""
     if picks is None or len(picks) == 0:
         return
-    if "actionable" not in picks.columns:
-        return
-    actionable_mask = picks["actionable"].fillna(False).astype(bool)
-    n_actionable = int(actionable_mask.sum())
-    if n_actionable == 0:
-        return
+    n_picks = int(len(picks))
     if exit_offset_days is None:
         return
     from .tracking import _next_trading_offset, effective_today_for_trading
@@ -199,10 +192,10 @@ def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
     else:
         sell_window = "09:00–14:30 ICT  (any time during the trading day)"
         reminder_note = "late morning of sell day, before lunch break"
-    sym_list = ", ".join(picks[actionable_mask]["symbol"].astype(str).tolist())
+    sym_list = ", ".join(picks["symbol"].astype(str).tolist())
     click.echo("")
     click.echo("==> SELL-REMINDER (GMT+7, Asia/Ho_Chi_Minh — Vietnamese ICT):")
-    click.echo(f"    {n_actionable} actionable pick(s): {sym_list}")
+    click.echo(f"    {n_picks} pick(s): {sym_list}")
     click.echo(f"    Sell day: {target_date.strftime('%Y-%m-%d (%A)')} "
                f"({sell_window}).")
     click.echo(f"    Suggested reminder: "
@@ -329,32 +322,33 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
 
 @cli.command("predict")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
-@click.option("--days", type=int, default=2,
-              help="T+N exit window (min 2). Use the SAME days as the last train run.")
+@click.option("--picks", "-n", "n_picks", type=int, default=None,
+              help="How many picks to surface (exactly this many, top by score). "
+                   "Defaults to pricing.default_picks in config.yaml.")
 @click.option("--date", "on", default=None, help="YYYY-MM-DD; defaults to most recent cache date")
-def predict_cmd(mode: str, days: int, on: str | None) -> None:
-    if days < 2:
-        click.echo("ERROR: --days must be >= 2.", err=True)
+def predict_cmd(mode: str, n_picks: int | None, on: str | None) -> None:
+    if n_picks is not None and n_picks < 1:
+        click.echo("ERROR: --picks must be >= 1.", err=True)
         sys.exit(2)
     if mode == "base":
         from .modes import base
-        picks, out = base.run(on=on, exit_offset_days=days)
+        picks, out = base.run(on=on, n_picks=n_picks)
         click.echo(_format_picks(picks))
         click.echo(f"\nsaved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(on=on, exit_offset_days=days)
+        result, out, tag = claude.run(on=on, n_picks=n_picks)
         click.echo(_format_picks(result))
         if _has_explanations(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
         click.echo(f"\nsaved -> {out}  (path: {tag})")
-        # Claude mode only emits the interactive plan; actionable flags and the
-        # sell reminder land at claude-finalize, not here.
+        # Claude mode only emits the interactive plan; the sell reminder lands
+        # at claude-finalize, not here.
         click.echo("Next: ask Claude to fill the plan, then run claude-finalize.")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(on=on, exit_offset_days=days)
+        result, out, tag = gemini.run(on=on, n_picks=n_picks)
         click.echo(_format_picks(result))
         if _has_explanations(result):
             click.echo("")
@@ -374,11 +368,11 @@ def claude_finalize_cmd(plan_path: str) -> None:
         click.echo("")
         click.echo(_format_picks_explained(picks))
     click.echo(f"\nsaved -> {out}")
-    # Recover horizon from the saved picks JSON so the reminder lands on
-    # the correct sell day. The CLI never re-derives it here — the
-    # finalize() path already wrote it next to the picks.
+    # Recover horizon / requested count from the saved picks JSON so the
+    # reminder lands on the correct sell day and warnings reflect the request.
     try:
         payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        _print_pick_warnings(picks, payload.get("requested_picks") or len(picks))
         _print_sell_reminder(picks, as_of=payload.get("as_of"),
                              exit_offset_days=payload.get("exit_offset_days"),
                              mode_label="claude")
@@ -403,6 +397,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
     click.echo(f"\nsaved -> {out}")
     try:
         payload = json.loads(Path(out).read_text(encoding="utf-8"))
+        _print_pick_warnings(picks, payload.get("requested_picks") or len(picks))
         _print_sell_reminder(picks, as_of=payload.get("as_of"),
                              exit_offset_days=payload.get("exit_offset_days"),
                              mode_label="gemini")
@@ -415,18 +410,14 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
 
 @cli.command("run")
 @click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
-@click.option("--days", type=str, default="earliest", show_default=True,
-              help="T+N exit window. Integer (min 2 — Vietnamese T+2 settlement); "
-                   "or 'end' = last trading day of the month (rolling to next "
-                   "month if today is too close to month-end); "
-                   "or 'earliest' = train+predict at T+N, T+N+1, T+N+2, … "
-                   "(starting at --earliest-start, default T+2) and stop at "
-                   "the first horizon that produces at least one actionable "
-                   "pick. NO upper cap — runs until found, Ctrl+C to abort.")
-@click.option("--earliest-start", type=int, default=2, show_default=True,
-              help="Only used when --days earliest. T+N at which the search "
-                   "begins (min 2 — Vietnamese T+2 settlement floor). "
-                   "Ignored for any other --days value.")
+@click.option("--picks", "-n", "n_picks", type=int, default=None,
+              help="How many picks to surface. The program always returns "
+                   "EXACTLY this many — it ranks the whole scored universe by "
+                   "predicted return and keeps the top N, so the difficulty "
+                   "(the implicit edge cutoff) floats to whatever admits exactly "
+                   "N. Picks below the break-even quality bar are still returned "
+                   "but flagged, with a count in the QUALITY warning. Always T+2. "
+                   "Defaults to pricing.default_picks in config.yaml.")
 @click.option("--hose-only/--no-hose-only", default=False, show_default=True,
               help="Restrict the universe to HOSE-listed tickers only "
                    "(refreshes via VCI to get exchange info; falls back to "
@@ -461,14 +452,16 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
               help="Use the existing models/latest.pkl instead of retraining.")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
-def run_cmd(mode: str, days: str, earliest_start: int,
+def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
             skip_train: bool, workers: int) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
-    universe (no time cap); lazy caching keeps repeat runs fast.
+    universe (no time cap); lazy caching keeps repeat runs fast. The horizon is
+    always T+2 (Vietnamese settlement); ``--picks N`` controls how many names
+    are surfaced.
     """
     import time as _time
 
@@ -480,43 +473,13 @@ def run_cmd(mode: str, days: str, earliest_start: int,
     from .selector import select as select_symbols
 
     # ---- input validation ----
-    # Three special values for --days:
-    #   "end"      → resolve now against the calendar (one int)
-    #   "earliest" → resolve LATER (after data fetch) by iterating T+N
-    #   integer    → use as-is
-    days_lower = str(days).strip().lower()
-    earliest_mode = (days_lower == "earliest")
-    if days_lower == "end":
-        from .tracking import days_to_month_end
-        try:
-            days_int = days_to_month_end(pd.Timestamp.today().normalize(), min_days=2)
-        except Exception as e:
-            click.echo(f"ERROR: --days end failed: {e}", err=True)
-            sys.exit(2)
-        click.echo(f"--days end -> resolved to T+{days_int} "
-                   f"(last trading day of {'next ' if days_int > 22 else ''}month, "
-                   f"T+2 minimum respected).")
-        days = days_int
-    elif earliest_mode:
-        if earliest_start < 2:
-            click.echo("ERROR: --earliest-start must be >= 2 "
-                       "(Vietnamese T+2 settlement minimum).", err=True)
-            sys.exit(2)
-        click.echo(f"--days earliest -> will iterate T+{earliest_start}, "
-                   f"T+{earliest_start + 1}, T+{earliest_start + 2}, ... "
-                   f"after data fetch (NO upper cap), stopping at the first "
-                   f"horizon with >=1 actionable pick. Ctrl+C to abort.")
-        days = earliest_start  # provisional; the search loop overrides this below
-    else:
-        try:
-            days = int(days)
-        except (TypeError, ValueError):
-            click.echo(f"ERROR: --days must be an integer, 'end', or 'earliest'. "
-                       f"Got {days!r}.", err=True)
-            sys.exit(2)
-    if days < 2:
-        click.echo("ERROR: --days must be >= 2 (Vietnamese T+2 settlement minimum).", err=True)
+    if n_picks is not None and n_picks < 1:
+        click.echo("ERROR: --picks must be >= 1.", err=True)
         sys.exit(2)
+    # Horizon is always T+2 (Vietnamese settlement); sourced from config.
+    days = int(load_config().target["exit_offset_days"])
+    requested_n = int(n_picks) if n_picks else int(
+        load_config().pricing.get("default_picks", 5))
     # Normalize --exclude: split each value on commas so BAT-style single
     # comma-separated input works alongside the repeatable form, uppercase,
     # dedupe, sort for stable signature ordering.
@@ -530,18 +493,11 @@ def run_cmd(mode: str, days: str, earliest_start: int,
     if exclude_list:
         click.echo(f"[note] excluding {len(exclude_list)} ticker(s): "
                    f"{', '.join(exclude_list)}")
-    # The model is horizon-specific. If --days != 2, force retraining; the cached
-    # latest.pkl was almost certainly trained on T+2 returns.
-    if days != 2 and skip_train:
-        click.echo(f"[note] --days={days} != 2: forcing retrain "
-                   f"(cached model is horizon-specific).")
-        skip_train = False
 
     started = _time.time()
-    click.echo(f"mode={mode}  universe=entire (no cap)")
-    click.echo(f"  horizon: T+{days}"
-               + ("  (T+2: sell in afternoon session only — settlement noon T+2)"
-                  if days == 2 else f"  (T+{days}: sell any time on the exit day)"))
+    click.echo(f"mode={mode}  universe=entire (no cap)  picks={requested_n}")
+    click.echo(f"  horizon: T+{days}  "
+               f"(T+2: sell in afternoon session only — settlement noon T+2)")
     click.echo("")
 
     # Auto-evaluate any predictions that are now T+2 or later. This must run
@@ -699,75 +655,7 @@ def run_cmd(mode: str, days: str, earliest_start: int,
     # ``tradable_symbols()`` as a defense-in-depth check.
     pred_syms = syms
 
-    if earliest_mode:
-        # Iterative search: train at T+earliest_start, T+earliest_start+1, ...
-        # with NO upper cap, stopping at the first horizon that produces >= 1
-        # actionable pick. The user can Ctrl+C to abort if the search drags on.
-        from .model.predict import rank_today
-        click.echo(f"searching for earliest actionable horizon "
-                   f"(starting T+{earliest_start}, no upper cap; "
-                   f"trains a fresh model per horizon — Ctrl+C to abort)...")
-        found_horizon: int | None = None
-        last_picks = None
-        n = earliest_start
-        # Bookkeeping for periodic milestone callouts and consecutive-empty
-        # safeguard. We bail with a clear error if the data simply can't
-        # support any horizon (panel empty for many tries in a row), since
-        # that's a config/data problem rather than something a longer
-        # search would fix.
-        consecutive_empty = 0
-        EMPTY_PANEL_LIMIT = 60  # ~3 trading months of horizons with no labels
-        while True:
-            click.echo(f"  T+{n}...", nl=False)
-            # Build with require_target=False so target_low rows survive
-            # for the low head; drop NaN per-head separately.
-            panel_n = build_panel(symbols=syms, require_target=False,
-                                  exit_offset_days=n)
-            panel_n_mean = panel_n.dropna(subset=["target"]) if not panel_n.empty else panel_n
-            if panel_n_mean.empty:
-                click.echo(" no rows; skip")
-                consecutive_empty += 1
-                if consecutive_empty >= EMPTY_PANEL_LIMIT:
-                    click.echo(f"ERROR: panel empty for {EMPTY_PANEL_LIMIT} "
-                               f"consecutive horizons (last tried T+{n}). "
-                               f"Either history is too short or symbol set "
-                               f"is too narrow — extend cfg.data.history_start "
-                               f"or fetch more tickers and retry.", err=True)
-                    sys.exit(1)
-                n += 1
-                continue
-            consecutive_empty = 0
-            m = train_model(panel_n_mean)
-            save_latest(m)
-            # Train the low head on the same panel (target_low doesn't
-            # depend on horizon, so we could reuse a single low model
-            # across iterations; we still rebuild here for simplicity
-            # and to keep both heads' train_end aligned).
-            if "target_low" in panel_n.columns:
-                panel_n_low = panel_n.dropna(subset=["target_low"])
-                if not panel_n_low.empty:
-                    low_m = train_quantile(panel_n_low)
-                    save_latest_low(low_m)
-            picks_n = rank_today(actionable_only=True, exit_offset_days=n,
-                                 symbols=pred_syms)
-            last_picks = picks_n
-            if "actionable" in picks_n.columns and bool(picks_n["actionable"].any()):
-                count = int(picks_n["actionable"].sum())
-                click.echo(f" found {count} actionable pick(s)")
-                found_horizon = n
-                break
-            click.echo(" none")
-            # Milestone callout every 30 horizons so the user knows the
-            # process is still alive and can decide whether to keep waiting.
-            if n > earliest_start and (n - earliest_start + 1) % 30 == 0:
-                click.echo(f"  ... still searching past T+{n} — "
-                           f"Ctrl+C to abort if you want to stop ...")
-            n += 1
-        days = found_horizon
-        # Model on disk is already for `days` — skip the next train below.
-        skip_train = True
-        click.echo("")
-    elif not skip_train:
+    if not skip_train:
         click.echo(f"training (horizon T+{days})...")
         # Build once with require_target=False so both heads can see all
         # rows; drop NaN per-head before fitting.
@@ -800,30 +688,30 @@ def run_cmd(mode: str, days: str, earliest_start: int,
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
         from .modes import base
-        picks, out = base.run(exit_offset_days=days,
+        picks, out = base.run(exit_offset_days=days, n_picks=requested_n,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
                               exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(picks))
-        if _has_best_badges(picks):
-            click.echo("")
-            click.echo(_format_picks_explained(picks))
+        _print_pick_warnings(picks, requested_n)
         click.echo(f"\nsaved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(exit_offset_days=days, symbols=pred_syms,
+        result, out, tag = claude.run(exit_offset_days=days, n_picks=requested_n,
+                                       symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
                                        exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
-        if _has_explanations(result) or _has_best_badges(result):
+        _print_pick_warnings(result, requested_n)
+        if _has_explanations(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
         click.echo(f"\nsaved -> {out}  (path: {tag})")
-        # Claude mode emits the interactive plan; actionable flags and the
-        # sell reminder land at claude-finalize, not here.
+        # Claude mode emits the interactive plan; the sell reminder lands at
+        # claude-finalize, not here.
         click.echo("")
         click.echo("==> NEXT (run inside Claude Code / Cowork):")
         click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
@@ -831,13 +719,15 @@ def run_cmd(mode: str, days: str, earliest_start: int,
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(exit_offset_days=days, symbols=pred_syms,
+        result, out, tag = gemini.run(exit_offset_days=days, n_picks=requested_n,
+                                       symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
                                        exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
-        if _has_explanations(result) or _has_best_badges(result):
+        _print_pick_warnings(result, requested_n)
+        if _has_explanations(result):
             click.echo("")
             click.echo(_format_picks_explained(result))
         click.echo(f"\nsaved -> {out}  (path: {tag})")

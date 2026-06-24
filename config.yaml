@@ -111,6 +111,14 @@ pricing:
   # off a broken price (e.g. mom_20 ≈ -0.9 from a missed split). Such rows are
   # dropped from the candidate set before ranking/pricing. Set to 0 to disable.
   max_abs_pred_mean: 0.05
+  # How many picks to return. The program always surfaces EXACTLY this many
+  # names — it ranks the whole scored universe by pred_mean and keeps the top
+  # `default_picks`, so the difficulty (the implicit edge cutoff) floats to
+  # whatever admits exactly this count. Picks whose forecast is below the
+  # break-even quality bar (pred_mean < min_edge_over_cost × breakeven_pct) are
+  # still returned but flagged `below_breakeven` and counted in a warning.
+  # Override per-run with `--picks N` / `-n N`.
+  default_picks: 1
   # Quantile alpha used by the "low" head to predict the next-day dip
   # the user can place as a limit-buy. The low head computes, per ticker, the
   # alpha-th empirical quantile of that ticker's OWN recent next-day-low

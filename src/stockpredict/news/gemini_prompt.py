@@ -155,7 +155,7 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
     parts.append("## Candidates")
     parts.append("")
-    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | actionable |")
+    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | below_bar |")
     parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for _, r in candidates.iterrows():
         name = (r.get("organ_name") or "")[:50]
@@ -167,10 +167,10 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         net = int(r["net_reward_vnd"]) if "net_reward_vnd" in r and pd.notna(r.get("net_reward_vnd")) else 0
         rr = r.get("rr_ratio", float("nan"))
         rr_str = f"{rr:.2f}" if pd.notna(rr) else "-"
-        act = "yes" if r.get("actionable", False) else "no"
+        below = "yes" if r.get("below_breakeven", False) else "no"
         parts.append(
             f"| {r['symbol']} | {itype} | {name} | {r['pred_mean']:+.4f} | "
-            f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {act} |"
+            f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {below} |"
         )
     parts.append("")
     parts.append("All VND values are PER SHARE; position sizing is left to the user.")
@@ -223,17 +223,16 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("## Final step — sell reminder (after the JSON, in chat)")
     parts.append("")
     parts.append(
-        f"After you output the JSON, look at how many of your picks "
-        f"are `actionable: yes` in the candidates table above (or, if you "
-        f"have re-ranked them with news, would still pass the rr/net cost "
-        f"gate)."
+        f"After you output the JSON, note that every candidate above is a "
+        f"pick (the program returns a fixed number, ranked by score). The "
+        f"`below_bar: yes` flag just marks a weaker-edge pick — useful "
+        f"context, not a reason to skip the reminder."
     )
     parts.append("")
     parts.append(
-        f"**If at least one pick is actionable**, ask the user — in plain "
-        f"text after the JSON, NOT inside the JSON — whether they would "
-        f"like to schedule a reminder in **GMT+7 (Asia/Ho_Chi_Minh, "
-        f"Vietnamese ICT)** to prepare the exit.\n"
+        f"Ask the user — in plain text after the JSON, NOT inside the JSON — "
+        f"whether they would like to schedule a reminder in **GMT+7 "
+        f"(Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit.\n"
         f"- Sell day: {target_date.isoformat()} ({sell_window}).\n"
         f"- Reminder fires: {reminder_date.isoformat()} {suggested_time} — "
         f"on the sell day itself ({reminder_note}). "
@@ -247,8 +246,6 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         "ICS-style summary they can paste in: `BEGIN:VEVENT … DTSTART;TZID="
         "Asia/Ho_Chi_Minh:…`."
     )
-    parts.append("")
-    parts.append("If no pick is actionable, skip this question entirely.")
     return "\n".join(parts)
 
 

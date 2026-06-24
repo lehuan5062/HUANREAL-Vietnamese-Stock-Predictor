@@ -1,7 +1,7 @@
 """Build a markdown news-research plan that an in-session Claude can execute via WebFetch.
 
 Workflow:
-  1. base ML stage selects the actionable candidates
+  1. base ML stage selects the top-N candidates
   2. write_plan() produces a markdown checklist with per-ticker URLs
      and a +1 / 0 / -1 sentiment rubric
   3. Claude (running this session) fills in the rubric using WebFetch
@@ -32,12 +32,12 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     on = on or dt.date.today()
     cfg = load_config().modes["claude"]
     out_dir = reports_dir()
-    from ..picks_meta import actionable_suffix
-    act_suffix = actionable_suffix(candidates)
+    from ..picks_meta import picks_suffix
+    pk_suffix = picks_suffix(candidates)
     if run_signature:
-        path = out_dir / f"claude_news_plan_{on.isoformat()}_{run_signature}{act_suffix}.md"
+        path = out_dir / f"claude_news_plan_{on.isoformat()}_{run_signature}{pk_suffix}.md"
     else:
-        path = out_dir / f"claude_news_plan_{on.isoformat()}{act_suffix}.md"
+        path = out_dir / f"claude_news_plan_{on.isoformat()}{pk_suffix}.md"
     from .company_info import enrich
     candidates = enrich(candidates)
 
@@ -130,11 +130,10 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "",
         "## Step 7 — Sell-day reminder (after finalize)",
         "",
-        f"Once `claude-finalize` finishes, it prints the explained top-K and a",
-        f"`==> SELL-REMINDER:` block. **If at least one finalized pick is",
-        f"`actionable: True`**, ask the user — in plain conversation — whether",
-        f"they would like a reminder scheduled in **GMT+7 (Asia/Ho_Chi_Minh,",
-        f"Vietnamese ICT)** to prepare the exit.",
+        f"Once `claude-finalize` finishes, it prints the explained picks and a",
+        f"`==> SELL-REMINDER:` block. Ask the user — in plain conversation —",
+        f"whether they would like a reminder scheduled in **GMT+7 "
+        f"(Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit.",
         "",
         f"- **Sell day** (the actual trade): {target_iso} ({sell_window}).",
         f"- **Reminder fires**: {reminder_iso} {suggested_time} — on the sell",
@@ -147,8 +146,6 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "calendar event with `TZID=Asia/Ho_Chi_Minh`. Do NOT silently set the",
         "reminder; always confirm reminder date+time, sell day, tickers, and",
         "method first.",
-        "",
-        "Skip Step 7 entirely when no pick is actionable.",
         "",
         "## Global / macro context (read once)",
         "",
@@ -214,12 +211,12 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
             fees = int(row.get("fees_round_trip_vnd", 0))
             net = int(row.get("net_reward_vnd", 0))
             rr = row.get("rr_ratio", float("nan"))
-            actionable = bool(row.get("actionable", False))
+            below = bool(row.get("below_breakeven", False))
             net_sign = "+" if net >= 0 else ""
             lines.append(
                 f"Trade (per share): entry={entry:,}  target={tgt:,}  stop={stop:,}  "
                 f"fees={fees:,}  net={net_sign}{net:,}  rr={rr:.2f}  "
-                f"{'ACTIONABLE' if actionable else 'skip (rr/net too low)'}"
+                f"{'BELOW-BAR (weak edge)' if below else 'OK'}"
             )
         lines.append("")
         if is_etf_row:
