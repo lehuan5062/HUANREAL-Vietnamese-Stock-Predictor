@@ -53,13 +53,13 @@ emergent, not a fixed checklist), and the ACBS fee model.
 .venv\Scripts\python -m stockpredict.cli track --limit 20
 .venv\Scripts\python -m stockpredict.cli backtest --start 2022-01-01
 
-# Missed-winners: which realized top-N did the model not surface, and why
+# Every base run already writes BOTH a standard and a _missed pick report
+# (the missed-winners variant is on by default). To compare on win rate:
+.venv\Scripts\python -m stockpredict.cli backtest-ab    # writes reports/backtest_ab_<date>.md (overwrites nothing)
+.venv\Scripts\python -m stockpredict.cli run --ab       # ...or fold the A/B into a run
+
+# Missed-winners analysis: which realized top-N did the model not surface, and why
 .venv\Scripts\python -m stockpredict.cli regret --window 90
-# Train + A/B the "missed-winners" variant (upweights realized winners),
-# then run with it (writes a distinguishable _missed report)
-.venv\Scripts\python -m stockpredict.cli train-missed
-.venv\Scripts\python -m stockpredict.cli backtest-ab          # standard vs variant win rate
-.venv\Scripts\python -m stockpredict.cli run --variant missed --mode base
 ```
 
 **Note**: `--mode claude` at the CLI emits the markdown research plan (the
@@ -76,7 +76,8 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 | `--include-etfs` | Include HOSE ETFs (e.g. `E1VFVN30`, `FUEVFVND`) in the pickable universe. Off by default — ETFs are classified as a separate security type and excluded unless this is set. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
 | `--skip-train` | reuse cached `models/latest.pkl` instead of retraining | off |
-| `--variant {standard,missed}` | Which mean head to predict with. `missed` uses the missed-winners variant (`models/latest_missed.pkl`, built by `train-missed`); its picks get a distinguishable `_missed` report so it's never confused with the standard model. base mode only. | `standard` |
+| `--missed` / `--no-missed` | **On by default.** Involves the missed-winners variant. **base**: writes a *second* `_missed` pick report alongside the standard one. **claude/gemini**: UNIONs the variant's top picks into the candidates the LLM researches (each flagged `also-missed` / `missed-only` in the plan), so the LLM weighs both rankings and keeps the top N. Nothing is overwritten. `--no-missed` for standard only. | `--missed` |
+| `--ab` / `--no-ab` | After predicting, run the standard-vs-missed walk-forward A/B and write `reports/backtest_ab_<date>.md` (advisory; overwrites no model). The LLM modes embed the verdict so they weigh the winner. Slow (~10 min). **Default: off for base, on for claude/gemini.** | off (base) / on (claude,gemini) |
 
 ## Universe coverage
 

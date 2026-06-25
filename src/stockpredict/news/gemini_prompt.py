@@ -12,7 +12,8 @@ from .sources import global_urls, vn_urls
 
 
 def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
-                 exit_offset_days: int | None = None) -> str:
+                 exit_offset_days: int | None = None,
+                 ab_verdict: str | None = None) -> str:
     on = on or dt.date.today()
     cfg = load_config().modes["gemini"]
     weight = cfg["news_weight"]
@@ -56,6 +57,17 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         f"later in the afternoon session, after settlement)."
     )
     parts.append("")
+    if "missed_only" in candidates.columns or ab_verdict:
+        parts.append(
+            "**Two rankings to weigh.** The candidates are the UNION of the "
+            "standard model's top picks and an experimental 'missed-winners' "
+            "variant's top picks. In the table, `flag` = `also-missed` means BOTH "
+            "models surfaced it; `missed-only` means only the experimental variant "
+            "did."
+            + (f" The out-of-sample A/B verdict is: {ab_verdict}." if ab_verdict else "")
+            + " **Weigh the standard ranking higher** — only let a `missed-only` "
+            "name into your final picks if the news strongly supports it.")
+        parts.append("")
     parts.append(
         "**You decide what to research per ticker.** We do not give you a "
         "fixed checklist — different companies have different drivers, and "
@@ -155,8 +167,8 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
     parts.append("## Candidates")
     parts.append("")
-    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | below_bar |")
-    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | below_bar | flag |")
+    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for _, r in candidates.iterrows():
         name = (r.get("organ_name") or "")[:50]
         itype = str(r.get("instrument_type", "STOCK") or "STOCK").upper()
@@ -168,9 +180,11 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         rr = r.get("rr_ratio", float("nan"))
         rr_str = f"{rr:.2f}" if pd.notna(rr) else "-"
         below = "yes" if r.get("below_breakeven", False) else "no"
+        flag = ("missed-only" if r.get("missed_only", False)
+                else ("also-missed" if r.get("also_missed", False) else "standard"))
         parts.append(
             f"| {r['symbol']} | {itype} | {name} | {r['pred_mean']:+.4f} | "
-            f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {below} |"
+            f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {below} | {flag} |"
         )
     parts.append("")
     parts.append("All VND values are PER SHARE; position sizing is left to the user.")
@@ -250,9 +264,11 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
 
 def write_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
-                 exit_offset_days: int | None = None) -> Path:
+                 exit_offset_days: int | None = None,
+                 ab_verdict: str | None = None) -> Path:
     on = on or dt.date.today()
-    text = build_prompt(candidates, on=on, exit_offset_days=exit_offset_days)
+    text = build_prompt(candidates, on=on, exit_offset_days=exit_offset_days,
+                        ab_verdict=ab_verdict)
     path = reports_dir() / f"gemini_prompt_{on.isoformat()}.txt"
     path.write_text(text, encoding="utf-8")
     return path

@@ -80,12 +80,21 @@ shouldn't have to compute eligibility in their head.
 
 ```
 .venv\Scripts\python.exe -c "import glob, json, os, pandas as pd; df = pd.read_parquet(r'cache\predictions.parquet')
-for p in sorted(glob.glob(r'reports\picks_claude_*.json'))[-8:]:
+for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
     d = json.load(open(p, encoding='utf-8')); rid = d['as_of'].replace('-','') + '_' + d['run_signature']; sub = df[df['run_id'] == rid]
-    if len(sub) == 0: print(os.path.basename(p), 'as_of=' + d['as_of'], 'no ledger rows'); continue
+    var = d.get('model_variant', 'standard')
+    if len(sub) == 0: print(os.path.basename(p), 'as_of=' + d['as_of'], 'variant=' + var, 'no ledger rows'); continue
     n = len(sub); t0 = int(sub['t0_evaluated'].sum()); ev = int(sub['evaluated'].sum())
-    print(os.path.basename(p), 'as_of=' + d['as_of'], 'target=' + str(sub['target_date'].iloc[0]), 't0=' + str(t0) + '/' + str(n), 'eval=' + str(ev) + '/' + str(n))"
+    print(os.path.basename(p), 'as_of=' + d['as_of'], 'variant=' + var, 'target=' + str(sub['target_date'].iloc[0]), 't0=' + str(t0) + '/' + str(n), 'eval=' + str(ev) + '/' + str(n))"
 ```
+
+This globs **all** report types: base (`picks_<date>_base_d2…`), claude
+(`picks_claude_…`), gemini (`picks_gemini_…`), AND the missed-winners variant
+(`…_base_d2_missed_…`, `model_variant: missed`). The missed variant appears
+differently by mode: **base** writes a separate **standard + `_missed` pair**
+(treat them together), while **claude/gemini** fold it into a single **union
+report** (per-pick `also_missed` / `missed_only` flags). The mode/variant come
+from each JSON's `mode` / `model_variant` / `run_signature` fields.
 
 **Get the wall clock first.** The harness only injects today's date,
 not the time. Run `date` (or `.venv\Scripts\python.exe -c
@@ -162,6 +171,10 @@ After all are collected, summarise back and start Step 2.
   coupled, NOT a constant), plus the
   `business`, `dimensions`, `drivers`, `key_news`, `dimensions_cited` fields
   Claude wrote at finalize time)
+- `model_variant` (base mode: `standard` or `missed`). **claude/gemini union
+  reports** additionally carry `also_missed` / `missed_only` per pick — whether
+  the missed-winners variant also surfaced that name (the LLM already weighed the
+  A/B verdict at emit and kept the top N from the union).
 
 Then:
 
@@ -332,14 +345,38 @@ panel) and check:
   gate is systematically discarding winners, that's your edit.
 - Was it **scored low** by the model (low `pred_mean`)? Then it's a model-skill
   gap — note it; the lever is the `train-missed` variant (below), not a knob.
-- If both standard and `_missed` variant reports exist for the window, **contrast
-  them** (`regret --signature base_d2` vs `base_d2_missed`): did the variant
-  catch more winners without hurting the entry/fill side?
+- The missed-winners variant shows up differently per mode:
+  * **base** writes a **standard + `_missed` pair** — contrast them for the same
+    `as_of` (cross-check `regret --signature base_d2` vs `base_d2_missed`): did
+    the `_missed` report surface winners the standard one missed?
+  * **claude/gemini** write a **single union report** — each pick's
+    `also_missed` / `missed_only` flag tells you whether the variant agreed; a
+    `missed_only` pick that won (or lost) is direct evidence on the variant.
+  Either way, consult the latest `reports/backtest_ab_<date>.md` (from
+  `backtest-ab` / `run --ab`) for the out-of-sample verdict: only treat the
+  variant as worth using if its `hit_rate` ≥ standard there. If no A/B report
+  exists, propose running `backtest-ab` — never recommend the variant on a
+  single report alone.
 
 Propose ONE improvement: a `config.yaml` knob (e.g. relax `overbought_rsi_max`)
 or a `claude_prompt.md` prose edit. If the miss is pure model skill, the
 proposal is to run `train-missed` + `backtest-ab` and promote the variant only
 if its win rate holds.
+
+**The flip side — overbought losers WE picked.** Same focus, opposite sign: do
+the report's OWN surfaced picks lose *because they were overbought tops*? The
+picks JSON carries `rsi_14` and the ledger has `realized_return`, so check: of
+the picks with high `rsi_14` (say > 75), what fraction had `realized_return < 0`?
+If ≥3 (or an n≥5 pooled pattern) overbought picks reversed, that's the trigger
+to ENABLE / TIGHTEN the hard gate:
+- gate currently off (`overbought_rsi_max: 0`) → propose **setting** it (e.g.
+  `78`–`82`, just below where the losers clustered);
+- gate already on but losers slipped under it → propose **lowering** it.
+With the gate off you'll never see "winners dropped by the gate," so this
+loser-side check is the ONLY path that turns the gate on — don't skip it.
+(Before reaching for the hard gate, recall the soft entry penalty
+`entry_alpha_overbought_*` is already deepening these picks' entries; if they
+filled anyway and reversed, the penalty may also be too shallow.)
 
 ## Step 5 — Diagnose (two focuses only)
 
@@ -442,9 +479,12 @@ filename identifies the report and the ledger holds the data. Structure:
      for counter-trend names). Don't add a config knob or model for it.
 2. `config.yaml` — for tunable knobs (only the two-focus-relevant ones):
    - **`pricing.overbought_rsi_max` (current 0 = off) — the overbought hard
-     gate.** A Focus-1 lever: if missed winners are being dropped as overbought
-     (RSI just above the cap, then they ran), raise it or set 0; if losers are
-     bought at parabolic tops, lower it (e.g. 80). Paired soft levers:
+     gate** (lower value = stricter / excludes more; `0` = off). Two Focus-1
+     triggers: if missed winners are being *dropped* by the gate (RSI just above
+     the cap, then they ran), **raise** it (more permissive) or set `0`; if the
+     report's own picks are overbought tops that *reverse and lose* (the flip-
+     side check in Step 4b), **enable/tighten** it — e.g. set `0 → ~80` from off,
+     or lower an already-on cap. Paired soft levers:
      `pricing.entry_alpha_overbought_start` / `_full` / `_mult` deepen the entry
      dip for overbought names (so they only fill on a pullback) without excluding
      them — prefer tuning these over the hard gate when the win side is hurt.

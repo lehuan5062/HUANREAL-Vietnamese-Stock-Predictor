@@ -24,14 +24,15 @@ def run(on: str | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
-        exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path, str]:
+        exclude: list[str] | None = None,
+        union_missed: bool = False) -> tuple[pd.DataFrame, Path, str]:
     """Emit the interactive plan. Returns (candidates_df, plan_path, 'interactive')."""
     candidates, plan_path = emit_plan(on=on,
                                       exit_offset_days=exit_offset_days,
                                       n_picks=n_picks,
                                       symbols=symbols, hose_only=hose_only,
                                       include_etfs=include_etfs,
-                                      exclude=exclude)
+                                      exclude=exclude, union_missed=union_missed)
     return candidates, plan_path, "interactive"
 
 
@@ -41,11 +42,25 @@ def emit_plan(on: str | None = None,
               symbols: list[str] | None = None,
               hose_only: bool = False,
               include_etfs: bool = True,
-              exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
+              exclude: list[str] | None = None,
+              union_missed: bool = False) -> tuple[pd.DataFrame, Path]:
     full_cfg = load_config()
     requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
     candidates = rank_today(n_picks=requested_n, on=on,
                             exit_offset_days=exit_offset_days, symbols=symbols)
+    ab_verdict = None
+    if union_missed:
+        # UNION in the missed-variant's top picks so the LLM researches and
+        # judges both rankings; embed the A/B verdict so it weights the winner.
+        from ..analyze.regret import latest_ab_summary, union_candidates
+        try:
+            missed = rank_today(n_picks=requested_n, on=on,
+                                exit_offset_days=exit_offset_days, symbols=symbols,
+                                model_variant="missed")
+        except Exception:
+            missed = None
+        candidates = union_candidates(candidates, missed)
+        ab_verdict = latest_ab_summary()
     if on is not None:
         on_date = dt.date.fromisoformat(on)
     else:
@@ -62,7 +77,8 @@ def emit_plan(on: str | None = None,
     plan_path = write_plan(candidates, on=on_date,
                            run_signature=sig,
                            current_horizon=eff_horizon,
-                           current_signature=sig)
+                           current_signature=sig,
+                           ab_verdict=ab_verdict)
     # Sidecar parquet so `finalize` can recover pricing (entry / target / stop)
     # and other feature columns that aren't in the markdown score table.
     sidecar = plan_path.with_suffix(".candidates.parquet")
@@ -124,9 +140,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     # additive — the mechanical entry/target/rr columns are untouched.
     from ..pricing import add_adjusted_price_suggestions
     merged = add_adjusted_price_suggestions(merged)
-    # News re-orders the SAME N candidates emitted upstream; it never adds or
-    # drops names, so there's no re-slicing here — just re-rank by the
-    # news-adjusted score.
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
 
     # Recover horizon / hose_only from the sidecar metadata (if present).
@@ -153,6 +166,10 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     )
 
     requested_n = meta.get("n_picks")
+    # The emitted candidates may be a UNION (standard + missed) larger than N,
+    # so after the LLM's news re-rank, keep the top N by adjusted score.
+    if requested_n and len(merged) > int(requested_n):
+        merged = merged.head(int(requested_n)).reset_index(drop=True)
     n_below = int(merged["below_breakeven"].fillna(True).sum()) if "below_breakeven" in merged.columns else 0
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")

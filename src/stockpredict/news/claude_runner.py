@@ -23,7 +23,8 @@ from .sources import global_urls, vn_urls
 def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
                run_signature: str | None = None,
                current_horizon: int | None = None,
-               current_signature: str | None = None) -> Path:
+               current_signature: str | None = None,
+               ab_verdict: str | None = None) -> Path:
     """Emit the markdown plan file. `candidates` must include columns
     [symbol, pred_mean, pred_std, close, rsi_14, mom_5, mom_20].
     `run_signature` is appended to the filename so distinct same-day
@@ -78,9 +79,25 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         suggested_time = "11:30 ICT"
         reminder_note = "late morning of sell day"
 
+    has_union = "missed_only" in candidates.columns
     lines = [
         f"# Claude news re-rank plan — {on.isoformat()}",
         "",
+    ]
+    if has_union or ab_verdict:
+        lines += ["## Two rankings to weigh — standard + missed-winners variant", ""]
+        if ab_verdict:
+            lines += [f"**A/B backtest verdict:** {ab_verdict}.", ""]
+        lines += [
+            "Candidates below are the UNION of the standard model's top picks and "
+            "the missed-winners variant's top picks. A `[also-missed]` tag means "
+            "BOTH models surfaced it; `[missed-only]` means only the experimental "
+            "variant did. **Weigh the standard ranking higher** (it wins the A/B "
+            "above) — only let a `[missed-only]` name into your final picks if the "
+            "news strongly supports it. Your job: research the union, then choose "
+            "the final N on conviction.", "",
+        ]
+    lines += [
         "## Method — emergent research, not a fixed checklist",
         "",
         "For each candidate, you decide what to research. We do not give you",
@@ -197,6 +214,10 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         row_type = str(row.get("instrument_type", "STOCK") or "STOCK").upper()
         is_etf_row = (row_type == "ETF")
         type_tag = "  [ETF — apply ETF rubric, NOT company business]" if is_etf_row else ""
+        if bool(row.get("missed_only", False)):
+            type_tag += "  [missed-only — variant pick; needs strong news support]"
+        elif bool(row.get("also_missed", False)):
+            type_tag += "  [also-missed — both models like it]"
         lines.append(f"### {sym}  —  {organ}{type_tag}")
         lines.append("")
         lines.append(f"ML signal: pred_mean={row['pred_mean']:+.4f}  "

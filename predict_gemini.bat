@@ -64,11 +64,25 @@ if /I "%WARM%"=="always" set WARM_VALUE=always
 if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
+rem Missed-winners variant: ON by default. UNIONs the variant's top picks into
+rem the candidates Gemini researches (flagged in the prompt) so it judges both
+rem rankings. Answer n to research only the standard candidates.
+set MISSED_FLAG=
+set /p MISSED=Include the missed-winners variant candidates (union)? y/n [y]:
+if /I "%MISSED%"=="n" set MISSED_FLAG=--no-missed
+
+rem Standard-vs-missed A/B backtest: ON by default for Gemini mode, so the prompt
+rem embeds the verdict for Gemini to weigh. SLOW (~10 min). Answer n to skip;
+rem the prompt then uses the most recent prior A/B report if one exists.
+set AB_FLAG=--ab
+set /p AB=Run the standard-vs-missed A/B backtest (verdict goes into the prompt)? y/n [y]:
+if /I "%AB%"=="n" set AB_FLAG=--no-ab
+
 echo.
-echo Running ML stage: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
+echo Running ML stage: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  missed=%MISSED%  ab=%AB%
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
+.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% %MISSED_FLAG% %AB_FLAG% --mode gemini
 
 echo.
 echo Opening today's prompt file in Notepad.

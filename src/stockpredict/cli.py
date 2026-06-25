@@ -375,6 +375,39 @@ def train_missed_cmd(upweight: float, n: int | None) -> None:
     click.echo(f"  saved variant -> {path}")
 
 
+def _write_backtest_ab_report(bt_run, missed_winner_weights, *, n,
+                              start=None, end=None, top=None, upweight=3.0):
+    """Run the standard-vs-missed walk-forward A/B, print the table, and write
+    reports/backtest_ab_<date>.md with BOTH models' numbers. Overwrites NO
+    model — it's advisory only. Returns the report path."""
+    from .config import reports_dir
+    a = bt_run(start=start, end=end, top_k=top).summary
+    b = bt_run(start=start, end=end, top_k=top,
+               weights_fn=lambda p: missed_winner_weights(p, n=n, upweight=upweight)).summary
+    keys = ["n_trades", "hit_rate", "hit_rate_net", "mean_return", "mean_return_net"]
+    fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else str(v)
+    click.echo(f"\n{'metric':<18}{'standard':>14}{'missed':>14}")
+    for k in keys:
+        click.echo(f"{k:<18}{fmt(a.get(k)):>14}{fmt(b.get(k)):>14}")
+    better = (b.get("hit_rate", 0) or 0) >= (a.get("hit_rate", 0) or 0)
+    verdict = ("variant win_rate >= standard — candidate looks OK" if better
+               else "variant win_rate < standard — keep the standard model")
+    click.echo(f"\n==> {verdict}")
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    lines = [f"# Backtest A/B — standard vs missed-winners variant ({today})", "",
+             f"upweight={upweight}, picks={n}, "
+             f"window={a.get('start','?')}..{a.get('end','?')}", "",
+             "| metric | standard | missed |", "| --- | --- | --- |"]
+    lines += [f"| {k} | {fmt(a.get(k))} | {fmt(b.get(k))} |" for k in keys]
+    lines += ["", f"**Verdict:** {verdict}.",
+              "", "_Advisory only — no model was overwritten. The standard model "
+              "stays live; the variant is `models/latest_missed.pkl`, used only "
+              "via the `_missed` reports._"]
+    out = reports_dir() / f"backtest_ab_{today}.md"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
 @cli.command("backtest-ab")
 @click.option("--start", default=None)
 @click.option("--end", default=None)
@@ -384,27 +417,18 @@ def train_missed_cmd(upweight: float, n: int | None) -> None:
 def backtest_ab_cmd(start, end, top, upweight, n) -> None:
     """A/B the standard model vs the missed-winners variant on win rate.
 
-    Only promote the variant (keep ``latest_missed.pkl`` for live use) if its
-    hit_rate is >= the standard model's."""
+    Writes reports/backtest_ab_<date>.md with both models' numbers. Advisory
+    only — overwrites NO model. You decide whether the variant is worth using
+    (it stays at models/latest_missed.pkl, surfaced via the _missed reports)."""
     from .analyze.regret import missed_winner_weights
     from .backtest.walk_forward import run
     from .config import load_config
 
     nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    click.echo("backtest A: standard...")
-    a = run(start=start, end=end, top_k=top).summary
-    click.echo("backtest B: missed-winners variant...")
-    b = run(start=start, end=end, top_k=top,
-            weights_fn=lambda p: missed_winner_weights(p, n=nn, upweight=upweight)).summary
-    keys = ["n_trades", "hit_rate", "hit_rate_net", "mean_return", "mean_return_net"]
-    click.echo(f"\n{'metric':<18}{'standard':>14}{'missed':>14}")
-    for k in keys:
-        av, bv = a.get(k), b.get(k)
-        fmt = (lambda v: f"{v:.4f}" if isinstance(v, float) else str(v))
-        click.echo(f"{k:<18}{fmt(av):>14}{fmt(bv):>14}")
-    better = (b.get("hit_rate", 0) or 0) >= (a.get("hit_rate", 0) or 0)
-    click.echo(f"\n==> variant win_rate {'>=' if better else '<'} standard "
-               f"-> {'PROMOTE candidate' if better else 'DO NOT promote'}")
+    click.echo("backtest A: standard | B: missed-winners variant (slow)...")
+    out = _write_backtest_ab_report(run, missed_winner_weights, n=nn,
+                                    start=start, end=end, top=top, upweight=upweight)
+    click.echo(f"report -> {out}")
 
 
 # ---------------------------- predict --------------------------------------
@@ -540,18 +564,23 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
                    "(slow, rate-limited; use only for backfill).")
 @click.option("--skip-train", is_flag=True,
               help="Use the existing models/latest.pkl instead of retraining.")
-@click.option("--variant", type=click.Choice(["standard", "missed"]),
-              default="standard", show_default=True,
-              help="Which mean head to predict with. 'missed' uses the "
-                   "missed-winners variant (models/latest_missed.pkl, built by "
-                   "train-missed); its picks get a distinguishable _missed report. "
-                   "base mode only.")
+@click.option("--missed/--no-missed", "do_missed", default=True, show_default=True,
+              help="Involve the missed-winners variant. base mode: also writes a "
+                   "second _missed pick report. claude/gemini: UNIONs the missed "
+                   "variant's top picks into the candidates the LLM researches "
+                   "(deduped), so the LLM judges both rankings. On by default; "
+                   "--no-missed for standard candidates only.")
+@click.option("--ab/--no-ab", "do_ab", default=None,
+              help="After predicting, run the standard-vs-missed walk-forward A/B "
+                   "and write reports/backtest_ab_<date>.md (overwrites no model). "
+                   "Default: OFF for base, ON for claude/gemini (so the LLM can "
+                   "weigh the verdict). SLOW (~10 min, retrains across years).")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
-            skip_train: bool, variant: str, workers: int) -> None:
+            skip_train: bool, do_missed: bool, do_ab: bool | None, workers: int) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
@@ -576,14 +605,9 @@ def run_cmd(mode: str, n_picks: int | None,
     days = int(load_config().target["exit_offset_days"])
     requested_n = int(n_picks) if n_picks else int(
         load_config().pricing.get("default_picks", 5))
-    if variant == "missed":
-        if mode != "base":
-            click.echo("ERROR: --variant missed is base-mode only.", err=True)
-            sys.exit(2)
-        # Predict with the pre-built variant; never overwrite the standard model.
-        skip_train = True
-        click.echo("[note] --variant missed: using models/latest_missed.pkl "
-                   "(run train-missed first); standard train skipped.")
+    # The A/B defaults OFF for base, ON for claude/gemini (LLM weighs the verdict).
+    if do_ab is None:
+        do_ab = (mode != "base")
     # Normalize --exclude: split each value on commas so BAT-style single
     # comma-separated input works alongside the repeatable form, uppercase,
     # dedupe, sort for stable signature ordering.
@@ -787,7 +811,29 @@ def run_cmd(mode: str, n_picks: int | None,
                 click.echo(f"  low model saved (alpha={low_model.alpha:.2f}).")
             else:
                 click.echo("  low head: no rows with target_low — skipped.")
+
+        # Missed-winners variant mean head: same panel, upweight realized
+        # winners. Saved to latest_missed.pkl — the standard model is untouched.
+        if do_missed:
+            from .analyze.regret import missed_winner_weights
+            from .model.train import save_latest_missed
+            weights = missed_winner_weights(panel_mean, n=requested_n, upweight=3.0)
+            n_up = int((weights > 1.0).sum())
+            click.echo(f"  missed variant: upweighting {n_up:,} winner rows (x3.0)")
+            save_latest_missed(train_model(panel_mean, weights=weights))
+            click.echo("  missed variant saved.")
         click.echo("")
+
+    def _maybe_ab():
+        """Run the standard-vs-missed A/B and write its report (no model overwrite)."""
+        if not do_ab:
+            return
+        click.echo("")
+        click.echo("running standard-vs-missed A/B backtest (slow)...")
+        from .analyze.regret import missed_winner_weights
+        from .backtest.walk_forward import run as _bt_run
+        click.echo(f"A/B report -> "
+                   f"{_write_backtest_ab_report(_bt_run, missed_winner_weights, n=requested_n)}")
 
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
@@ -795,18 +841,30 @@ def run_cmd(mode: str, n_picks: int | None,
         picks, out = base.run(exit_offset_days=days, n_picks=requested_n,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
-                              exclude=exclude_list, variant=variant)
+                              exclude=exclude_list, variant="standard")
         click.echo("")
+        click.echo("=== STANDARD model ===")
         click.echo(_format_picks(picks))
         _print_pick_warnings(picks, requested_n)
-        click.echo(f"\nsaved -> {out}")
+        click.echo(f"saved -> {out}")
+        if do_missed:
+            m_picks, m_out = base.run(exit_offset_days=days, n_picks=requested_n,
+                                      symbols=pred_syms, hose_only=hose_only,
+                                      include_etfs=include_etfs,
+                                      exclude=exclude_list, variant="missed")
+            click.echo("")
+            click.echo("=== MISSED-WINNERS variant (experimental; nothing overwritten) ===")
+            click.echo(_format_picks(m_picks))
+            _print_pick_warnings(m_picks, requested_n)
+            click.echo(f"saved -> {m_out}")
+        _maybe_ab()
     elif mode == "claude":
         from .modes import claude
         result, out, tag = claude.run(exit_offset_days=days, n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
-                                       exclude=exclude_list)
+                                       exclude=exclude_list, union_missed=do_missed)
         click.echo("")
         click.echo(_format_picks(result))
         _print_pick_warnings(result, requested_n)
@@ -821,13 +879,16 @@ def run_cmd(mode: str, n_picks: int | None,
         click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
         click.echo("    2. Then run:")
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
+        # Refresh the A/B verdict AFTER emitting the plan (the plan embeds the
+        # PREVIOUS report, so the user isn't blocked ~10 min for the research plan).
+        _maybe_ab()
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(exit_offset_days=days, n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
-                                       exclude=exclude_list)
+                                       exclude=exclude_list, union_missed=do_missed)
         click.echo("")
         click.echo(_format_picks(result))
         _print_pick_warnings(result, requested_n)
@@ -838,6 +899,7 @@ def run_cmd(mode: str, n_picks: int | None,
         if tag == "prompt-only":
             click.echo("")
             click.echo("==> NEXT: paste the prompt file's contents into Gemini Pro with browsing.")
+        _maybe_ab()
 
     elapsed = (_time.time() - started) / 60.0
     click.echo(f"\nelapsed: {elapsed:.1f} min")

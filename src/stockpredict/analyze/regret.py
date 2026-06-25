@@ -149,6 +149,49 @@ def regret_markdown(window_days: int = 90, n: int = 5,
     return "\n".join(lines)
 
 
+def union_candidates(standard: pd.DataFrame,
+                     missed: pd.DataFrame) -> pd.DataFrame:
+    """Union the standard and missed-variant candidate frames for the LLM modes,
+    deduped by symbol (standard pricing wins on overlap). Adds ``also_missed``
+    (the missed variant also surfaced it) and ``missed_only`` (only the missed
+    variant did) so the plan/prompt can flag them and the LLM can weigh both."""
+    std = standard.copy()
+    if missed is None or missed.empty:
+        std["also_missed"] = False
+        std["missed_only"] = False
+        return std
+    missed_syms = set(missed["symbol"].astype(str))
+    std_syms = set(std["symbol"].astype(str))
+    std["also_missed"] = std["symbol"].astype(str).isin(missed_syms)
+    std["missed_only"] = False
+    extra = missed[~missed["symbol"].astype(str).isin(std_syms)].copy()
+    if not extra.empty:
+        extra["also_missed"] = True
+        extra["missed_only"] = True
+    return pd.concat([std, extra], ignore_index=True)
+
+
+def latest_ab_summary() -> str | None:
+    """One-line summary of the most recent ``backtest_ab_*.md`` report (the
+    Verdict line), or None when no A/B has been run. Used to tell the LLM modes
+    which mean head the out-of-sample A/B currently favors."""
+    import glob
+    from ..config import reports_dir
+    files = sorted(glob.glob(str(reports_dir() / "backtest_ab_*.md")))
+    if not files:
+        return None
+    try:
+        from pathlib import Path
+        text = Path(files[-1]).read_text(encoding="utf-8")
+    except Exception:
+        return None
+    name = files[-1].replace("\\", "/").split("/")[-1]
+    for line in text.splitlines():
+        if line.startswith("**Verdict:**"):
+            return f"{name}: {line.replace('**Verdict:**', '').strip().rstrip('.')}"
+    return name
+
+
 def missed_winner_weights(panel: pd.DataFrame, n: int = 5,
                           upweight: float = 3.0) -> pd.Series:
     """Training sample weights aligned to ``panel``: ``1.0`` everywhere,

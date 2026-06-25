@@ -31,7 +31,8 @@ pipeline. Use your `AskUserQuestion`, `Bash`, `Read`, `Edit`, `WebFetch`, and
 
 Collect these with `AskUserQuestion` — not free-form chat. The tool takes up to
 four questions per call, so batch them: parameters **1–3** in a first call,
-then **4–5** in a second. For every question, put the **default option first
+then **4–7** in a second (warm-only, exclude, missed-variant, A/B — exactly
+four). For every question, put the **default option first
 and append "(Recommended)"** to its label. Do **not** add an "Other" entry to
 the `options` array — the tool appends one automatically, and that auto-added
 **"Other"** is how the user supplies any free-form value (a custom pick count,
@@ -75,16 +76,24 @@ When everything is in, summarise the chosen parameters back and start the run.
 
    To name them, the user picks the auto-added **"Other"** and types a comma-separated list (e.g. `ACB,HPG`); the `Exclude some…` option is just a prompt to do that, so if it is chosen without a list, ask once for the comma-separated names. Excluded tickers are stripped from every universe layer (curated, warm cache, top-up) AND the prediction panel, so they can't reappear; the picks JSON filename gets a `_xACB-HPG` suffix (sorted, dash-joined) so a same-day full run isn't overwritten. Pass `--exclude TICKER` once per ticker (e.g. `--exclude ACB --exclude HPG`) or as a single comma-separated value (`--exclude ACB,HPG`); omit the flag entirely when None.
 
+6. **Missed-winners variant?** (batch this with #4–#5.)
+   - `Yes — union both rankings` (Recommended) — also rank the universe with the experimental missed-winners mean head and **union** its top picks into the candidates you research (deduped). Each gets a `[also-missed]` (both models like it) or `[missed-only]` tag in the plan, so you can weigh both. Pass nothing (it's the default).
+   - `No — standard only` — research only the standard model's top picks. Pass `--no-missed`.
+
+7. **Run the A/B backtest?** (batch with #4–#6.)
+   - `Yes — refresh the verdict` (Recommended for claude) — after emitting the plan, run the standard-vs-missed walk-forward A/B and write `reports/backtest_ab_<date>.md`. SLOW (~10 min) but it tells you which mean head actually wins out-of-sample. Pass `--ab` (it's the default for claude mode). The plan you research embeds the **previous** A/B verdict (this run refreshes it for next time).
+   - `No — skip the slow A/B` — pass `--no-ab`. The plan still embeds the most recent prior A/B verdict if one exists.
+
 ## Pipeline steps
 
 ### 1. Run the ML stage and get the candidate plan
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli run \
-    --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
+    --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> [--no-missed] [--no-ab] --mode claude
 ```
 
-Add `--hose-only` only if question 2 was yes. Add `--no-etfs` only if question 3 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 4, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Pass `--picks <N>` with the count from question 1. For question 5, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes.
+Add `--hose-only` only if question 2 was yes. Add `--no-etfs` only if question 3 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 4, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Pass `--picks <N>` with the count from question 1. For question 5, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes. For question 6, pass `--no-missed` only if the user declined the union (union is the default). For question 7, pass `--no-ab` only if the user declined the A/B (it runs by default in claude mode).
 
 Run from the repo root. The CLI writes a markdown plan at
 `reports\claude_news_plan_<YYYY-MM-DD>.md` plus a candidates parquet
@@ -98,8 +107,18 @@ user verbatim before continuing.
 ### 2. Read the plan markdown
 
 Use `Read` on the path the CLI printed. The plan has a Method section and a
-per-ticker section for each of the N candidates with empty Step 1 / Step 2 /
-Step 4 fields and a `## Scores` table at the bottom.
+per-ticker section for each candidate with empty Step 1 / Step 2 / Step 4 fields
+and a `## Scores` table at the bottom.
+
+**If you ran with the missed-winners union** (default), the plan opens with a
+**"Two rankings to weigh"** block containing the A/B backtest verdict, and the
+candidate set is the UNION of the standard and missed-variant top picks — more
+than N rows, each tagged `[also-missed]` or `[missed-only]`. Follow that block:
+research the whole union, **weigh the standard ranking higher** (it wins the
+A/B), and only let a `[missed-only]` name into your final scores if the news
+strongly supports it. You may also open the latest `reports/backtest_ab_<date>.md`
+directly. `claude-finalize` keeps the **top N by adjusted score** from the
+union, so your `news_score`s decide which of the unioned names survive.
 
 ### 3. Research each ticker — business-aware, emergent dimensions
 
