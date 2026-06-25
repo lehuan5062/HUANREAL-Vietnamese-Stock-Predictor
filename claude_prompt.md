@@ -30,9 +30,12 @@ pipeline. Use your `AskUserQuestion`, `Bash`, `Read`, `Edit`, `WebFetch`, and
 ## Parameters to collect
 
 Collect these with `AskUserQuestion` — not free-form chat. The tool takes up to
-four questions per call, so batch them: parameters **1–3** in a first call,
-then **4–7** in a second (warm-only, exclude, missed-variant, A/B — exactly
-four). For every question, put the **default option first
+four questions per call, so batch them: the **method** question plus parameters
+**1–3** in a first call (exactly four), then **4–7** in a second (warm-only,
+exclude, missed-variant, A/B — exactly four). **If the method is `LLM-only`,
+skip questions 6 and 7 entirely** (there is no ML model to union or A/B-backtest)
+— the second batch is then just warm-only and exclude.
+For every question, put the **default option first
 and append "(Recommended)"** to its label. Do **not** add an "Other" entry to
 the `options` array — the tool appends one automatically, and that auto-added
 **"Other"** is how the user supplies any free-form value (a custom pick count,
@@ -40,6 +43,20 @@ a custom ticker list).
 The run always covers the entire HOSE / HNX / UPCOM universe (no time cap) and
 always uses the **T+2** horizon (Vietnamese settlement).
 When everything is in, summarise the chosen parameters back and start the run.
+
+0. **Prediction method?** (ask this first, batched with 1–3.)
+   - `ML/LLM hybrid (Recommended)` — the current method: the ML model ranks the
+     universe by predicted return and returns the top N candidates; you do
+     *news research* on those N and nudge the ranking. Omit the `--llm-only`
+     flag (it's the default).
+   - `LLM-only` — **no ML model is used at all.** The CLI hands you the WHOLE
+     mechanically-filtered universe (liquidity / tradable / ceiling /
+     corporate-action filtered, UNRANKED, no `pred_mean`), and YOU do the entire
+     job: select the N names, rank them by your own conviction, and set the
+     entry / target / stop prices yourself from your research. Pass `--llm-only`.
+     This path emits a different plan (`claude_llm_plan_<date>.md`) and writes
+     `picks_claude_llm_<date>_...json`, so the report name makes the method
+     obvious. Questions 6 (missed-variant) and 7 (A/B) do not apply.
 
 1. **Picks** (how many names to surface).
    - `1` (Recommended) — return only the single best pick by predicted return
@@ -92,6 +109,27 @@ When everything is in, summarise the chosen parameters back and start the run.
 .venv\Scripts\python.exe -m stockpredict.cli run \
     --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> [--no-missed] [--no-ab] --mode claude
 ```
+
+**If question 0 was `LLM-only`**, run this instead (note `--llm-only`; drop
+`--no-missed` / `--no-ab` — they're forced off automatically):
+
+```
+.venv\Scripts\python.exe -m stockpredict.cli run \
+    --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --llm-only --mode claude
+```
+
+This skips ML training entirely and writes `reports\claude_llm_plan_<YYYY-MM-DD>_…md`
+(plus a `.candidates.parquet` universe sidecar). The plan lists the **whole
+eligible universe UNRANKED** with a `## Universe` table and an empty `## Results`
+table for you to fill. There is no per-ticker scaffold pre-written — you add a
+`### TICKER  —  Company` section (Step 1 / 2 / 4, same format as the hybrid plan)
+for each name you choose. Do the global/macro + VN-Index checks once, research
+across the universe, then **select exactly `<PICKS>` names, rank them by a
+numeric `conviction`, and fill `entry_vnd` / `target_vnd` / `stop_vnd` (VND per
+share) yourself** in the Results table. Skip the missed-variant / A/B parts of
+the steps below — they don't apply. Then jump to finalize (step on
+`claude-finalize`), which auto-detects the LLM-only plan and ranks by your
+conviction with your prices. The rest of this section is for the hybrid path.
 
 Add `--hose-only` only if question 2 was yes. Add `--no-etfs` only if question 3 was no (ETFs are included by default — do not pass `--etfs` explicitly). For question 4, pass `--warm-only yes` (default), `--warm-only always`, or `--warm-only no` based on the user's answer. Pass `--picks <N>` with the count from question 1. For question 5, add `--exclude TICKER` once per ticker the user wants suppressed; omit the flag entirely when the user gave no excludes. For question 6, pass `--no-missed` only if the user declined the union (union is the default). For question 7, pass `--no-ab` only if the user declined the A/B (it runs by default in claude mode).
 

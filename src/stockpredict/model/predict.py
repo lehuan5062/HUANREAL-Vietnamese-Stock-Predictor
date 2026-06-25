@@ -110,40 +110,27 @@ def _try_load_low_model() -> RollingEmpiricalQuantileModel | None:
         return None
 
 
-def rank_today(model: TrainedModel | None = None,
-               on: str | pd.Timestamp | None = None,
-               n_picks: int = 5,
-               panel: pd.DataFrame | None = None,
-               exit_offset_days: int | None = None,
-               symbols: list[str] | None = None,
-               low_model: RollingEmpiricalQuantileModel | None = None,
-               model_variant: str = "standard") -> pd.DataFrame:
-    """Compute predicted return for every eligible symbol on the given date,
-    apply the liquidity / tradable / ceiling / glitch filters, and return
-    EXACTLY ``n_picks`` picks — the top ``n_picks`` rows by ``pred_mean``,
-    priced.
+def eligible_universe(on: str | pd.Timestamp | None = None,
+                      panel: pd.DataFrame | None = None,
+                      exit_offset_days: int | None = None,
+                      symbols: list[str] | None = None) -> pd.DataFrame:
+    """Return the mechanically-filtered cross-section of tradable names on the
+    given date — UNCAPPED, with NO model scoring and NO pricing.
 
-    Selection is exactly-N: the whole scored universe is ranked by
-    ``pred_mean`` descending and the top ``n_picks`` are kept, so the implicit
-    difficulty (the edge cutoff) floats to whatever admits exactly that count.
-    Picks below the break-even quality bar are still returned but carry
-    ``below_breakeven=True`` so the caller can warn. If the eligible universe
-    holds fewer than ``n_picks`` rows (a tiny cache / heavy --exclude /
-    --hose-only), fewer rows are returned — the caller surfaces the shortfall.
+    Applies the same filter cascade ``rank_today`` uses before it scores:
+    ``latest_cross_section → tradable_symbols → liquidity_mask →
+    ceiling_lock_mask → corporate_action_mask → overbought_mask``. Loads no
+    model file, so it works even when ``models/latest.pkl`` is absent.
+
+    Used by the LLM-only Claude mode, which hands this whole eligible universe
+    (no ``pred_mean``) to the LLM to select / rank / price itself; ``rank_today``
+    calls it too so both paths share one filter definition.
     """
-    if model is None:
-        if str(model_variant) == "missed":
-            model = TrainedModel.load(latest_missed_model_path())
-        else:
-            model = TrainedModel.load(latest_model_path())
-    if low_model is None:
-        low_model = _try_load_low_model()
     if panel is None:
         # require_target=False so we keep the most recent rows even without a known target
         panel = build_panel(symbols=symbols, require_target=False,
                             exit_offset_days=exit_offset_days)
     elif symbols is not None:
-        # Caller pre-built the panel but still wants to restrict ranking
         panel = panel[panel["symbol"].astype(str).str.upper().isin(
             {s.upper() for s in symbols}
         )]
@@ -188,6 +175,47 @@ def rank_today(model: TrainedModel | None = None,
     # run too far tends to reverse, so buying the top is a poor T+2 entry.
     # Off by default (overbought_rsi_max=0); reads a clean RSI post corp-action.
     snap = snap[overbought_mask(snap)].copy()
+    return snap
+
+
+def rank_today(model: TrainedModel | None = None,
+               on: str | pd.Timestamp | None = None,
+               n_picks: int = 5,
+               panel: pd.DataFrame | None = None,
+               exit_offset_days: int | None = None,
+               symbols: list[str] | None = None,
+               low_model: RollingEmpiricalQuantileModel | None = None,
+               model_variant: str = "standard") -> pd.DataFrame:
+    """Compute predicted return for every eligible symbol on the given date,
+    apply the liquidity / tradable / ceiling / glitch filters, and return
+    EXACTLY ``n_picks`` picks — the top ``n_picks`` rows by ``pred_mean``,
+    priced.
+
+    Selection is exactly-N: the whole scored universe is ranked by
+    ``pred_mean`` descending and the top ``n_picks`` are kept, so the implicit
+    difficulty (the edge cutoff) floats to whatever admits exactly that count.
+    Picks below the break-even quality bar are still returned but carry
+    ``below_breakeven=True`` so the caller can warn. If the eligible universe
+    holds fewer than ``n_picks`` rows (a tiny cache / heavy --exclude /
+    --hose-only), fewer rows are returned — the caller surfaces the shortfall.
+    """
+    if model is None:
+        if str(model_variant) == "missed":
+            model = TrainedModel.load(latest_missed_model_path())
+        else:
+            model = TrainedModel.load(latest_model_path())
+    if low_model is None:
+        low_model = _try_load_low_model()
+    if panel is None:
+        # require_target=False so we keep the most recent rows even without a known target
+        panel = build_panel(symbols=symbols, require_target=False,
+                            exit_offset_days=exit_offset_days)
+    elif symbols is not None:
+        # Caller pre-built the panel but still wants to restrict ranking
+        panel = panel[panel["symbol"].astype(str).str.upper().isin(
+            {s.upper() for s in symbols}
+        )]
+    snap = eligible_universe(on=on, panel=panel)
     if snap.empty:
         return snap
 

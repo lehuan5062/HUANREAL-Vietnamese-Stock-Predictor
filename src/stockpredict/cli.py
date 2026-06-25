@@ -476,7 +476,18 @@ def predict_cmd(mode: str, n_picks: int | None, on: str | None) -> None:
 @click.argument("plan_path", type=click.Path(exists=True))
 def claude_finalize_cmd(plan_path: str) -> None:
     from .modes import claude
-    picks, out = claude.finalize(plan_path)
+    # Auto-detect the LLM-only path: a `claude_llm_plan_*` file, or a meta
+    # sidecar tagged "method": "llm_only".
+    _p = Path(plan_path)
+    _is_llm = _p.name.startswith("claude_llm_plan_")
+    if not _is_llm:
+        _meta = _p.with_suffix(".meta.json")
+        if _meta.exists():
+            try:
+                _is_llm = json.loads(_meta.read_text(encoding="utf-8")).get("method") == "llm_only"
+            except Exception:
+                _is_llm = False
+    picks, out = claude.finalize_llm(plan_path) if _is_llm else claude.finalize(plan_path)
     click.echo(_format_picks(picks))
     if _has_explanations(picks):
         click.echo("")
@@ -575,12 +586,20 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
                    "and write reports/backtest_ab_<date>.md (overwrites no model). "
                    "Default: OFF for base, ON for claude/gemini (so the LLM can "
                    "weigh the verdict). SLOW (~10 min, retrains across years).")
+@click.option("--llm-only", is_flag=True,
+              help="LLM-ONLY prediction (claude mode only): no ML model is used "
+                   "to select or rank. The whole mechanically-filtered universe "
+                   "(no pred_mean) is handed to Claude, which picks, ranks and "
+                   "prices every name itself. Emits a `claude_llm_plan_<date>.md` "
+                   "instead of the hybrid `claude_news_plan_*`. Forces "
+                   "--no-missed --no-ab (no ML to union/backtest).")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
-            skip_train: bool, do_missed: bool, do_ab: bool | None, workers: int) -> None:
+            skip_train: bool, do_missed: bool, do_ab: bool | None,
+            llm_only: bool, workers: int) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
@@ -601,6 +620,13 @@ def run_cmd(mode: str, n_picks: int | None,
     if n_picks is not None and n_picks < 1:
         click.echo("ERROR: --picks must be >= 1.", err=True)
         sys.exit(2)
+    if llm_only and mode != "claude":
+        click.echo("ERROR: --llm-only is only valid with --mode claude.", err=True)
+        sys.exit(2)
+    if llm_only:
+        # No ML model in the loop → nothing to union or A/B-backtest.
+        do_missed = False
+        do_ab = False
     # Horizon is always T+2 (Vietnamese settlement); sourced from config.
     days = int(load_config().target["exit_offset_days"])
     requested_n = int(n_picks) if n_picks else int(
@@ -783,7 +809,10 @@ def run_cmd(mode: str, n_picks: int | None,
     # ``tradable_symbols()`` as a defense-in-depth check.
     pred_syms = syms
 
-    if not skip_train:
+    if llm_only:
+        click.echo("LLM-only: skipping ML training (no model used).")
+        click.echo("")
+    elif not skip_train:
         click.echo(f"training (horizon T+{days})...")
         # Build once with require_target=False so both heads can see all
         # rows; drop NaN per-head before fitting.
@@ -864,19 +893,28 @@ def run_cmd(mode: str, n_picks: int | None,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
-                                       exclude=exclude_list, union_missed=do_missed)
+                                       exclude=exclude_list, union_missed=do_missed,
+                                       llm_only=llm_only)
         click.echo("")
-        click.echo(_format_picks(result))
-        _print_pick_warnings(result, requested_n)
-        if _has_explanations(result):
-            click.echo("")
-            click.echo(_format_picks_explained(result))
+        if not llm_only:
+            click.echo(_format_picks(result))
+            _print_pick_warnings(result, requested_n)
+            if _has_explanations(result):
+                click.echo("")
+                click.echo(_format_picks_explained(result))
+        else:
+            click.echo(f"LLM-only universe: {len(result)} eligible name(s) for "
+                       f"Claude to pick from (target {requested_n}).")
         click.echo(f"\nsaved -> {out}  (path: {tag})")
         # Claude mode emits the interactive plan; the sell reminder lands at
         # claude-finalize, not here.
         click.echo("")
         click.echo("==> NEXT (run inside Claude Code / Cowork):")
-        click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
+        if llm_only:
+            click.echo("    1. Ask Claude to research the universe, choose & price the picks,")
+            click.echo("       and fill the Results table.")
+        else:
+            click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
         click.echo("    2. Then run:")
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
         # Refresh the A/B verdict AFTER emitting the plan (the plan embeds the

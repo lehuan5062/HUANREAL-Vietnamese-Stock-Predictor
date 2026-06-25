@@ -29,15 +29,26 @@ tools, which only exist inside Claude.
 
 1. Open Claude Code or Cowork in Claude Desktop.
 2. Paste the contents of [`claude_prompt.md`](claude_prompt.md) into the chat.
-3. Claude will ask you for the number of `picks`, then drive the entire
-   pipeline (run the ML stage → research each candidate across emergent
-   per-ticker dimensions → fill the plan → finalize → report explained
-   picks).
+3. Claude will ask you for the number of `picks` and the **prediction
+   method**, then drive the entire pipeline.
 
 The prompt is self-contained and tells Claude everything it needs to know
 about the project layout, tools, scoring rubric, the seven-dimension
 *reference* (with the explicit instruction that dimensions are per-ticker
 emergent, not a fixed checklist), and the ACBS fee model.
+
+**Two prediction methods (Claude mode):**
+
+| method | who selects the picks | who sets the prices | report files |
+| ------ | --------------------- | ------------------- | ------------ |
+| **ML/LLM hybrid** (default) | the ML model ranks the universe by `pred_mean` and returns the top N; Claude does *news research* on those N and nudges the ranking | mechanical (low-head dip + ATR) | `claude_news_plan_*` → `picks_claude_*` |
+| **LLM-only** (`--llm-only`) | **Claude** picks the N names from the *whole* mechanically-filtered universe (unranked, no `pred_mean`) on its own research, ranked by its own `conviction` | **Claude** sets `entry` / `target` / `stop` itself | `claude_llm_plan_*` → `picks_claude_llm_*` |
+
+LLM-only uses **no ML model at all** — no training, no `latest.pkl`, no
+`pred_mean`. It only reuses the mechanical universe filters (liquidity /
+tradable / ceiling-lock / corporate-action). The distinct report names make the
+method obvious at a glance; LLM-only picks are recorded in the ledger under
+`mode="claude_llm"` so the two methods stay separable.
 
 ### C. CLI (advanced)
 
@@ -75,6 +86,7 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 | `--hose-only` | Restrict the universe to HOSE-listed tickers. Refreshes the universe via VCI to try to get exchange info; falls back to ~43 curated HOSE bluechips (VN30 + HOSE mid-caps) if the data source doesn't return `exchange`. | `False` |
 | `--include-etfs` | Include HOSE ETFs (e.g. `E1VFVN30`, `FUEVFVND`) in the pickable universe. Off by default — ETFs are classified as a separate security type and excluded unless this is set. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
+| `--llm-only` | **claude mode only.** No ML model is used to select or rank — the whole mechanically-filtered universe (no `pred_mean`) is handed to Claude, which picks, ranks (by its own `conviction`) and prices every name itself. Skips ML training; emits `claude_llm_plan_<date>.md` and finalizes to `picks_claude_llm_<date>_…json`. Forces `--no-missed --no-ab` (no ML to union / backtest). | off |
 | `--skip-train` | reuse cached `models/latest.pkl` instead of retraining | off |
 | `--missed` / `--no-missed` | **On by default.** Involves the missed-winners variant. **base**: writes a *second* `_missed` pick report alongside the standard one. **claude/gemini**: UNIONs the variant's top picks into the candidates the LLM researches (each flagged `also-missed` / `missed-only` in the plan), so the LLM weighs both rankings and keeps the top N. Nothing is overwritten. `--no-missed` for standard only. | `--missed` |
 | `--ab` / `--no-ab` | After predicting, run the standard-vs-missed walk-forward A/B and write `reports/backtest_ab_<date>.md` (advisory; overwrites no model). The LLM modes embed the verdict so they weigh the winner. Slow (~10 min). **Default: off for base, on for claude/gemini.** | off (base) / on (claude,gemini) |
@@ -742,6 +754,12 @@ is mutated silently. Output lands at `reports\self_correction_<date>_<sig>.md`.
 This is intentionally Claude-Code-only: the work needs `Read` + `Edit` on
 local files, which the prompt-only Gemini path can't do.
 
+**Not applicable to LLM-only reports.** Both focuses are ML-pipeline concepts
+— missed-winners regret targets the ML model's skill / gates, and entry-price
+calibration tunes the mechanical low head. LLM-only picks (`picks_claude_llm_*`,
+`mode: claude_llm`) have no ML model, no `pred_mean`, and no mechanical
+`entry_limit_price`, so the self-correction loop skips them.
+
 ## Setup (one-time)
 
 ```bash
@@ -799,7 +817,7 @@ into `reports/backtest_<date>/` with `summary.md` and `equity.png`.
 .venv\Scripts\python -m pytest -q
 ```
 
-156 tests, all use synthetic data — no network required. Coverage spans
+164 tests, all use synthetic data — no network required. Coverage spans
 features, pricing, the trading calendar, cache freshness + watermarks,
 the rate limiter, walk-forward backtest sanity, run-signature uniqueness,
 entry slippage, and per-dimension hit-rate aggregation.
@@ -879,7 +897,8 @@ Key knobs:
     model/                 target alignment, LightGBM ensemble
     backtest/              walk-forward simulator
     news/
-      claude_runner.py     interactive Claude (markdown plan)
+      claude_runner.py     interactive Claude — hybrid plan (ML-ranked candidates)
+      claude_llm_runner.py interactive Claude — LLM-only plan (whole universe, no ML)
       gemini_prompt.py     prompt builder for Gemini Chat (web)
       sources.py           URL builders
     modes/                 base / claude / gemini orchestrators

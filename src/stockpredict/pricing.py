@@ -211,6 +211,68 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def economics_from_llm_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute the per-share economics columns from LLM-SUPPLIED entry / target /
+    stop prices — for the LLM-only Claude mode, where there is no ML mean head
+    and no mechanical (low-head + ATR) pricing.
+
+    Unlike :func:`add_price_suggestions` (which derives entry from the dip head
+    and target/stop from ATR), every price here comes straight from the LLM:
+
+        entry_vnd, target_vnd, stop_vnd   — VND per share, set by the LLM
+
+    The same ACBS fee model and risk-reward math are applied so the picks JSON
+    carries identical economic fields (fees / net P&L / rr / breakeven). The
+    ``below_breakeven`` flag drops the ``pred_mean`` edge term (there is no ML
+    forecast) and keeps only the price-based quality checks: positive net reward,
+    valid stop, and rr above ``min_rr_ratio``.
+    """
+    if df is None or len(df) == 0:
+        return df
+
+    cfg = load_config()
+    broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
+    pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
+    min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
+
+    out = df.copy()
+
+    entry_v = out["entry_vnd"].astype("float64").round(0)
+    target_v = out["target_vnd"].astype("float64").round(0)
+    stop_v = out["stop_vnd"].astype("float64").round(0)
+    # Reference close in VND when the universe row carried a close (thousand VND).
+    if "close" in out.columns:
+        out["close_vnd"] = (out["close"].astype(float) * 1000.0).round(0).astype("Int64")
+
+    gross_reward = target_v - entry_v
+    max_loss_units = entry_v - stop_v
+
+    _, _, fees_total, _ = _broker_costs(entry_v, target_v, broker)
+    net_reward = gross_reward - fees_total
+    net_loss = max_loss_units + fees_total
+
+    rr = pd.Series(np.nan, index=out.index, dtype=float)
+    valid = (max_loss_units > 0) & net_loss.notna()
+    rr[valid] = net_reward[valid] / net_loss[valid]
+
+    breakeven_pct = (fees_total / entry_v).round(4)
+    clears_bar = (net_reward > 0) & (rr >= min_rr) & valid
+    below_breakeven = ~clears_bar.fillna(False)
+
+    out["entry_vnd"] = entry_v.astype("Int64")
+    out["target_vnd"] = target_v.astype("Int64")
+    out["stop_vnd"] = stop_v.astype("Int64")
+    out["gross_reward_vnd"] = gross_reward.round(0).astype("Int64")
+    out["max_loss_vnd"] = max_loss_units.round(0).astype("Int64")
+    out["fees_round_trip_vnd"] = fees_total.round(0).astype("Int64")
+    out["net_reward_vnd"] = net_reward.round(0).astype("Int64")
+    out["net_loss_vnd"] = net_loss.round(0).astype("Int64")
+    out["rr_ratio"] = rr.round(2)
+    out["breakeven_pct"] = breakeven_pct
+    out["below_breakeven"] = below_breakeven
+    return out
+
+
 def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     """Append a PARALLEL set of ``adj_*`` columns derived from LLM-supplied
     entry / target overrides — **without** touching any of the mechanical

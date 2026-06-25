@@ -25,8 +25,21 @@ def run(on: str | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
         exclude: list[str] | None = None,
-        union_missed: bool = False) -> tuple[pd.DataFrame, Path, str]:
-    """Emit the interactive plan. Returns (candidates_df, plan_path, 'interactive')."""
+        union_missed: bool = False,
+        llm_only: bool = False) -> tuple[pd.DataFrame, Path, str]:
+    """Emit the interactive plan. Returns (candidates_df, plan_path, tag).
+
+    ``llm_only`` switches to the no-ML path: the whole eligible universe (no
+    ``pred_mean``) is handed to the LLM, which selects / ranks / prices itself.
+    """
+    if llm_only:
+        universe, plan_path = emit_llm_plan(on=on,
+                                            exit_offset_days=exit_offset_days,
+                                            n_picks=n_picks,
+                                            symbols=symbols, hose_only=hose_only,
+                                            include_etfs=include_etfs,
+                                            exclude=exclude)
+        return universe, plan_path, "interactive-llm"
     candidates, plan_path = emit_plan(on=on,
                                       exit_offset_days=exit_offset_days,
                                       n_picks=n_picks,
@@ -34,6 +47,54 @@ def run(on: str | None = None,
                                       include_etfs=include_etfs,
                                       exclude=exclude, union_missed=union_missed)
     return candidates, plan_path, "interactive"
+
+
+def emit_llm_plan(on: str | None = None,
+                  exit_offset_days: int | None = None,
+                  n_picks: int | None = None,
+                  symbols: list[str] | None = None,
+                  hose_only: bool = False,
+                  include_etfs: bool = True,
+                  exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
+    """LLM-only emit: hand the WHOLE eligible universe (no ML scoring) to the
+    LLM. Writes a `claude_llm_plan_*` markdown + sidecars and returns
+    (universe_df, plan_path)."""
+    from ..model.predict import eligible_universe
+    from ..news.claude_llm_runner import write_llm_plan
+
+    full_cfg = load_config()
+    requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
+    universe = eligible_universe(on=on, exit_offset_days=exit_offset_days,
+                                 symbols=symbols)
+    if on is not None:
+        on_date = dt.date.fromisoformat(on)
+    else:
+        on_date = effective_today_for_trading().date()
+    eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
+        full_cfg.target["exit_offset_days"]
+    )
+    excl_list = sorted({s.upper() for s in (exclude or [])})
+    sig = run_signature(mode="claude_llm", exit_offset_days=eff_horizon,
+                        hose_only=hose_only,
+                        include_etfs=include_etfs, exclude=excl_list)
+    plan_path = write_llm_plan(universe, on=on_date, run_signature=sig,
+                               current_horizon=eff_horizon, n_picks=requested_n)
+    sidecar = plan_path.with_suffix(".candidates.parquet")
+    universe.to_parquet(sidecar, index=False)
+    meta_path = plan_path.with_suffix(".meta.json")
+    meta_path.write_text(
+        json.dumps({
+            "method": "llm_only",
+            "exit_offset_days": eff_horizon,
+            "n_picks": requested_n,
+            "hose_only": hose_only,
+            "include_etfs": include_etfs,
+            "exclude": excl_list,
+            "run_signature": sig,
+        }, indent=2),
+        encoding="utf-8",
+    )
+    return universe, plan_path
 
 
 def emit_plan(on: str | None = None,
@@ -193,6 +254,100 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
+           exit_offset_days=exit_off,
+           hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
+    return merged, out
+
+
+def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
+    """Finalize an LLM-only plan: rank the LLM's chosen picks by its own
+    ``conviction`` (no ML multiplier) and use the LLM-supplied entry / target /
+    stop prices. Writes a ``picks_claude_llm_*`` JSON and records under
+    ``mode='claude_llm'``."""
+    from ..news.claude_llm_runner import DROP_SENTINEL, parse_llm_plan
+    from ..pricing import economics_from_llm_prices
+
+    plan_path = Path(plan_path)
+    scored = parse_llm_plan(plan_path)
+    if scored.empty:
+        raise RuntimeError(f"no picks parsed from {plan_path} — fill the Results table")
+
+    dropped = scored[scored["conviction"] == DROP_SENTINEL]
+    if not dropped.empty:
+        print(f"[claude-llm] DROP: excluding {len(dropped)} ticker(s): "
+              f"{', '.join(dropped['symbol'].tolist())}")
+    scored = scored[scored["conviction"] != DROP_SENTINEL].copy()
+    if scored.empty:
+        raise RuntimeError("all picks dropped")
+
+    # Every LLM pick must carry a full price set — without it there is no trade.
+    price_cols = ["entry_vnd", "target_vnd", "stop_vnd"]
+    bad = scored[scored[price_cols].isna().any(axis=1)]
+    if not bad.empty:
+        print(f"[claude-llm] WARNING: dropping {len(bad)} pick(s) missing "
+              f"entry/target/stop: {', '.join(bad['symbol'].tolist())}")
+    scored = scored[scored[price_cols].notna().all(axis=1)].copy()
+    if scored.empty:
+        raise RuntimeError("no picks with a complete entry/target/stop price set")
+
+    # Recover reference columns (close / atr / organ_name / instrument_type) from
+    # the universe sidecar so the picks JSON and economics carry them.
+    sidecar = plan_path.with_suffix(".candidates.parquet")
+    if sidecar.exists():
+        universe = pd.read_parquet(sidecar)
+        ref_cols = [c for c in ["symbol", "close", "atr_14", "rsi_14", "mom_20",
+                                "adv_vnd_20", "organ_name", "instrument_type"]
+                    if c in universe.columns]
+        merged = scored.merge(universe[ref_cols], on="symbol", how="left")
+    else:
+        merged = scored
+
+    merged = economics_from_llm_prices(merged)
+    merged = merged.sort_values("conviction", ascending=False).reset_index(drop=True)
+    merged["rank"] = merged.index + 1
+
+    # Recover run params / signature from the meta sidecar.
+    meta_path = plan_path.with_suffix(".meta.json")
+    meta = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+    exit_off = meta.get("exit_offset_days")
+    eff_hose = bool(meta.get("hose_only", False))
+    eff_etfs = bool(meta.get("include_etfs", True))
+    eff_excl = list(meta.get("exclude") or [])
+    sig = meta.get("run_signature") or run_signature(
+        mode="claude_llm", exit_offset_days=int(exit_off or 2),
+        hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
+
+    requested_n = meta.get("n_picks")
+    if requested_n and len(merged) > int(requested_n):
+        merged = merged.head(int(requested_n)).reset_index(drop=True)
+    n_below = int(merged["below_breakeven"].fillna(True).sum()) if "below_breakeven" in merged.columns else 0
+    today_ts = effective_today_for_trading()
+    today = today_ts.strftime("%Y-%m-%d")
+    out = reports_dir() / f"picks_claude_llm_{today}_{sig}{picks_suffix(merged)}.json"
+    payload = {
+        "as_of": today,
+        "mode": "claude_llm",
+        "method": "llm_only",
+        "exit_offset_days": exit_off,
+        "hose_only": eff_hose,
+        "include_etfs": eff_etfs,
+        "exclude": eff_excl,
+        "run_signature": sig,
+        "selection": "llm_pick",
+        "requested_picks": requested_n,
+        "n_picks": int(len(merged)),
+        "n_below_breakeven": n_below,
+        "plan_file": str(plan_path),
+        "picks": json.loads(merged.to_json(orient="records")),
+    }
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    from ..tracking import record
+    record(merged, mode="claude_llm", as_of=today_ts,
            exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out

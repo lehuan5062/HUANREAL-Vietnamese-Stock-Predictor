@@ -13,6 +13,17 @@ accumulated history, you run this prompt manually on a chosen past picks
 file. The output is targeted edits to the program (config knobs, prompt
 text), not nudges to individual scores.
 
+**Scope: ML / hybrid reports only — NOT LLM-only.** Both focuses below are
+ML-pipeline concepts: missed-winners regret diagnoses the ML model's skill and
+its gates, and entry-price calibration tunes the mechanical low head. The
+**LLM-only** Claude method (`picks_claude_llm_*` files, `mode: claude_llm`,
+`method: llm_only`) uses no ML model — there is no `pred_mean`, no
+`train-missed` variant, and no mechanical `entry_limit_price` to calibrate (the
+LLM sets prices itself). So this prompt does **not** apply to LLM-only reports:
+skip them in the eligibility scan, and if the user names one, say it's out of
+scope (there's nothing here to retrain or recalibrate) rather than inventing a
+diagnosis.
+
 ## Two stages
 
 There are two evaluation stages for any picks report. **Both can run
@@ -81,7 +92,9 @@ shouldn't have to compute eligibility in their head.
 ```
 .venv\Scripts\python.exe -c "import glob, json, os, pandas as pd; df = pd.read_parquet(r'cache\predictions.parquet')
 for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
-    d = json.load(open(p, encoding='utf-8')); rid = d['as_of'].replace('-','') + '_' + d['run_signature']; sub = df[df['run_id'] == rid]
+    d = json.load(open(p, encoding='utf-8'))
+    if d.get('method') == 'llm_only' or os.path.basename(p).startswith('picks_claude_llm_'): continue  # LLM-only: out of scope (no ML to retrain/recalibrate)
+    rid = d['as_of'].replace('-','') + '_' + d['run_signature']; sub = df[df['run_id'] == rid]
     var = d.get('model_variant', 'standard')
     if len(sub) == 0: print(os.path.basename(p), 'as_of=' + d['as_of'], 'variant=' + var, 'no ledger rows'); continue
     n = len(sub); t0 = int(sub['t0_evaluated'].sum()); ev = int(sub['evaluated'].sum())
@@ -90,7 +103,9 @@ for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
 
 This globs **all** report types: base (`picks_<date>_base_d2…`), claude
 (`picks_claude_…`), gemini (`picks_gemini_…`), AND the missed-winners variant
-(`…_base_d2_missed_…`, `model_variant: missed`). The missed variant appears
+(`…_base_d2_missed_…`, `model_variant: missed`). It **skips LLM-only reports**
+(`picks_claude_llm_*`, `method: llm_only`) — they're out of scope (see the note
+at the top: no ML model to retrain, no mechanical limit to recalibrate). The missed variant appears
 differently by mode: **base** writes a separate **standard + `_missed` pair**
 (treat them together), while **claude/gemini** fold it into a single **union
 report** (per-pick `also_missed` / `missed_only` flags). The mode/variant come
