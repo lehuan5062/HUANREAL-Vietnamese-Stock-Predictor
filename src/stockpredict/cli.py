@@ -343,6 +343,33 @@ def regret_cmd(window: int, n: int | None, signature: str | None) -> None:
     click.echo(f"\nreport -> {out}")
 
 
+@cli.command("compare-modes")
+@click.option("--window", type=int, default=90, show_default=True,
+              help="Look-back window in days to pool over.")
+@click.option("--date", "as_of", default=None,
+              help="YYYY-MM-DD: also show this single day's per-mode breakdown "
+                   "as context (still pools the verdict over the window).")
+@click.option("--modes", default=None,
+              help="Comma-separated subset to compare (e.g. base,claude,claude_llm). "
+                   "Default: every mode found in the ledger.")
+def compare_modes_cmd(window: int, as_of: str | None, modes: str | None) -> None:
+    """Head-to-head realized performance of the prediction methods (base /
+    hybrid / LLM-only / gemini), pooled over comparable runs — same day AND
+    same params (picks/horizon/hose-only/etfs/exclude). Advisory: tells you
+    which method to PREFER, not a knob to tune."""
+    from .analyze import mode_compare
+    mode_list = ([m.strip() for m in modes.split(",") if m.strip()]
+                 if modes else None)
+    result = mode_compare.compare_modes(window_days=window, as_of=as_of,
+                                       modes=mode_list)
+    md = mode_compare.format_report(result)
+    click.echo(md)
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    out = reports_dir() / f"mode_comparison_{today}.md"
+    out.write_text(md, encoding="utf-8")
+    click.echo(f"\nreport -> {out}")
+
+
 @cli.command("train-missed")
 @click.option("--upweight", type=float, default=3.0, show_default=True,
               help="Sample weight on realized top-N winner rows.")

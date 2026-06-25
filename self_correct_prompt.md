@@ -13,16 +13,21 @@ accumulated history, you run this prompt manually on a chosen past picks
 file. The output is targeted edits to the program (config knobs, prompt
 text), not nudges to individual scores.
 
-**Scope: ML / hybrid reports only — NOT LLM-only.** Both focuses below are
-ML-pipeline concepts: missed-winners regret diagnoses the ML model's skill and
-its gates, and entry-price calibration tunes the mechanical low head. The
-**LLM-only** Claude method (`picks_claude_llm_*` files, `mode: claude_llm`,
-`method: llm_only`) uses no ML model — there is no `pred_mean`, no
+**Scope: the two edit-driving focuses are ML / hybrid only — NOT LLM-only.**
+Both focuses below are ML-pipeline concepts: missed-winners regret diagnoses the
+ML model's skill and its gates, and entry-price calibration tunes the mechanical
+low head. The **LLM-only** Claude method (`picks_claude_llm_*` files, `mode:
+claude_llm`, `method: llm_only`) uses no ML model — there is no `pred_mean`, no
 `train-missed` variant, and no mechanical `entry_limit_price` to calibrate (the
-LLM sets prices itself). So this prompt does **not** apply to LLM-only reports:
-skip them in the eligibility scan, and if the user names one, say it's out of
-scope (there's nothing here to retrain or recalibrate) rather than inventing a
-diagnosis.
+LLM sets prices itself). So the **self-correction focuses do not apply** to
+LLM-only reports: skip them in the eligibility scan, and if the user names one
+*for self-correction*, say it's out of scope (nothing here to retrain or
+recalibrate) rather than inventing a diagnosis.
+
+**Exception — the cross-method comparison (Step 4c) DOES include LLM-only.**
+That step is read-only and advisory (it ranks which *method* has been winning,
+base vs hybrid vs LLM-only); it produces no edits, so the "no ML to tune"
+limitation doesn't block it.
 
 ## Two stages
 
@@ -392,6 +397,43 @@ loser-side check is the ONLY path that turns the gate on — don't skip it.
 (Before reaching for the hard gate, recall the soft entry penalty
 `entry_alpha_overbought_*` is already deepening these picks' entries; if they
 filled anyway and reversed, the penalty may also be too shallow.)
+
+## Step 4c — Cross-method comparison (optional, advisory)
+
+**When to run this**: only if the same day has picks from **two or more
+methods** (base / hybrid / LLM-only / gemini) that have since evaluated — e.g.
+the user ran `--mode base`, `--mode claude`, and `--mode claude --llm-only` on
+the same date with the same `--picks` / horizon / hose-only / etfs / exclude. If
+only one method ran per day, skip this step entirely.
+
+This answers a different question from the two focuses: **which prediction
+*method* has been picking better?** It is purely advisory — mode is a per-run
+user choice, so there is **no config knob to tune and no edit to propose** from
+it. Do not turn its output into a Step 6 edit; just surface the verdict to the
+user.
+
+A single day is far too noisy (often 1–3 picks per method), so the verdict pools
+over a window; the named day is shown only as context. Run:
+
+```
+.venv\Scripts\python.exe -m stockpredict.cli compare-modes --window 90 --date <as_of>
+```
+
+(`--date` is the report's `as_of`; drop it to skip the single-day context.) It
+restricts to **comparable cells** — same trading day AND same run parameters
+(the run signature minus its mode token, so `base_d2` / `claude_d2` /
+`claude_llm_d2` all match, but `claude_d2_HOSE` does not) — pools realized
+returns per method over the window, prints a head-to-head + an "unique vs
+shared" breakdown (how each method's *distinctive* picks did), and writes
+`reports/mode_comparison_<date>.md`.
+
+Read the verdict to the user in plain language: which method has the better
+`mean/day` and head-to-head win count over the window, and whether its edge
+comes from *distinctive* picks (high `unique mean`) or just from agreeing with
+the others. Flag explicitly when the sample is thin (few comparable days) so the
+user doesn't over-trust a noisy edge. **Do not recommend changing the default
+method off a handful of days** — note the trend and suggest re-checking as more
+picks evaluate.
 
 ## Step 5 — Diagnose (two focuses only)
 

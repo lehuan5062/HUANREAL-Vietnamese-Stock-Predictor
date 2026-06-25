@@ -71,6 +71,10 @@ method obvious at a glance; LLM-only picks are recorded in the ledger under
 
 # Missed-winners analysis: which realized top-N did the model not surface, and why
 .venv\Scripts\python -m stockpredict.cli regret --window 90
+
+# Head-to-head: which prediction METHOD picked better (base vs hybrid vs LLM-only),
+# pooled over comparable same-day same-param runs. Advisory — writes reports/mode_comparison_<date>.md
+.venv\Scripts\python -m stockpredict.cli compare-modes --window 90
 ```
 
 **Note**: `--mode claude` at the CLI emits the markdown research plan (the
@@ -817,7 +821,7 @@ into `reports/backtest_<date>/` with `summary.md` and `equity.png`.
 .venv\Scripts\python -m pytest -q
 ```
 
-164 tests, all use synthetic data — no network required. Coverage spans
+170 tests, all use synthetic data — no network required. Coverage spans
 features, pricing, the trading calendar, cache freshness + watermarks,
 the rate limiter, walk-forward backtest sanity, run-signature uniqueness,
 entry slippage, and per-dimension hit-rate aggregation.
