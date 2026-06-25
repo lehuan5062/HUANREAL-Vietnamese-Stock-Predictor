@@ -204,8 +204,15 @@ def _temporal_split(panel: pd.DataFrame, val_frac: float) -> tuple[pd.DataFrame,
     return panel[panel.index < cutoff], panel[panel.index >= cutoff]
 
 
-def train(panel: pd.DataFrame, seeds: Iterable[int] | None = None) -> TrainedModel:
-    """Fit an ensemble of LightGBM regressors on the mean ``target``."""
+def train(panel: pd.DataFrame, seeds: Iterable[int] | None = None,
+          weights: pd.Series | None = None) -> TrainedModel:
+    """Fit an ensemble of LightGBM regressors on the mean ``target``.
+
+    ``weights`` (optional, index-aligned to ``panel``) per-row sample weights for
+    the TRAIN split only — used by the missed-winners retrain variant to upweight
+    realized winners. The validation split stays unweighted so early stopping
+    reflects the true distribution. ``weights=None`` reproduces the standard fit
+    exactly."""
     if panel.empty:
         raise ValueError("empty training panel")
     cfg = load_config().model
@@ -214,18 +221,27 @@ def train(panel: pd.DataFrame, seeds: Iterable[int] | None = None) -> TrainedMod
     early_stop = int(cfg["early_stopping_rounds"])
     params = dict(cfg["params"])
 
+    if weights is not None:
+        # Carry weights through the split as a column so the temporal split aligns
+        # them positionally — the panel index has duplicate dates, so reindex
+        # can't be used. FEATURE_COLS excludes it, so it never reaches the model.
+        panel = panel.copy()
+        panel["__weight__"] = weights.to_numpy(dtype=np.float32)
     train_df, val_df = _temporal_split(panel, val_frac)
     X_tr = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     y_tr = train_df["target"].to_numpy(dtype=np.float32)
     X_val = val_df[FEATURE_COLS].to_numpy(dtype=np.float32)
     y_val = val_df["target"].to_numpy(dtype=np.float32)
+    w_tr = (None if weights is None
+            else train_df["__weight__"].to_numpy(dtype=np.float32))
 
     boosters: list[lgb.Booster] = []
     for seed in seeds:
         p = dict(params)
         p["seed"] = seed
         n_estimators = int(p.pop("n_estimators", 400))
-        dtrain = lgb.Dataset(X_tr, label=y_tr, feature_name=list(FEATURE_COLS))
+        dtrain = lgb.Dataset(X_tr, label=y_tr, weight=w_tr,
+                             feature_name=list(FEATURE_COLS))
         dval = lgb.Dataset(X_val, label=y_val, reference=dtrain,
                            feature_name=list(FEATURE_COLS))
         booster = lgb.train(
@@ -320,10 +336,24 @@ def latest_low_model_path() -> Path:
     return models_dir() / "low_latest.pkl"
 
 
+def latest_missed_model_path() -> Path:
+    """The missed-winners retrain variant — a SEPARATE mean head, parallel to
+    ``latest.pkl``, so the standard model is never overwritten by the experiment."""
+    return models_dir() / "latest_missed.pkl"
+
+
 def save_latest(model: TrainedModel) -> Path:
     p = latest_model_path()
     model.save(p)
     stamped = models_dir() / f"model_{dt.date.today().isoformat()}.pkl"
+    model.save(stamped)
+    return p
+
+
+def save_latest_missed(model: TrainedModel) -> Path:
+    p = latest_missed_model_path()
+    model.save(p)
+    stamped = models_dir() / f"model_missed_{dt.date.today().isoformat()}.pkl"
     model.save(stamped)
     return p
 

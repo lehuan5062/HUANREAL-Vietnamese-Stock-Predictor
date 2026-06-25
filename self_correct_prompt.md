@@ -27,11 +27,12 @@ elapsed since the picks were emitted:
   to elapse. Diagnoses focus narrowly on **entry calibration**: was the
   predicted dip too aggressive (limits unreachable, no fill) or too
   conservative (limits filled cheaply but only a tiny dip captured)?
-* **Stage 2 — Full self-correction (after T+2 closes)**. The original
-  flow. All rows have `evaluated=True` and `t0_evaluated=True`. You can
-  now diagnose **everything**: scoring, entry calibration, dimension-tag
-  patterns, news_score weighting, and how all of those interact with
-  realized return.
+* **Stage 2 — Full self-correction (after T+2 closes)**. All rows have
+  `evaluated=True` and `t0_evaluated=True`, so realized returns are known. This
+  unlocks **Focus 1 (missed winners)** — the realized top-N the model didn't
+  surface, and why (Step 4b) — in addition to **Focus 2 (entry-price misses)**.
+  Those are the ONLY two things this prompt diagnoses; it does not chase
+  news_score / dimension-tag patterns anymore.
 
 When you run this prompt, **first** check the ledger to see which stage
 the chosen picks report is eligible for, then proceed accordingly. Stage
@@ -285,14 +286,18 @@ Compare:
 - **(stages 1 & 2) Limit-fill calibration**: the pooled `limit_fill`
   block tells you the 90-day fill_rate and calibration gap. Compare
   this run's fill_rate to it.
-  - **The dip alpha is now conviction-coupled** (per `pred_low_alpha`),
-    so a single fill-rate target no longer applies — each pick targets
-    its OWN alpha (≈ its expected fill probability). **Group fill_rate
-    by conviction tier** (split on `below_breakeven`, or bucket
-    `pred_low_alpha`) before judging. A LOW fill rate on the deep-dip
-    (low-alpha) weak picks is BY DESIGN — they're meant to fill only at
-    a bargain — NOT miscalibration. Only the within-tier gap (filled
-    rate vs that tier's mean `pred_low_alpha`) signals a real problem.
+  - **The dip alpha is a DYNAMIC RANGE**, not one value: per-pick
+    `pred_low_alpha = entry_low_alpha (base) × conviction-multiplier ×
+    overbought-penalty`. So each pick targets its OWN alpha (≈ its expected
+    fill probability) and a single fill-rate target no longer applies.
+    **Group fill_rate along BOTH axes** that move the alpha: by conviction
+    tier (split on `below_breakeven` / bucket `pred_low_alpha`) AND by
+    overbought-ness (bucket `rsi_14`, e.g. < 60 vs 60–85). A LOW fill rate
+    on the deep-dip picks — whether deep because they're *weak* (conviction)
+    or because they're *overbought* (penalty) — is BY DESIGN, NOT
+    miscalibration. Only the within-bucket gap (filled rate vs that bucket's
+    mean `pred_low_alpha`) signals a real problem, and it tells you WHICH
+    component of the range to tune (base / conviction mults / overbought).
   - If a tier's fill_rate ≈ its `pred_low_alpha` AND this run is way off
     in the same direction (e.g. 0% fill on a high-alpha tier), this
     report's tickers were unusually directional (gap-ups), not a model
@@ -300,28 +305,48 @@ Compare:
   - If a tier's fill_rate is far from its `pred_low_alpha` across the
     board, the low head is mis-calibrated — propose retraining or
     adjusting the base/multiplier knobs below.
-- **(stage 2) news_score patterns**: did this report's news_score=+1
-  picks lose, while the 90-day pooled news_score=+1 stat is winning? →
-  likely a *this-report* problem (specific dimensions / sectors), not a
-  *scoring-model* problem.
-- **(stage 2) dimension tag patterns**: did this report's `[<some-tag>]`
-  dimension lose, *and* the pooled by-dimension table for that tag also
-  shows it losing (n ≥ 5)? → systemic weakness in how that dimension is
-  being researched or scored.
-- **(stage 2) entry_slippage cluster**: is `entry_slippage` systematically
-  positive (mean > 0) for this run? → the **close-anchored** entries
-  are unfillable; realized_return is fictional, and scoring tweaks
-  won't help — pricing tweaks (e.g. `pricing.stop_atr_mult` or the
-  entry rule) might. Note: in the new low-prediction regime, the user
-  is supposed to place the LIMIT entry, not buy at close. So
-  `entry_slippage` is mostly diagnostic for the legacy "buy at close"
-  comparison; `entry_limit_filled` is the truer fill measurement.
 
-## Step 5 — Diagnose
+This is **Focus 2 (entry-price misses)** — see Step 5. `entry_slippage` is a
+legacy close-anchored metric; `entry_limit_filled` / `fill_margin` are the
+truer measurements, so don't anchor findings on slippage.
 
-Write findings as a numbered list. **Every finding must drive at least
-one proposed edit in Step 6.** If a pattern doesn't suggest a concrete
-edit, skip it — don't write it down as an interesting observation.
+## Step 4b — Missed winners (Focus 1)
+
+This is the highest-value question: **which winners did we miss, and why?**
+Run the analysis:
+
+```
+.venv\Scripts\python.exe -m stockpredict.cli regret --window 90
+```
+
+It prints the realized top-N liquid tickers (bought T-2, sold today) the model
+did NOT surface, with the miss-rate and regret, and writes a `reports/regret_*.md`
+table. The liquidity universe matches live selection, so these are winners the
+model *could* have picked.
+
+For the worst missed winners, investigate **why** each was missed — load its
+T-2 features (from that day's `.candidates.parquet` sidecar, or rebuild the
+panel) and check:
+- Was it **excluded by a gate**? (`overbought_rsi_max` dropped it as overbought;
+  `corp_action_lookback` flagged a band-break; ceiling-lock; liquidity.) If a
+  gate is systematically discarding winners, that's your edit.
+- Was it **scored low** by the model (low `pred_mean`)? Then it's a model-skill
+  gap — note it; the lever is the `train-missed` variant (below), not a knob.
+- If both standard and `_missed` variant reports exist for the window, **contrast
+  them** (`regret --signature base_d2` vs `base_d2_missed`): did the variant
+  catch more winners without hurting the entry/fill side?
+
+Propose ONE improvement: a `config.yaml` knob (e.g. relax `overbought_rsi_max`)
+or a `claude_prompt.md` prose edit. If the miss is pure model skill, the
+proposal is to run `train-missed` + `backtest-ab` and promote the variant only
+if its win rate holds.
+
+## Step 5 — Diagnose (two focuses only)
+
+Diagnose **exactly two things**, nothing else: **(1) missed winners** (Step 4b)
+and **(2) entry-price misses** (the fill calibration in Step 4). Write findings
+as a numbered list. **Every finding must drive at least one proposed edit in
+Step 6.** If a pattern doesn't suggest a concrete edit, skip it.
 
 **Evidence threshold**: each finding must cite ≥3 same-direction misses
 on this report, **or** the report's pattern echoes an n≥5 pattern in
@@ -343,19 +368,15 @@ For each finding, name the failure mode plainly. Stage-1 examples:
   per pick). The low head is too conservative on dips; lower
   `pricing.entry_low_alpha` (or retrain at lower alpha)."
 
-Stage-2 examples (in addition to all stage-1 examples):
+Missed-winner examples (Focus 1):
 
-- "All 4 picks tagged `[earnings]` lost (mean −1.8%); pooled `[earnings]`
-  hit-rate is 45% (n=18). Earnings is being weighted higher than its
-  historical predictiveness justifies."
-- "3 of 5 picks had `entry_slippage > 0` AND `entry_limit_filled=True`.
-  The limit fill saved us from the slippage trap, but only because
-  the limit happened to be below the gap-up. Diagnosis: ML scoring is
-  fine; entry_limit_pct chose well; no edit needed."
-- "All `+1` scores were on real-estate names; all 3 lost. Real-estate
-  research relied solely on `[sector-flow]` without checking
-  `[regulatory]` or `[capital-raise]`. Coverage gap, not a scoring
-  miscalibration."
+- "6 of the last 20 realized top-5 winners were missed; 4 of the 6 had RSI > 80
+  at T-2 and were dropped by the `overbought_rsi_max` gate, then ran another
+  +6% on average. The gate is too tight for the win side — propose raising
+  `overbought_rsi_max` from 75 to 82 (or rely on the soft entry penalty alone)."
+- "5 missed winners all scored low `pred_mean` at T-2 (bottom tercile) — the
+  model genuinely didn't see them; not a gate. Propose `train-missed` +
+  `backtest-ab`; promote the `_missed` variant only if win rate holds."
 
 Skip categories where the evidence isn't there. Empty diagnosis is a valid
 outcome — say "no systemic pattern found" and stop, don't manufacture one.
@@ -419,9 +440,16 @@ filename identifies the report and the ledger holds the data. Structure:
      the pick-tilt is too strong/weak, tighten that instruction (e.g.
      demand a confidence threshold, or tell it to lean less on the index
      for counter-trend names). Don't add a config knob or model for it.
-2. `config.yaml` — for tunable knobs:
-   - `modes.claude.news_weight` (current 0.05) — raise / lower if
-     news_score is consistently mis-weighted relative to ML.
+2. `config.yaml` — for tunable knobs (only the two-focus-relevant ones):
+   - **`pricing.overbought_rsi_max` (current 0 = off) — the overbought hard
+     gate.** A Focus-1 lever: if missed winners are being dropped as overbought
+     (RSI just above the cap, then they ran), raise it or set 0; if losers are
+     bought at parabolic tops, lower it (e.g. 80). Paired soft levers:
+     `pricing.entry_alpha_overbought_start` / `_full` / `_mult` deepen the entry
+     dip for overbought names (so they only fill on a pullback) without excluding
+     them — prefer tuning these over the hard gate when the win side is hurt.
+     These same penalty knobs are ALSO an entry-calibration (Focus-2) lever —
+     see the `entry_low_alpha` family below for the fill-rate angle.
    - `pricing.stop_atr_mult` (current 1.5), `pricing.target_atr_mult`
      (current 2.0) — the stop/take-profit distances in ATR multiples. The
      take-profit is `entry + target_atr_mult × ATR`, so `rr_ratio ≈
@@ -455,13 +483,24 @@ filename identifies the report and the ledger holds the data. Structure:
        board); lower it if `fill_margin` on filled rows is consistently
        large-positive (filling with slack — money on the table).
      * `pricing.entry_alpha_weak_mult` (0.6) / `entry_alpha_strong_mult`
-       (1.25) / `entry_alpha_strong_edge` (3.0) — the COUPLING shape.
-       Only touch these if the miscalibration is tier-specific: e.g. weak
-       picks fill far MORE than their (deep) alpha would predict → the
-       weak side isn't deep enough, lower `weak_mult`. Keep `strong_mult`
-       modest (chasing fills on strong picks is a known failure mode).
+       (1.25) / `entry_alpha_strong_edge` (3.0) — the CONVICTION (pick-
+       strength) shape. Only touch these if the miscalibration is
+       conviction-tier-specific: e.g. weak picks fill far MORE than their
+       (deep) alpha would predict → the weak side isn't deep enough, lower
+       `weak_mult`. Keep `strong_mult` modest (chasing fills on strong picks
+       is a known failure mode).
+     * `pricing.entry_alpha_overbought_start` (60) / `_full` (85) / `_mult`
+       (0.5) — the OVERBOUGHT shape. The same alpha range, but deepened by
+       RSI: an overbought pick's entry is multiplied down (only fills on a
+       pullback). This is ALSO an entry-calibration lever — if the
+       overbought RSI bucket fills far LESS than its `pred_low_alpha` would
+       predict AND those would-be entries were actually good (the names rose),
+       the penalty is too aggressive → raise `_mult` toward 1.0 (or `_start`).
+       If overbought picks fill and then reverse, the penalty isn't deep
+       enough → lower `_mult`. (`_mult: 1.0` disables the overbought axis.)
      * `pricing.entry_alpha_couple_conviction` — set false to revert to a
-       single flat base alpha for every pick.
+       single flat base alpha for every pick (disables BOTH the conviction
+       and overbought axes of the range).
      All signals must anchor on `entry_limit_price` vs `t0_low`, never on
      the close, and must be judged WITHIN a conviction tier (a deep-dip
      weak pick failing to fill is by design). This is the primary knob
@@ -541,11 +580,20 @@ dry pass to confirm nothing broke:
 
 Don't run it for them — they may want to inspect diffs first.
 
-If the user changed `pricing.entry_low_alpha`, also remind them they'll
-need to **retrain the low head** before the new alpha takes effect:
+If the user changed `pricing.entry_low_alpha` (or any `entry_alpha_*` knob),
+remind them they'll need to **retrain the low head** before it takes effect:
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli train
+```
+
+If the Focus-1 finding was a model-skill gap (winners scored low, not
+gate-excluded), the proposal is the missed-winners variant — train it and A/B
+it, and promote `latest_missed.pkl` only if win rate holds:
+
+```
+.venv\Scripts\python.exe -m stockpredict.cli train-missed
+.venv\Scripts\python.exe -m stockpredict.cli backtest-ab
 ```
 
 Remind the user: one report ≠ a backtest — a knob tweak that helps

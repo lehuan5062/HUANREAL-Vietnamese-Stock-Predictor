@@ -52,6 +52,14 @@ emergent, not a fixed checklist), and the ACBS fee model.
 .venv\Scripts\python -m stockpredict.cli evaluate
 .venv\Scripts\python -m stockpredict.cli track --limit 20
 .venv\Scripts\python -m stockpredict.cli backtest --start 2022-01-01
+
+# Missed-winners: which realized top-N did the model not surface, and why
+.venv\Scripts\python -m stockpredict.cli regret --window 90
+# Train + A/B the "missed-winners" variant (upweights realized winners),
+# then run with it (writes a distinguishable _missed report)
+.venv\Scripts\python -m stockpredict.cli train-missed
+.venv\Scripts\python -m stockpredict.cli backtest-ab          # standard vs variant win rate
+.venv\Scripts\python -m stockpredict.cli run --variant missed --mode base
 ```
 
 **Note**: `--mode claude` at the CLI emits the markdown research plan (the
@@ -68,6 +76,7 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 | `--include-etfs` | Include HOSE ETFs (e.g. `E1VFVN30`, `FUEVFVND`) in the pickable universe. Off by default — ETFs are classified as a separate security type and excluded unless this is set. | `False` |
 | `--mode {base,claude,gemini}` | which pipeline | `base` |
 | `--skip-train` | reuse cached `models/latest.pkl` instead of retraining | off |
+| `--variant {standard,missed}` | Which mean head to predict with. `missed` uses the missed-winners variant (`models/latest_missed.pkl`, built by `train-missed`); its picks get a distinguishable `_missed` report so it's never confused with the standard model. base mode only. | `standard` |
 
 ## Universe coverage
 
@@ -714,12 +723,20 @@ For an **active** loop that mutates the program based on a chosen report,
 use [`self_correct_prompt.md`](self_correct_prompt.md). Open Claude Code
 (or Cowork) in your clone of the repo, paste the file's contents, and supply a
 `reports\picks_claude_<date>_<sig>.json` whose target date has fully
-elapsed. Claude Code cross-references the picks with the ledger's realized
-returns, diagnoses systematic errors (≥3 on-report or ≥5 in the pooled
-ledger), and proposes narrowly-scoped edits to `claude_prompt.md` and
-`config.yaml`. Every diff is shown and applied only after explicit
-per-file approval — nothing is mutated silently. Output lands at
-`reports\self_correction_<date>_<sig>.md`.
+elapsed. It focuses on exactly **two questions** and proposes one
+narrowly-scoped, approval-gated edit per finding:
+
+1. **Missed winners** — `regret` lists the realized top-N liquid tickers (bought
+   T-2, sold today) the model didn't surface, and the loop investigates *why*
+   (a gate dropped it — e.g. `overbought_rsi_max` — or the model scored it low).
+   The lever is a config knob, or the `train-missed` → `backtest-ab` variant
+   (promote it only if its win rate holds).
+2. **Entry-price misses** — the limit-fill calibration (`entry_limit_filled` /
+   `fill_margin`), now read per conviction tier (`pred_low_alpha`), since a deep
+   weak-pick dip not filling is by design.
+
+Every diff is shown and applied only after explicit per-file approval — nothing
+is mutated silently. Output lands at `reports\self_correction_<date>_<sig>.md`.
 
 This is intentionally Claude-Code-only: the work needs `Read` + `Edit` on
 local files, which the prompt-only Gemini path can't do.
@@ -814,6 +831,15 @@ Key knobs:
   exact-N "always return N" rule can't force a bad trade). The band is
   multipliers of the base, so it rescales if you retune `entry_low_alpha`. Set
   `entry_alpha_couple_conviction: false` to use a single flat α for every pick.
+  `pricing.entry_alpha_overbought_start` (60) / `_full` (85) / `_mult` (0.5)
+  add a **soft overbought penalty**: the more overbought a pick (RSI), the lower
+  its α → deeper dip → it only fills on a real pullback (`_mult: 1.0` disables).
+- `pricing.overbought_rsi_max: 0` — **overbought hard gate**. Drop any candidate
+  whose `rsi_14` exceeds this level (an exhaustion blow-off run too far tends to
+  reverse, and RSI>80 names historically win far less often). `0` disables.
+  Distinct from the liquidity volume-spike defense (`min_adv_active_days`), which
+  guards tradability, not exhaustion. Pairs with the soft penalty above: the gate
+  drops the worst, the penalty makes the rest only fillable at a discount.
 - `pricing.ceiling_limits` / `ceiling_tol` — names locked limit-up (closed at
   the daily price-band ceiling) are excluded from the pickable universe, since a
   limit-buy can't fill against an all-buyers queue.

@@ -31,6 +31,22 @@ def has_enough_history(df: pd.DataFrame) -> bool:
     return len(df) >= cfg["min_history_days"]
 
 
+def overbought_mask(df: pd.DataFrame) -> pd.Series:
+    """Boolean Series aligned to df.index: True where the row is NOT overbought.
+
+    Excludes candidates whose ``rsi_14`` exceeds ``pricing.overbought_rsi_max``.
+    An overbought blow-off (price run too far) tends to reverse, so buying the
+    top is a poor T+2 entry — historically RSI>80 names win far less often. The
+    knob ``0`` (or a missing ``rsi_14`` column) disables the gate (all True).
+    This is the exhaustion guard; the liquidity ``min_adv_active_days`` filter is
+    a separate volume-spike/tradability guard."""
+    level = float(load_config().pricing.get("overbought_rsi_max", 0) or 0)
+    if level <= 0 or "rsi_14" not in df.columns:
+        return pd.Series(True, index=df.index)
+    overbought = df["rsi_14"].astype(float) > level
+    return ~overbought.fillna(False)
+
+
 @lru_cache(maxsize=1)
 def _ceiling_params() -> tuple[dict, float]:
     cfg = load_config().pricing

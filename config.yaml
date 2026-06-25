@@ -147,6 +147,14 @@ pricing:
   entry_alpha_strong_edge: 3.0    # edge_ratio that reaches strong_mult
   entry_alpha_hard_min: 0.05      # absolute clamp on the per-pick alpha
   entry_alpha_hard_max: 0.75
+  # Overbought ALSO hardens the dynamic entry (soft complement to the hard RSI
+  # gate below): the more overbought a surviving pick, the lower its alpha ->
+  # deeper dip -> only fills on a real pullback. Multiplies the conviction alpha.
+  # Ramp: no penalty below `start`, linear down to `mult` at/above `full`.
+  # Set mult=1.0 to disable. Only active when entry_alpha_couple_conviction.
+  entry_alpha_overbought_start: 60   # RSI where the penalty begins
+  entry_alpha_overbought_full: 85    # RSI where the penalty is fully applied
+  entry_alpha_overbought_mult: 0.5   # alpha multiplier at/above `full`
   # Exclude names locked limit-up: a stock that closed at the daily ceiling
   # opens the next session with a buy queue and no sellers, so a limit-buy
   # can't fill (you "can't buy it for days"). Per-exchange daily price-band
@@ -154,6 +162,12 @@ pricing:
   # its high AND the 1-day return is within `ceiling_tol` of the band (the
   # tolerance absorbs tick rounding, which shaves the realized ceiling gain a
   # bit below the nominal band).
+  # Overbought hard gate (RSI-only). Drop any candidate whose rsi_14 exceeds
+  # this level before ranking — an overbought blow-off (run too far) tends to
+  # reverse, and historically RSI>80 names win far less often. This is distinct
+  # from the liquidity volume-spike defense (min_adv_active_days), which guards
+  # tradability, not exhaustion. 0 disables the gate.
+  overbought_rsi_max: 0
   ceiling_limits: {HSX: 0.07, HNX: 0.10, UPCOM: 0.15}
   ceiling_tol: 0.015
   # Corporate-action guard. Vietnamese exchanges cap a single day's close-to-close

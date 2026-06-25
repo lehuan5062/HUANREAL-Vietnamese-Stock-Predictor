@@ -317,6 +317,96 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
     click.echo(f"report -> {out}")
 
 
+# ---------------------------- missed-winners -------------------------------
+
+
+@cli.command("regret")
+@click.option("--window", type=int, default=90, show_default=True,
+              help="Look-back window in days.")
+@click.option("--picks", "-n", "n", type=int, default=None,
+              help="Top-N realized winners per day (default: pricing.default_picks).")
+@click.option("--signature", default=None,
+              help="Restrict to one run signature (e.g. base_d2).")
+def regret_cmd(window: int, n: int | None, signature: str | None) -> None:
+    """Report the realized top-N winners the model MISSED over a window."""
+    from .analyze import regret as regret_mod
+    from .config import load_config, reports_dir
+    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
+    summary = regret_mod.aggregate_regret(window_days=window, n=nn,
+                                          signature=signature)
+    click.echo(json.dumps(summary, indent=2, default=str))
+    md = regret_mod.regret_markdown(window_days=window, n=nn, signature=signature)
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    suffix = f"_{signature}" if signature else ""
+    out = reports_dir() / f"regret_{today}{suffix}.md"
+    out.write_text(md, encoding="utf-8")
+    click.echo(f"\nreport -> {out}")
+
+
+@cli.command("train-missed")
+@click.option("--upweight", type=float, default=3.0, show_default=True,
+              help="Sample weight on realized top-N winner rows.")
+@click.option("--picks", "-n", "n", type=int, default=None,
+              help="Top-N winners per day to upweight (default: pricing.default_picks).")
+def train_missed_cmd(upweight: float, n: int | None) -> None:
+    """Train the missed-winners VARIANT mean head (upweights realized winners).
+
+    Saves to ``models/latest_missed.pkl`` — the standard ``latest.pkl`` is left
+    untouched. Use with ``run --variant missed`` and validate via ``backtest-ab``
+    before trusting it (upweighting the tail can LOWER win rate)."""
+    from .analyze.regret import missed_winner_weights
+    from .config import load_config
+    from .dataset import build_panel
+    from .model.train import save_latest_missed, train
+
+    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
+    click.echo("building panel...")
+    panel = build_panel(require_target=False)
+    panel_mean = panel.dropna(subset=["target"])
+    if panel_mean.empty:
+        click.echo("no training rows. aborting.", err=True)
+        sys.exit(1)
+    weights = missed_winner_weights(panel_mean, n=nn, upweight=upweight)
+    n_up = int((weights > 1.0).sum())
+    click.echo(f"  upweighting {n_up:,} winner rows (x{upweight}) of "
+               f"{len(panel_mean):,} total")
+    model = train(panel_mean, weights=weights)
+    path = save_latest_missed(model)
+    click.echo(f"  saved variant -> {path}")
+
+
+@cli.command("backtest-ab")
+@click.option("--start", default=None)
+@click.option("--end", default=None)
+@click.option("--top", type=int, default=None)
+@click.option("--upweight", type=float, default=3.0, show_default=True)
+@click.option("--picks", "-n", "n", type=int, default=None)
+def backtest_ab_cmd(start, end, top, upweight, n) -> None:
+    """A/B the standard model vs the missed-winners variant on win rate.
+
+    Only promote the variant (keep ``latest_missed.pkl`` for live use) if its
+    hit_rate is >= the standard model's."""
+    from .analyze.regret import missed_winner_weights
+    from .backtest.walk_forward import run
+    from .config import load_config
+
+    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
+    click.echo("backtest A: standard...")
+    a = run(start=start, end=end, top_k=top).summary
+    click.echo("backtest B: missed-winners variant...")
+    b = run(start=start, end=end, top_k=top,
+            weights_fn=lambda p: missed_winner_weights(p, n=nn, upweight=upweight)).summary
+    keys = ["n_trades", "hit_rate", "hit_rate_net", "mean_return", "mean_return_net"]
+    click.echo(f"\n{'metric':<18}{'standard':>14}{'missed':>14}")
+    for k in keys:
+        av, bv = a.get(k), b.get(k)
+        fmt = (lambda v: f"{v:.4f}" if isinstance(v, float) else str(v))
+        click.echo(f"{k:<18}{fmt(av):>14}{fmt(bv):>14}")
+    better = (b.get("hit_rate", 0) or 0) >= (a.get("hit_rate", 0) or 0)
+    click.echo(f"\n==> variant win_rate {'>=' if better else '<'} standard "
+               f"-> {'PROMOTE candidate' if better else 'DO NOT promote'}")
+
+
 # ---------------------------- predict --------------------------------------
 
 
@@ -450,12 +540,18 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
                    "(slow, rate-limited; use only for backfill).")
 @click.option("--skip-train", is_flag=True,
               help="Use the existing models/latest.pkl instead of retraining.")
+@click.option("--variant", type=click.Choice(["standard", "missed"]),
+              default="standard", show_default=True,
+              help="Which mean head to predict with. 'missed' uses the "
+                   "missed-winners variant (models/latest_missed.pkl, built by "
+                   "train-missed); its picks get a distinguishable _missed report. "
+                   "base mode only.")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
-            skip_train: bool, workers: int) -> None:
+            skip_train: bool, variant: str, workers: int) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
@@ -480,6 +576,14 @@ def run_cmd(mode: str, n_picks: int | None,
     days = int(load_config().target["exit_offset_days"])
     requested_n = int(n_picks) if n_picks else int(
         load_config().pricing.get("default_picks", 5))
+    if variant == "missed":
+        if mode != "base":
+            click.echo("ERROR: --variant missed is base-mode only.", err=True)
+            sys.exit(2)
+        # Predict with the pre-built variant; never overwrite the standard model.
+        skip_train = True
+        click.echo("[note] --variant missed: using models/latest_missed.pkl "
+                   "(run train-missed first); standard train skipped.")
     # Normalize --exclude: split each value on commas so BAT-style single
     # comma-separated input works alongside the repeatable form, uppercase,
     # dedupe, sort for stable signature ordering.
@@ -691,7 +795,7 @@ def run_cmd(mode: str, n_picks: int | None,
         picks, out = base.run(exit_offset_days=days, n_picks=requested_n,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
-                              exclude=exclude_list)
+                              exclude=exclude_list, variant=variant)
         click.echo("")
         click.echo(_format_picks(picks))
         _print_pick_warnings(picks, requested_n)

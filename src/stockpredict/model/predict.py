@@ -16,12 +16,14 @@ import pandas as pd
 from ..config import load_config
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
-from ..filters import ceiling_lock_mask, corporate_action_mask, liquidity_mask
+from ..filters import (ceiling_lock_mask, corporate_action_mask, liquidity_mask,
+                       overbought_mask)
 from ..pricing import add_price_suggestions
 from .train import (
     RollingEmpiricalQuantileModel,
     TrainedModel,
     latest_low_model_path,
+    latest_missed_model_path,
     latest_model_path,
 )
 
@@ -57,6 +59,22 @@ def conviction_to_alpha(pred_mean: pd.Series, base_alpha: float, *,
     alpha = pd.Series(np.interp(edge.to_numpy(), xp, fp), index=pred_mean.index)
     alpha = alpha.where(edge.notna(), base_alpha)
     return alpha.clip(hard_min, hard_max)
+
+
+def overbought_alpha_penalty(rsi: pd.Series, *, start: float, full: float,
+                             mult: float) -> pd.Series:
+    """Per-row multiplier (≤ 1.0) that DEEPENS the entry dip the more overbought
+    a pick is: 1.0 below ``start`` RSI, ramping linearly down to ``mult`` at/above
+    ``full``. Multiplied into the conviction alpha so an overbought name only
+    fills on a real pullback. NaN RSI → 1.0 (no penalty); ``mult``=1.0 disables;
+    a degenerate ``full<=start`` collapses to a step at ``start``."""
+    r = rsi.astype(float)
+    if full <= start:
+        pen = pd.Series(np.where(r > start, mult, 1.0), index=rsi.index)
+    else:
+        frac = ((r - start) / (full - start)).clip(0.0, 1.0)
+        pen = 1.0 - frac * (1.0 - mult)
+    return pen.where(r.notna(), 1.0)
 
 
 def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -98,7 +116,8 @@ def rank_today(model: TrainedModel | None = None,
                panel: pd.DataFrame | None = None,
                exit_offset_days: int | None = None,
                symbols: list[str] | None = None,
-               low_model: RollingEmpiricalQuantileModel | None = None) -> pd.DataFrame:
+               low_model: RollingEmpiricalQuantileModel | None = None,
+               model_variant: str = "standard") -> pd.DataFrame:
     """Compute predicted return for every eligible symbol on the given date,
     apply the liquidity / tradable / ceiling / glitch filters, and return
     EXACTLY ``n_picks`` picks — the top ``n_picks`` rows by ``pred_mean``,
@@ -113,7 +132,10 @@ def rank_today(model: TrainedModel | None = None,
     --hose-only), fewer rows are returned — the caller surfaces the shortfall.
     """
     if model is None:
-        model = TrainedModel.load(latest_model_path())
+        if str(model_variant) == "missed":
+            model = TrainedModel.load(latest_missed_model_path())
+        else:
+            model = TrainedModel.load(latest_model_path())
     if low_model is None:
         low_model = _try_load_low_model()
     if panel is None:
@@ -162,6 +184,13 @@ def rank_today(model: TrainedModel | None = None,
     if snap.empty:
         return snap
 
+    # Drop overbought blow-offs (RSI above the configured cap): a name that's
+    # run too far tends to reverse, so buying the top is a poor T+2 entry.
+    # Off by default (overbought_rsi_max=0); reads a clean RSI post corp-action.
+    snap = snap[overbought_mask(snap)].copy()
+    if snap.empty:
+        return snap
+
     preds = model.predict(snap)
     snap = snap.assign(**preds)
     # Sanity guard against unadjusted split / corporate-action artifacts: the
@@ -198,6 +227,18 @@ def rank_today(model: TrainedModel | None = None,
                 hard_min=float(pcfg.get("entry_alpha_hard_min", 0.05)),
                 hard_max=float(pcfg.get("entry_alpha_hard_max", 0.75)),
             )
+            # Overbought also hardens the entry: the more overbought a surviving
+            # pick, the deeper its dip (lower alpha), so it only fills on a real
+            # pullback. mult=1.0 disables. Re-clip after the penalty.
+            ob_mult = float(pcfg.get("entry_alpha_overbought_mult", 1.0))
+            if ob_mult < 1.0 and "rsi_14" in snap.columns:
+                alphas = (alphas * overbought_alpha_penalty(
+                    snap["rsi_14"],
+                    start=float(pcfg.get("entry_alpha_overbought_start", 60.0)),
+                    full=float(pcfg.get("entry_alpha_overbought_full", 85.0)),
+                    mult=ob_mult,
+                )).clip(float(pcfg.get("entry_alpha_hard_min", 0.05)),
+                        float(pcfg.get("entry_alpha_hard_max", 0.75)))
             snap["pred_low"] = low_model.predict(
                 snap, history=panel, alphas=alphas.to_numpy())
             snap["pred_low_alpha"] = alphas.to_numpy()

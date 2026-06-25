@@ -629,3 +629,70 @@ def test_conviction_to_alpha_rescales_with_base():
 def test_conviction_to_alpha_nan_is_base():
     a = conviction_to_alpha(pd.Series([np.nan]), 0.40, **_MAP)
     assert np.isclose(a.iloc[0], 0.40)
+
+
+# ---------------------------------------------------------------------------
+# 1e. Overbought hardens the entry (soft penalty on the conviction alpha)
+# ---------------------------------------------------------------------------
+
+def test_overbought_alpha_penalty_ramp():
+    from stockpredict.model.predict import overbought_alpha_penalty
+    r = pd.Series([50.0, 60.0, 72.5, 85.0, 95.0, np.nan])
+    p = overbought_alpha_penalty(r, start=60.0, full=85.0, mult=0.5)
+    # 1.0 below start; linear to mult at full; flat past full; NaN -> 1.0
+    assert np.allclose(p.to_numpy(), [1.0, 1.0, 0.75, 0.5, 0.5, 1.0])
+
+
+def test_overbought_alpha_penalty_disabled_when_mult_one():
+    from stockpredict.model.predict import overbought_alpha_penalty
+    r = pd.Series([95.0, 50.0])
+    p = overbought_alpha_penalty(r, start=60.0, full=85.0, mult=1.0)
+    assert np.allclose(p.to_numpy(), [1.0, 1.0])   # no penalty anywhere
+
+
+def test_overbought_penalty_deepens_entry_for_same_conviction(monkeypatch):
+    """Two picks with identical pred_mean but different RSI: the more overbought
+    one gets a lower per-row alpha and therefore a deeper dip."""
+    from stockpredict.model import predict as predict_mod
+    idx = pd.date_range("2026-01-01", periods=80, freq="B")
+    dips = list(np.linspace(-0.08, 0.0, 79))
+    hist = pd.concat([
+        pd.DataFrame({"symbol": "COOL", "target_low": dips + [np.nan]}, index=idx),
+        pd.DataFrame({"symbol": "HOT", "target_low": dips + [np.nan]}, index=idx),
+    ])
+    hist.index.name = "date"
+    snap = hist.groupby("symbol").tail(1).copy()
+    snap["pred_mean"] = 0.01                       # identical conviction
+    snap["rsi_14"] = snap["symbol"].map({"COOL": 50.0, "HOT": 84.0})
+    snap["pred_std"] = 0.001
+    snap["close"] = 10.0                           # for add_price_suggestions
+    snap["atr_14"] = 0.3
+
+    # Stub the model loads + pricing config so rank_today exercises the wiring.
+    monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(predict_mod, "build_panel", lambda **kw: hist.assign(pred_mean=0.0))
+    monkeypatch.setattr(predict_mod, "latest_cross_section", lambda panel, on=None: snap)
+    monkeypatch.setattr(predict_mod, "liquidity_mask", lambda df: pd.Series(True, index=df.index))
+    monkeypatch.setattr(predict_mod, "ceiling_lock_mask", lambda df: pd.Series(True, index=df.index))
+    monkeypatch.setattr(predict_mod, "corporate_action_mask", lambda df: pd.Series(True, index=df.index))
+    monkeypatch.setattr(predict_mod, "overbought_mask", lambda df: pd.Series(True, index=df.index))
+
+    class _Mean:
+        def predict(self, s):
+            return {"pred_mean": s["pred_mean"].to_numpy(), "pred_std": s["pred_std"].to_numpy()}
+
+    class _Low:
+        alpha = 0.40
+        def predict(self, X, history=None, alphas=None):
+            from stockpredict.model.train import RollingEmpiricalQuantileModel
+            m = RollingEmpiricalQuantileModel(
+                alpha=0.40, target_tail_obs=5, lookback=120, min_obs=5,
+                global_quantile=-0.03, train_end=pd.Timestamp("2026-01-01"),
+                train_rows=100)
+            return m.predict(X, history=history, alphas=alphas)
+
+    out = predict_mod.rank_today(model=_Mean(), low_model=_Low(), n_picks=2)
+    by_alpha = dict(zip(out["symbol"], out["pred_low_alpha"]))
+    by_low = dict(zip(out["symbol"], out["pred_low"]))
+    assert by_alpha["HOT"] < by_alpha["COOL"]      # overbought -> lower alpha
+    assert by_low["HOT"] <= by_low["COOL"]         # -> deeper (more negative) dip

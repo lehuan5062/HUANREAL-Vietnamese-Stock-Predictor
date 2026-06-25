@@ -47,7 +47,11 @@ def _max_drawdown(equity: pd.Series) -> float:
 def run(panel: pd.DataFrame | None = None,
         start: str | None = None,
         end: str | None = None,
-        top_k: int | None = None) -> BacktestResult:
+        top_k: int | None = None,
+        weights_fn=None) -> BacktestResult:
+    """Walk-forward backtest. ``weights_fn`` (optional) maps a train panel to
+    per-row sample weights, so the missed-winners retrain variant can be A/B'd
+    against the standard fit; ``None`` = standard training."""
     cfg = load_config()
     bt = cfg.backtest
     start = pd.to_datetime(start or bt["start"])
@@ -81,7 +85,8 @@ def run(panel: pd.DataFrame | None = None,
         if oos_panel.empty:
             continue
 
-        model = train(train_panel)
+        model = train(train_panel,
+                      weights=(weights_fn(train_panel) if weights_fn else None))
 
         # apply the liquidity filter on each trading day, score, take top_k
         for date, day_slice in oos_panel.groupby(level=0):

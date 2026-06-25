@@ -381,7 +381,8 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
 def run_signature(mode: str, exit_offset_days: int,
                   hose_only: bool = False,
                   include_etfs: bool = True,
-                  exclude: Iterable[str] | None = None) -> str:
+                  exclude: Iterable[str] | None = None,
+                  variant: str = "standard") -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
@@ -407,6 +408,10 @@ def run_signature(mode: str, exit_offset_days: int,
         excl_sorted = sorted({str(s).upper() for s in exclude})
         if excl_sorted:
             parts.append("x" + "-".join(excl_sorted))
+    # The missed-winners retrain variant tags the signature so its picks file
+    # and ledger run_id stay distinguishable from the standard model's.
+    if variant and str(variant) != "standard":
+        parts.append(str(variant))
     return "_".join(parts)
 
 
