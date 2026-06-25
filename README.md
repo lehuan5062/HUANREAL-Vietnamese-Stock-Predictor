@@ -310,7 +310,7 @@ basis. You size the position yourself:
 | column | meaning |
 | ------ | ------- |
 | `close_vnd` | today's close, for reference |
-| `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile (`pricing.entry_low_alpha`) of recent next-day-low returns (clipped never above the close). Falls back to the close when no low head is present. |
+| `entry_vnd` | **limit-buy price to place** — the predicted next-day dip, `close × (1 + pred_low)` where `pred_low` is the per-ticker α-quantile of recent next-day-low returns (clipped never above the close). The α is **conviction-coupled** (`pred_low_alpha`): a strong pick gets a shallow dip (fills easily), a weak / below-breakeven pick gets a deep dip (fills only at a bargain). Falls back to the close when no low head is present. |
 | `entry_limit_pct` | the predicted dip vs close (≤ 0) baked into `entry_vnd` |
 | `target_vnd` | take-profit to sell at on the exit day T+2 — **ATR-scaled**: `entry + target_atr_mult × ATR(14)`. (Was `entry × (1 + pred_mean)`; that put reward on the scale of a ~0.1% forecast against a ~4% ATR stop, so `rr_ratio` was structurally ~0.2.) `pred_mean` now drives only ranking and the `below_breakeven` quality flag. |
 | `target_low_vnd` / `target_high_vnd` | ATR target ± 1 ensemble-std band |
@@ -798,12 +798,22 @@ Key knobs:
 - `data.source: VCI | KBS | MSN` — vnstock data source. KBS is most complete;
   VCI is sometimes more reliable per-ticker.
 - `backtest.cost_bps: 30` — round-trip transaction cost in basis points.
-- `pricing.entry_low_alpha: 0.40` — quantile for the limit-buy "low" head. The
-  entry price is each ticker's α-quantile of its own recent next-day-low
-  returns; lower α = deeper dip / lower fill probability, higher α = shallower /
-  more likely to fill. The low head is a per-ticker empirical quantile, *not* an
-  ML model — an earlier LightGBM quantile head had negative skill and was
-  replaced. Auto-sizes its trailing window via `entry_low_target_tail_obs`.
+- `pricing.entry_low_alpha: 0.40` — **base/pivot** quantile for the limit-buy
+  "low" head. The entry price is each ticker's α-quantile of its own recent
+  next-day-low returns; lower α = deeper dip / lower fill probability, higher α =
+  shallower / more likely to fill. The low head is a per-ticker empirical
+  quantile, *not* an ML model — an earlier LightGBM quantile head had negative
+  skill and was replaced. Auto-sizes its trailing window via
+  `entry_low_target_tail_obs` (sized for the deepest reachable α).
+- `pricing.entry_alpha_couple_conviction: true` + `entry_alpha_weak_mult` (0.6)
+  / `entry_alpha_strong_mult` (1.25) / `entry_alpha_strong_edge` (3.0) /
+  `entry_alpha_hard_min`/`max` — **conviction-coupled entry depth**. The per-pick
+  α = `entry_low_alpha × multiplier`, scaled by how far `pred_mean` clears the
+  cost bar: a strong pick → shallow dip (high α, "get me in"); a marginal /
+  below-breakeven pick → deep dip (low α, only fills at a bargain — so the
+  exact-N "always return N" rule can't force a bad trade). The band is
+  multipliers of the base, so it rescales if you retune `entry_low_alpha`. Set
+  `entry_alpha_couple_conviction: false` to use a single flat α for every pick.
 - `pricing.ceiling_limits` / `ceiling_tol` — names locked limit-up (closed at
   the daily price-band ceiling) are excluded from the pickable universe, since a
   limit-buy can't fill against an all-buyers queue.

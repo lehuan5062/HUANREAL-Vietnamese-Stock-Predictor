@@ -10,6 +10,7 @@ Two heads are loaded when available:
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from ..config import load_config
@@ -23,6 +24,39 @@ from .train import (
     latest_low_model_path,
     latest_model_path,
 )
+
+
+def _round_trip_cost_fraction(broker: dict) -> float:
+    """ACBS round-trip fee as a fraction of trade value: buy + sell commission
+    (each with VAT) + sell PIT = ``2*c*(1+v) + p`` (~0.0043). Matches the
+    ``breakeven_pct`` pricing computes, used as the cost bar for conviction."""
+    c = float(broker.get("commission_pct", 0.15)) / 100.0
+    v = float(broker.get("vat_pct", 10)) / 100.0
+    p = float(broker.get("pit_pct", 0.10)) / 100.0
+    return 2.0 * c * (1.0 + v) + p
+
+
+def conviction_to_alpha(pred_mean: pd.Series, base_alpha: float, *,
+                        cost_fraction: float, min_edge_over_cost: float,
+                        weak_mult: float, strong_mult: float, strong_edge: float,
+                        hard_min: float, hard_max: float) -> pd.Series:
+    """Map each pick's conviction to its entry dip quantile alpha, inversely:
+    a strong pick (``pred_mean`` well above the cost bar) gets a SHALLOW dip
+    (high alpha, fills easily); a marginal / below-bar pick gets a DEEP dip
+    (low alpha, only fills at a bargain).
+
+    ``edge_ratio = pred_mean / (min_edge_over_cost * cost_fraction)`` — 1.0 means
+    the pick sits exactly on the break-even bar, where alpha == ``base_alpha``
+    (so a flat-base config reproduces today's behavior at the margin). The band
+    is expressed as multipliers of ``base_alpha`` so it rescales when
+    ``entry_low_alpha`` changes. NaN ``pred_mean`` → base."""
+    bar = max(min_edge_over_cost * cost_fraction, 1e-9)
+    edge = pred_mean.astype(float) / bar
+    xp = [0.0, 1.0, float(strong_edge)]
+    fp = [base_alpha * weak_mult, base_alpha, base_alpha * strong_mult]
+    alpha = pd.Series(np.interp(edge.to_numpy(), xp, fp), index=pred_mean.index)
+    alpha = alpha.where(edge.notna(), base_alpha)
+    return alpha.clip(hard_min, hard_max)
 
 
 def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -143,12 +177,33 @@ def rank_today(model: TrainedModel | None = None,
             return snap
     if low_model is not None:
         # ``pred_low`` is the per-ticker empirical ``low[T+1]/close[T] - 1`` at
-        # the configured quantile alpha. add_price_suggestions consumes this to
-        # derive entry_vnd; if absent, it falls back to entry = close. Pass the
+        # the dip quantile alpha. add_price_suggestions consumes this to derive
+        # entry_vnd; if absent, it falls back to entry = close. Pass the
         # in-memory panel as history so the quantile is computed from the data
         # already loaded (no per-symbol parquet re-reads).
-        snap["pred_low"] = low_model.predict(snap, history=panel)
-        snap["pred_low_alpha"] = float(low_model.alpha)
+        pcfg = load_config().pricing
+        if bool(pcfg.get("entry_alpha_couple_conviction", True)):
+            # Couple dip-depth to conviction: a strong pick gets a shallow dip
+            # (high alpha, fills easily); a weak / below-breakeven pick gets a
+            # deep dip (low alpha, only fills at a bargain). Driven by pred_mean
+            # only — no circularity with the entry/breakeven computed later.
+            broker = dict(load_config().broker) if hasattr(load_config(), "broker") else {}
+            alphas = conviction_to_alpha(
+                snap["pred_mean"], float(low_model.alpha),
+                cost_fraction=_round_trip_cost_fraction(broker),
+                min_edge_over_cost=float(pcfg.get("min_edge_over_cost", 1.0)),
+                weak_mult=float(pcfg.get("entry_alpha_weak_mult", 0.6)),
+                strong_mult=float(pcfg.get("entry_alpha_strong_mult", 1.25)),
+                strong_edge=float(pcfg.get("entry_alpha_strong_edge", 3.0)),
+                hard_min=float(pcfg.get("entry_alpha_hard_min", 0.05)),
+                hard_max=float(pcfg.get("entry_alpha_hard_max", 0.75)),
+            )
+            snap["pred_low"] = low_model.predict(
+                snap, history=panel, alphas=alphas.to_numpy())
+            snap["pred_low_alpha"] = alphas.to_numpy()
+        else:
+            snap["pred_low"] = low_model.predict(snap, history=panel)
+            snap["pred_low_alpha"] = float(low_model.alpha)
     snap["rank"] = snap["pred_mean"].rank(ascending=False, method="dense").astype(int)
     ordered = snap.sort_values("pred_mean", ascending=False)
     # Keep the top n_picks by pred_mean, then price just those. Taking the top

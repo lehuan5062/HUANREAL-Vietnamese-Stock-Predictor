@@ -107,16 +107,36 @@ class RollingEmpiricalQuantileModel:
     train_end: pd.Timestamp
     train_rows: int
     boosters: list = field(default_factory=list)
+    # Pooled (market-wide) quantile curve: shape (G, 2) of [alpha, value], so the
+    # thin-ticker fallback can serve an ARBITRARY per-row alpha by interpolation.
+    # Optional + read via getattr so old pickles (without it) still load.
+    global_quantile_grid: "np.ndarray | None" = None
 
-    def _quantile_from_obs(self, obs: np.ndarray) -> float:
+    def _grid_quantile(self, alpha: float) -> float | None:
+        """Pooled (market-wide) quantile at an ARBITRARY alpha, interpolated from
+        the stored ``global_quantile_grid``. Returns None when no grid is stored
+        (old pickles) so the caller can fall back to the scalar global."""
+        grid = getattr(self, "global_quantile_grid", None)
+        if grid is None or len(grid) == 0:
+            return None
+        return float(np.interp(float(alpha), grid[:, 0], grid[:, 1]))
+
+    def _quantile_from_obs(self, obs: np.ndarray, alpha: float | None = None) -> float:
+        a = self.alpha if alpha is None else float(alpha)
         if obs.size >= self.min_obs:
-            return float(np.quantile(obs, self.alpha))
+            return float(np.quantile(obs, a))
+        # Thin ticker: prefer the pooled grid (honors an arbitrary per-row
+        # alpha), then the scalar global (back-compat), then entry == close.
+        g = self._grid_quantile(a)
+        if g is not None and np.isfinite(g):
+            return g
         if np.isfinite(self.global_quantile):
             return float(self.global_quantile)
         return 0.0
 
     def predict(self, X: pd.DataFrame,
-                history: pd.DataFrame | None = None) -> pd.Series:
+                history: pd.DataFrame | None = None,
+                alphas: "np.ndarray | pd.Series | None" = None) -> pd.Series:
         """Per-row empirical quantile of next-day-low for each row's symbol.
 
         ``X`` is a cross-section (one row per symbol) indexed by the as-of date,
@@ -125,7 +145,18 @@ class RollingEmpiricalQuantileModel:
         When ``history`` is None, each ticker's history is read from the OHLCV
         cache instead (used by tests / callers that pass only a snapshot).
         Built positionally so duplicate index timestamps across symbols are safe.
+
+        ``alphas`` optionally overrides the dip quantile PER ROW (aligned to
+        ``X``) so a caller can demand a deeper dip for a weaker pick. When None,
+        every row uses the model's single ``alpha`` (the original behavior).
         """
+        arr: np.ndarray | None = None
+        if alphas is not None:
+            arr = np.asarray(alphas, dtype=float)
+            if arr.shape[0] != len(X):
+                raise ValueError(
+                    f"alphas length {arr.shape[0]} != X rows {len(X)}")
+
         groups: dict[str, pd.Series] = {}
         if history is not None and not history.empty and "target_low" in history.columns:
             hist = history[["symbol", "target_low"]].dropna(subset=["target_low"])
@@ -138,6 +169,7 @@ class RollingEmpiricalQuantileModel:
         symbols = X["symbol"].astype(str).to_numpy()
         asofs = X.index.to_numpy()
         for i in range(len(X)):
+            a_i = None if arr is None else arr[i]
             sym = symbols[i]
             asof = pd.Timestamp(asofs[i])
             series = groups.get(sym)
@@ -146,13 +178,13 @@ class RollingEmpiricalQuantileModel:
                 if not df.empty and "low" in df.columns:
                     series = next_day_low_return(df).dropna()
             if series is None or series.empty:
-                out[i] = self._quantile_from_obs(np.empty(0))
+                out[i] = self._quantile_from_obs(np.empty(0), alpha=a_i)
                 continue
             # Strictly before the as-of date → only lows already known at T close.
             obs = series[series.index < asof].to_numpy()
             if self.lookback > 0:
                 obs = obs[-self.lookback:]
-            out[i] = self._quantile_from_obs(obs)
+            out[i] = self._quantile_from_obs(obs, alpha=a_i)
         return pd.Series(out, index=X.index, name="pred_low")
 
     def save(self, path: str | Path) -> None:
@@ -242,11 +274,31 @@ def train_quantile(panel: pd.DataFrame, alpha: float | None = None,
         raise ValueError(f"alpha must be in (0, 1); got {alpha_f}")
 
     target_tail_obs = int(cfg.pricing.get("entry_low_target_tail_obs", 15))
-    lookback = derive_lookback(alpha_f, target_tail_obs)
+    # Size the window for the DEEPEST alpha prediction can request under
+    # conviction coupling (base * weak_mult), so a deep weak-pick dip still
+    # rests on ~target_tail_obs in its tail. With coupling off this equals the
+    # base alpha, so the window is unchanged.
+    hard_min = float(cfg.pricing.get("entry_alpha_hard_min", 0.05))
+    hard_max = float(cfg.pricing.get("entry_alpha_hard_max", 0.75))
+    if bool(cfg.pricing.get("entry_alpha_couple_conviction", True)):
+        weak_mult = float(cfg.pricing.get("entry_alpha_weak_mult", 0.6))
+        deepest_alpha = min(max(alpha_f * weak_mult, hard_min), hard_max)
+    else:
+        deepest_alpha = alpha_f
+    lookback = derive_lookback(deepest_alpha, target_tail_obs)
     min_obs = target_tail_obs
 
     y = panel[target_col].to_numpy(dtype=float)
-    global_quantile = float(np.nanquantile(y, alpha_f)) if np.isfinite(y).any() else 0.0
+    has_y = bool(np.isfinite(y).any())
+    global_quantile = float(np.nanquantile(y, alpha_f)) if has_y else 0.0
+    # Pooled quantile curve so the thin-ticker fallback can serve any per-row
+    # alpha (not just the base). Monotonic in alpha by construction.
+    if has_y:
+        grid_alphas = np.round(np.arange(0.01, 1.00, 0.01), 2)
+        grid_vals = np.nanquantile(y, grid_alphas)
+        global_quantile_grid = np.column_stack([grid_alphas, grid_vals])
+    else:
+        global_quantile_grid = None
 
     return RollingEmpiricalQuantileModel(
         alpha=alpha_f,
@@ -256,6 +308,7 @@ def train_quantile(panel: pd.DataFrame, alpha: float | None = None,
         global_quantile=global_quantile,
         train_end=panel.index.max(),
         train_rows=int(panel[target_col].notna().sum()),
+        global_quantile_grid=global_quantile_grid,
     )
 
 

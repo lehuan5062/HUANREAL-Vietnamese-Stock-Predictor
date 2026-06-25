@@ -21,9 +21,11 @@ from stockpredict.model.target import (
     attach_target,
     next_day_low_return,
 )
+from stockpredict.model.predict import conviction_to_alpha
 from stockpredict.model.train import (
     RollingEmpiricalQuantileModel,
     derive_lookback,
+    train_quantile,
 )
 from stockpredict.pricing import add_price_suggestions
 
@@ -496,3 +498,134 @@ def test_feedback_block_omits_limit_fill_when_no_data(monkeypatch):
     block = tracking.feedback_block(window_days=90, mode="claude",
                                     current_horizon=2)
     assert "Limit-buy fill calibration" not in block
+
+
+# ---------------------------------------------------------------------------
+# 1c. Conviction-coupled per-row alpha (entry dip-depth scales with conviction)
+# ---------------------------------------------------------------------------
+
+def _grid(y):
+    """Pooled quantile grid (alpha=0.01..0.99) from a sample, like train_quantile."""
+    a = np.round(np.arange(0.01, 1.00, 0.01), 2)
+    return np.column_stack([a, np.nanquantile(np.asarray(y, float), a)])
+
+
+def test_quantile_from_obs_honors_passed_alpha():
+    """A per-call alpha overrides the model's stored alpha; None == self.alpha."""
+    m = _emp_model(alpha=0.40, min_obs=5)
+    obs = np.linspace(-0.10, 0.10, 101)   # symmetric → quantiles are predictable
+    assert np.isclose(m._quantile_from_obs(obs, alpha=0.10),
+                      np.quantile(obs, 0.10))
+    assert np.isclose(m._quantile_from_obs(obs, alpha=None),
+                      np.quantile(obs, 0.40))
+
+
+def test_predict_per_row_alphas_make_deeper_dip():
+    """A smaller alpha for a row yields a deeper (more-negative) pred_low."""
+    idx = pd.date_range("2026-01-01", periods=80, freq="B")
+    # 79 dips spread across a range, then the as-of row.
+    dips = list(np.linspace(-0.08, 0.0, 79))
+    hist = pd.concat([
+        pd.DataFrame({"symbol": "AAA", "target_low": dips + [np.nan]}, index=idx),
+        pd.DataFrame({"symbol": "BBB", "target_low": dips + [np.nan]}, index=idx),
+    ])
+    hist.index.name = "date"
+    snap = hist.groupby("symbol").tail(1)
+    m = _emp_model(alpha=0.40, lookback=120, min_obs=5)
+    out = m.predict(snap, history=hist, alphas=np.array([0.15, 0.55]))
+    # AAA got the deep alpha (0.15) -> lower (more negative) entry than BBB (0.55).
+    by = dict(zip(snap["symbol"], out.to_numpy()))
+    assert by["AAA"] < by["BBB"]
+
+
+def test_predict_alphas_length_mismatch_raises():
+    idx = pd.date_range("2026-01-01", periods=5, freq="B")
+    hist = pd.DataFrame({"symbol": "AAA", "target_low": [-0.02] * 5}, index=idx)
+    hist.index.name = "date"
+    snap = hist.iloc[[-1]].copy()
+    with pytest.raises(ValueError):
+        _emp_model(min_obs=2).predict(snap, history=hist, alphas=np.array([0.2, 0.3]))
+
+
+def test_thin_ticker_grid_fallback_honors_alpha():
+    """A ticker below min_obs uses the pooled grid at its own per-row alpha."""
+    pooled = np.linspace(-0.10, 0.10, 1001)
+    m = RollingEmpiricalQuantileModel(
+        alpha=0.40, target_tail_obs=5, lookback=60, min_obs=5,
+        global_quantile=float(np.quantile(pooled, 0.40)),
+        train_end=pd.Timestamp("2026-01-01"), train_rows=1000,
+        global_quantile_grid=_grid(pooled),
+    )
+    idx = pd.date_range("2026-01-01", periods=4, freq="B")
+    hist = pd.DataFrame({"symbol": "NEW", "target_low": [-0.02, -0.02, -0.02, np.nan]},
+                        index=idx)            # 3 usable obs < min_obs=5 -> fallback
+    hist.index.name = "date"
+    snap = hist.iloc[[-1]].copy()
+    deep = m.predict(snap, history=hist, alphas=np.array([0.10])).iloc[0]
+    shallow = m.predict(snap, history=hist, alphas=np.array([0.60])).iloc[0]
+    assert deep < shallow                      # grid honored per-row alpha
+    assert np.isclose(deep, np.interp(0.10, _grid(pooled)[:, 0], _grid(pooled)[:, 1]))
+
+
+def test_old_pickle_without_grid_falls_back_to_scalar():
+    """A model with no grid (old pickle) returns the scalar global for any alpha."""
+    m = _emp_model(min_obs=5, global_quantile=-0.031)   # grid defaults to None
+    assert getattr(m, "global_quantile_grid", "missing") is None
+    idx = pd.date_range("2026-01-01", periods=4, freq="B")
+    hist = pd.DataFrame({"symbol": "NEW", "target_low": [-0.02, -0.02, -0.02, np.nan]},
+                        index=idx)
+    hist.index.name = "date"
+    snap = hist.iloc[[-1]].copy()
+    out = m.predict(snap, history=hist, alphas=np.array([0.10]))
+    assert np.isclose(out.iloc[0], -0.031)              # scalar regardless of alpha
+
+
+def _low_panel(symbol, dips):
+    idx = pd.date_range("2024-01-01", periods=len(dips), freq="B")
+    df = pd.DataFrame({"target_low": dips, "symbol": symbol}, index=idx)
+    df.index.name = "date"
+    return df
+
+
+def test_train_quantile_sizes_window_for_deepest_alpha_and_builds_grid(monkeypatch):
+    """With coupling on, the window is sized for base*weak_mult (deeper than
+    base) and a monotonic pooled grid is stored matching the scalar at base."""
+    panel = _low_panel("AAA", list(np.linspace(-0.08, 0.04, 200)))
+    m = train_quantile(panel, alpha=0.40)
+    # deepest alpha = 0.40*0.6 = 0.24 -> lookback ceil(15/0.24)=63 > base's 38.
+    assert m.lookback == derive_lookback(0.24, 15)
+    assert m.lookback > derive_lookback(0.40, 15)
+    grid = m.global_quantile_grid
+    assert grid is not None
+    assert np.all(np.diff(grid[:, 1]) >= -1e-9)         # monotonic in alpha
+    assert np.isclose(m._grid_quantile(0.40), m.global_quantile, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 1d. conviction_to_alpha mapping
+# ---------------------------------------------------------------------------
+
+_MAP = dict(cost_fraction=0.0043, min_edge_over_cost=1.0, weak_mult=0.6,
+            strong_mult=1.25, strong_edge=3.0, hard_min=0.05, hard_max=0.75)
+
+
+def test_conviction_to_alpha_pivot_weak_strong_clamp():
+    pm = pd.Series([-0.01, 0.0, 0.0043, 0.0043 * 3, 0.05])
+    a = conviction_to_alpha(pm, 0.40, **_MAP)
+    assert np.isclose(a.iloc[0], 0.24)          # negative edge -> weak floor
+    assert np.isclose(a.iloc[1], 0.24)          # zero edge -> weak floor
+    assert np.isclose(a.iloc[2], 0.40)          # exactly on the bar -> base
+    assert np.isclose(a.iloc[3], 0.50)          # strong_edge -> base*strong_mult
+    assert np.isclose(a.iloc[4], 0.50)          # well past strong -> clamped at strong
+
+
+def test_conviction_to_alpha_rescales_with_base():
+    pm = pd.Series([0.0, 0.0043])
+    a = conviction_to_alpha(pm, 0.50, **_MAP)   # base 0.50 instead of 0.40
+    assert np.isclose(a.iloc[0], 0.30)          # 0.50*0.6
+    assert np.isclose(a.iloc[1], 0.50)          # pivot == base
+
+
+def test_conviction_to_alpha_nan_is_base():
+    a = conviction_to_alpha(pd.Series([np.nan]), 0.40, **_MAP)
+    assert np.isclose(a.iloc[0], 0.40)

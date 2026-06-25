@@ -156,7 +156,9 @@ After all are collected, summarise back and start Step 2.
 - `weight` (the `news_weight` that was active at finalize time)
 - `plan_file` (interactive mode only — points at the news plan markdown)
 - `picks` (the array; each item has `symbol`, `pred_mean`, `news_score`,
-  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `below_breakeven`, plus the
+  `adjusted`, `entry_vnd`, `target_vnd`, `stop_vnd`, `below_breakeven`,
+  `pred_low_alpha` (now **varies per pick** — the dip quantile is conviction-
+  coupled, NOT a constant), plus the
   `business`, `dimensions`, `drivers`, `key_news`, `dimensions_cited` fields
   Claude wrote at finalize time)
 
@@ -283,13 +285,21 @@ Compare:
 - **(stages 1 & 2) Limit-fill calibration**: the pooled `limit_fill`
   block tells you the 90-day fill_rate and calibration gap. Compare
   this run's fill_rate to it.
-  - If pooled fill_rate ≈ `pricing.entry_low_alpha` (default 0.5) AND
-    this run is way off in the same direction (e.g. 0% fill on a 50%-
-    target alpha), this report's tickers were unusually directional
-    (gap-ups), not a model issue.
-  - If pooled fill_rate is also far from alpha (say pooled is 20% on a
-    50% target), the low head is mis-calibrated — propose retraining or
-    bumping `pricing.entry_low_alpha`.
+  - **The dip alpha is now conviction-coupled** (per `pred_low_alpha`),
+    so a single fill-rate target no longer applies — each pick targets
+    its OWN alpha (≈ its expected fill probability). **Group fill_rate
+    by conviction tier** (split on `below_breakeven`, or bucket
+    `pred_low_alpha`) before judging. A LOW fill rate on the deep-dip
+    (low-alpha) weak picks is BY DESIGN — they're meant to fill only at
+    a bargain — NOT miscalibration. Only the within-tier gap (filled
+    rate vs that tier's mean `pred_low_alpha`) signals a real problem.
+  - If a tier's fill_rate ≈ its `pred_low_alpha` AND this run is way off
+    in the same direction (e.g. 0% fill on a high-alpha tier), this
+    report's tickers were unusually directional (gap-ups), not a model
+    issue.
+  - If a tier's fill_rate is far from its `pred_low_alpha` across the
+    board, the low head is mis-calibrated — propose retraining or
+    adjusting the base/multiplier knobs below.
 - **(stage 2) news_score patterns**: did this report's news_score=+1
   picks lose, while the 90-day pooled news_score=+1 stat is winning? →
   likely a *this-report* problem (specific dimensions / sectors), not a
@@ -431,26 +441,41 @@ filename identifies the report and the ledger holds the data. Structure:
      actionability gate. `pricing.max_abs_pred_mean` (current 0.05) drops
      split/corp-action glitch forecasts before ranking; widen only if a
      legitimate high-conviction name is being filtered.
-   - **`pricing.entry_low_alpha` (currently 0.25) — sets the quantile
-     level of the per-ticker rolling empirical low head (since
+   - **`pricing.entry_low_alpha` (currently 0.40) — the BASE / pivot
+     quantile level of the per-ticker rolling empirical low head (since
      2026-06-05; see memory `project_low_head_negative_skill.md` — do
-     NOT reintroduce an ML low head). Raise toward 0.75 if
-     fill_rate is consistently below alpha AND `fill_margin` on
-     unfilled rows is consistently small-negative (we're too bearish
-     on dips, but only just); lower toward 0.25 if `fill_margin` on
-     filled rows is consistently large-positive (we're filling with
-     lots of slack — money on the table). Both signals must anchor on
-     `entry_limit_price` vs `t0_low`, never on the close. This is the
-     primary knob for stage-1 findings. First rule out a one-sided
-     melt-up regime (low fills market-wide ≠ miscalibration). The
-     trailing window auto-sizes with alpha via
-     `pricing.entry_low_target_tail_obs` (default 15); an alpha change
-     needs a `train` to take effect. Before any of this, check the picks
-     JSON: if `adj_entry_vnd != entry_vnd` for a pick, the news stage
-     overrode the entry and the user likely placed the ADJUSTED order —
-     the ledger's mechanical `entry_limit_price` / `fill_margin` for that
-     row reflects a limit that was never placed, so exclude those rows
-     before judging fill calibration or tuning this knob.**
+     NOT reintroduce an ML low head). The actual per-pick alpha is
+     conviction-coupled: `pred_low_alpha = base × multiplier`, where a
+     strong pick gets a shallow dip (high alpha) and a weak / below-
+     breakeven pick gets a deep dip (low alpha). So the levers are now:
+     * `pricing.entry_low_alpha` (the base) — shifts ALL picks' dip depth
+       together. Raise it if fill_rate is consistently below
+       `pred_low_alpha` WITHIN EACH conviction tier AND `fill_margin` on
+       unfilled rows is small-negative (too bearish on dips across the
+       board); lower it if `fill_margin` on filled rows is consistently
+       large-positive (filling with slack — money on the table).
+     * `pricing.entry_alpha_weak_mult` (0.6) / `entry_alpha_strong_mult`
+       (1.25) / `entry_alpha_strong_edge` (3.0) — the COUPLING shape.
+       Only touch these if the miscalibration is tier-specific: e.g. weak
+       picks fill far MORE than their (deep) alpha would predict → the
+       weak side isn't deep enough, lower `weak_mult`. Keep `strong_mult`
+       modest (chasing fills on strong picks is a known failure mode).
+     * `pricing.entry_alpha_couple_conviction` — set false to revert to a
+       single flat base alpha for every pick.
+     All signals must anchor on `entry_limit_price` vs `t0_low`, never on
+     the close, and must be judged WITHIN a conviction tier (a deep-dip
+     weak pick failing to fill is by design). This is the primary knob
+     family for stage-1 findings. First rule out a one-sided melt-up
+     regime (low fills market-wide ≠ miscalibration). The trailing window
+     auto-sizes for the deepest reachable alpha via
+     `pricing.entry_low_target_tail_obs` (default 15); any alpha/mult
+     change needs a `train` to take effect (rebuilds the low head's
+     window + pooled grid). Before any of this, check the picks JSON: if
+     `adj_entry_vnd != entry_vnd` for a pick, the news stage overrode the
+     entry and the user likely placed the ADJUSTED order — the ledger's
+     mechanical `entry_limit_price` / `fill_margin` for that row reflects
+     a limit that was never placed, so exclude those rows before judging
+     fill calibration or tuning these knobs.**
    - `universe.liquidity_filter.min_adv_active_days` (currently 15 of 20)
      — raise if the user reports a pick was effectively untradeable (thin
      volume / "I was the only buyer"). That's a universe-liquidity problem,

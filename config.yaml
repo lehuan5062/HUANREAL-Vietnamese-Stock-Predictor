@@ -128,7 +128,25 @@ pricing:
   #   0.75 = conservative (shallow dip, ~75% fill)
   # When no `models/low_latest.pkl` is present, the program falls back
   # to entry = today's close (the legacy behavior).
+  #
+  # NOTE: with conviction coupling on (below), `entry_low_alpha` is the BASE /
+  # pivot alpha for a pick sitting exactly on the break-even bar; the actual
+  # per-pick alpha is `base × conviction-multiplier`.
   entry_low_alpha: 0.40
+  # Conviction-coupled entry dip-depth. The limit-buy dip quantile alpha varies
+  # PER PICK, inversely to conviction: a strong pick (pred_mean well above the
+  # cost bar) gets a SHALLOW dip (high alpha, fills easily — "get me in"); a
+  # marginal / below-breakeven pick gets a DEEP dip (low alpha, only fills at a
+  # bargain, so the exact-N "always return N" rule can't force a bad trade).
+  # The band is multipliers of `entry_low_alpha`, so it rescales if you retune
+  # the base. edge_ratio = pred_mean / (min_edge_over_cost × round-trip-cost);
+  # edge_ratio 1.0 (on the bar) -> alpha = base.
+  entry_alpha_couple_conviction: true
+  entry_alpha_weak_mult: 0.6      # alpha multiplier at zero edge (weak pick)
+  entry_alpha_strong_mult: 1.25   # alpha multiplier at/above strong_edge (kept modest — fill-chasing risk)
+  entry_alpha_strong_edge: 3.0    # edge_ratio that reaches strong_mult
+  entry_alpha_hard_min: 0.05      # absolute clamp on the per-pick alpha
+  entry_alpha_hard_max: 0.75
   # Exclude names locked limit-up: a stock that closed at the daily ceiling
   # opens the next session with a buy queue and no sellers, so a limit-buy
   # can't fill (you "can't buy it for days"). Per-exchange daily price-band

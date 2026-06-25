@@ -245,7 +245,10 @@ Show every explained pick with these fields per pick:
 - Symbol, company, business one-liner
 - Trade economics: entry / target / stop in VND, fees round-trip, net P&L
   for 100-unit position, risk-reward ratio, `below_breakeven: True/False`
-  (True = weak edge, forecast under round-trip cost)
+  (True = weak edge, forecast under round-trip cost). Note the entry is a
+  conviction-coupled dip limit: stronger picks quote a shallower dip (fill
+  easily), weaker / below-breakeven picks a deeper dip (fill only at a
+  bargain) — so a deep limit that doesn't fill on a weak pick is by design.
 - If `suggested_max_units` is present (non-null), show it as an advisory
   liquidity cap — the largest position that stays within
   `pricing.max_participation_pct`% of the stock's 20-day average daily
