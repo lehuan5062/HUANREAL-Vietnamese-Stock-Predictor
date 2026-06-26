@@ -81,6 +81,160 @@ def missed_winners(panel: pd.DataFrame, ledger: pd.DataFrame, n: int = 5,
     return merged.reset_index(drop=True)
 
 
+# --------------------------------------------------------------------------
+# Single-day missed winners (NO window aggregation).
+#
+# This is the primary view: for ONE buy day B, the top-N liquid tickers by the
+# realized B -> B+2 ("bought 2 days ago, sold the eval day") return, and whether
+# the model surfaced each. It deliberately does NOT pool a 90-day window and sort
+# by magnitude — that surfaces long-dead spikes (a name that won weeks ago and
+# has since fully reversed) at the top of the table, which is misleading.
+# --------------------------------------------------------------------------
+
+def _panel_dates(panel: pd.DataFrame) -> pd.DatetimeIndex:
+    df = panel.reset_index()
+    date_col = "date" if "date" in df.columns else df.columns[0]
+    return pd.DatetimeIndex(sorted(pd.to_datetime(df[date_col]).dt.normalize().unique()))
+
+
+def realized_buy_days(panel: pd.DataFrame) -> pd.DatetimeIndex:
+    """Buy days whose forward T+2 window has fully realized (``target`` not NaN)."""
+    if panel is None or panel.empty or "target" not in panel.columns:
+        return pd.DatetimeIndex([])
+    df = panel.dropna(subset=["target"]).reset_index()
+    date_col = "date" if "date" in df.columns else df.columns[0]
+    return pd.DatetimeIndex(sorted(pd.to_datetime(df[date_col]).dt.normalize().unique()))
+
+
+def resolve_eval_buy_day(panel: pd.DataFrame, as_of=None):
+    """The buy day to evaluate. If ``as_of`` (a prediction's buy day) is given and
+    its T+2 window has realized, use it — so self-correction run at T+3 or later
+    scores the prediction's EXACT T+2 day. Otherwise (its T+2 hasn't closed yet, or
+    no as_of given) use the latest buy day whose window HAS realized — i.e. the most
+    recent fully-closed [T-2 -> today] window. Returns a normalized Timestamp or
+    None."""
+    days = realized_buy_days(panel)
+    if len(days) == 0:
+        return None
+    if as_of is not None:
+        a = pd.Timestamp(as_of).normalize()
+        if a in days:
+            return a
+    return days.max()
+
+
+def _sell_day(panel: pd.DataFrame, buy_day, exit_offset: int | None = None):
+    from ..config import load_config
+    k = int(exit_offset if exit_offset is not None
+            else load_config().target["exit_offset_days"])
+    dates = _panel_dates(panel)
+    b = pd.Timestamp(buy_day).normalize()
+    if b not in dates:
+        return None
+    j = dates.get_loc(b) + k
+    return dates[j] if j < len(dates) else None
+
+
+def _surfaced_for_day(ledger: pd.DataFrame, buy_day,
+                      signature: str | None = None) -> pd.DataFrame:
+    """What the model surfaced for a given buy day (ledger rows for that ``as_of``),
+    regardless of evaluation state. Columns ``[symbol, model_rank, pred_mean,
+    realized_return]``."""
+    empty = pd.DataFrame(columns=["symbol", "model_rank", "pred_mean",
+                                  "realized_return"])
+    if ledger is None or ledger.empty:
+        return empty
+    df = ledger.copy()
+    df["as_of"] = pd.to_datetime(df["as_of"]).dt.normalize()
+    df = df[df["as_of"] == pd.Timestamp(buy_day).normalize()]
+    if signature is not None and "signature" in df.columns:
+        df = df[df["signature"] == signature]
+    if df.empty:
+        return empty
+    df = df.rename(columns={"rank": "model_rank"})
+    cols = [c for c in ["symbol", "model_rank", "pred_mean", "realized_return"]
+            if c in df.columns]
+    df = df[cols]
+    # A symbol can appear under several run signatures (base / claude / gemini /
+    # missed variant) on the same buy day. Dedupe to one row per symbol, keeping
+    # the best (lowest) rank, so the single-day comparison isn't noisy.
+    if "model_rank" in df.columns:
+        df = df.sort_values("model_rank").drop_duplicates(subset=["symbol"],
+                                                          keep="first")
+    else:
+        df = df.drop_duplicates(subset=["symbol"], keep="first")
+    return df.sort_values("model_rank").reset_index(drop=True)
+
+
+def single_day_missed_winners(panel: pd.DataFrame, ledger: pd.DataFrame,
+                              as_of=None, n: int = 5,
+                              signature: str | None = None):
+    """Top-N realized winners for ONE buy day and whether the model surfaced each.
+    See module note. Returns a dict (``buy_day``, ``sell_day``, ``winners``,
+    ``our_picks``) or None if no buy day has a realized window yet."""
+    b = resolve_eval_buy_day(panel, as_of=as_of)
+    if b is None:
+        return None
+    top = realized_top_n(panel, n=n)
+    top = top[top["as_of"] == b].copy()
+    picks = _surfaced_for_day(ledger, b, signature=signature)
+    join = picks[["symbol", "model_rank"]] if not picks.empty else picks
+    winners = top.merge(join, on="symbol", how="left") if not top.empty else top
+    if "model_rank" not in winners.columns:
+        winners["model_rank"] = pd.NA
+    winners["ours"] = winners["model_rank"].notna()
+    return {"buy_day": b, "sell_day": _sell_day(panel, b), "n": n,
+            "signature": signature,
+            "winners": winners.reset_index(drop=True),
+            "our_picks": picks}
+
+
+def single_day_markdown(panel: pd.DataFrame | None = None,
+                        ledger: pd.DataFrame | None = None,
+                        as_of=None, n: int = 5,
+                        signature: str | None = None) -> str:
+    """Markdown for the single-day missed-winners view (CLI / run flow /
+    self-correct prompt)."""
+    if panel is None:
+        from ..dataset import build_panel
+        # require_target=False keeps the post-window rows (e.g. today, T+1) in the
+        # date index so the sell day (B + exit_offset trading days) resolves; the
+        # winner logic dropnas `target` itself.
+        panel = build_panel(require_target=False)
+    if ledger is None:
+        from ..tracking import _read
+        ledger = _read()
+    res = single_day_missed_winners(panel, ledger, as_of=as_of, n=n,
+                                    signature=signature)
+    if res is None:
+        return ("### Missed winners (single day)\n\n"
+                "_No buy day has a realized T+2 window yet._")
+    b, s, w = res["buy_day"], res["sell_day"], res["winners"]
+    bs = pd.Timestamp(b).date()
+    ss = pd.Timestamp(s).date() if s is not None else "?"
+    lines = [f"### Missed winners — top-{n} for buy day {bs} (sold {ss}, T+2)"
+             + (f", sig={signature}" if signature else ""), "",
+             f"_Top realized gainers if bought {bs} close and sold {ss} close. "
+             f"Single closed day — no window aggregation._", "",
+             "| rank | symbol | T+2 return | ours? |",
+             "| --- | --- | --- | --- |"]
+    for r in w.itertuples():
+        lines.append(f"| {int(r.realized_rank)} | {r.symbol} | "
+                     f"{float(r.target):+.2%} | {'YES' if bool(r.ours) else 'no'} |")
+    op = res["our_picks"]
+    lines += ["", "**What the model surfaced that buy day:**"]
+    if op is None or op.empty:
+        lines.append("- (no model run on that buy day to compare against)")
+    else:
+        for r in op.itertuples():
+            rr = getattr(r, "realized_return", None)
+            rrs = (f"{float(rr):+.2%}" if rr is not None and pd.notna(rr)
+                   else "n/a")
+            rk = (int(r.model_rank) if pd.notna(r.model_rank) else "?")
+            lines.append(f"- {r.symbol} (our rank {rk}): realized {rrs}")
+    return "\n".join(lines)
+
+
 def aggregate_regret(window_days: int = 90, n: int = 5,
                      signature: str | None = None,
                      panel: pd.DataFrame | None = None,

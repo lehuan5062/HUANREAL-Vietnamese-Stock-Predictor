@@ -62,6 +62,29 @@ def test_aggregate_regret_math():
     assert a["mean_missed_target"] is not None and a["mean_captured_target"] is not None
 
 
+def test_resolve_eval_buy_day():
+    p = _panel()
+    # as_of whose T+2 window has realized -> that exact day
+    assert regret.resolve_eval_buy_day(p, as_of="2026-06-01") == pd.Timestamp("2026-06-01")
+    # as_of not yet realized (future) -> latest realized buy day
+    assert regret.resolve_eval_buy_day(p, as_of="2026-06-30") == pd.Timestamp("2026-06-02")
+    # no as_of -> latest realized buy day
+    assert regret.resolve_eval_buy_day(p) == pd.Timestamp("2026-06-02")
+
+
+def test_single_day_missed_winners_one_day_only():
+    """Single-day view: only the resolved buy day's winners, with an `ours` flag,
+    and no aggregation across days."""
+    res = regret.single_day_missed_winners(_panel(), _ledger(), as_of="2026-06-30", n=2)
+    assert res is not None
+    assert res["buy_day"] == pd.Timestamp("2026-06-02")  # fell back to latest realized
+    w = res["winners"]
+    assert set(w["symbol"]) == {"WIN", "CAP"}             # d2 top-2 liquid; DEAD excluded
+    ours = dict(zip(w["symbol"], w["ours"]))
+    assert bool(ours["CAP"]) is True                      # surfaced in ledger d2
+    assert bool(ours["WIN"]) is False                     # never surfaced
+
+
 def test_missed_winner_weights_upweights_winners():
     w = regret.missed_winner_weights(_panel(), n=2, upweight=3.0)
     assert len(w) == len(_panel())

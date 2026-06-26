@@ -43,12 +43,19 @@ elapsed since the picks were emitted:
   to elapse. Diagnoses focus narrowly on **entry calibration**: was the
   predicted dip too aggressive (limits unreachable, no fill) or too
   conservative (limits filled cheaply but only a tiny dip captured)?
+  **Even at Stage 1 you MUST still RUN the missed-winners regret look
+  (Step 4b) and the recency/trend sanity-check (Step 4d)** — both pool
+  already-evaluated history (or read the picks' own trend features), so
+  they are valid before T+2. They are advisory at Stage 1 (Focus-1
+  *edits* still wait for Stage 2), but they are NEVER skipped, and never
+  only because the user asked.
 * **Stage 2 — Full self-correction (after T+2 closes)**. All rows have
   `evaluated=True` and `t0_evaluated=True`, so realized returns are known. This
-  unlocks **Focus 1 (missed winners)** — the realized top-N the model didn't
-  surface, and why (Step 4b) — in addition to **Focus 2 (entry-price misses)**.
-  Those are the ONLY two things this prompt diagnoses; it does not chase
-  news_score / dimension-tag patterns anymore.
+  unlocks **Focus 1 (missed winners)** *edits* — the realized top-N the model
+  didn't surface, and why (Step 4b) — in addition to **Focus 2 (entry-price
+  misses)**. (The missed-winners look itself is RUN in both stages; Stage 2 is
+  only what lets it drive an edit.) Those are the ONLY two things this prompt
+  diagnoses; it does not chase news_score / dimension-tag patterns anymore.
 
 When you run this prompt, **first** check the ledger to see which stage
 the chosen picks report is eligible for, then proceed accordingly. Stage
@@ -346,16 +353,23 @@ truer measurements, so don't anchor findings on slippage.
 ## Step 4b — Missed winners (Focus 1)
 
 This is the highest-value question: **which winners did we miss, and why?**
-Run the analysis:
+Run the analysis **anchored to THIS report's buy day** — pass its `as_of`:
 
 ```
-.venv\Scripts\python.exe -m stockpredict.cli regret --window 90
+.venv\Scripts\python.exe -m stockpredict.cli regret --on <as_of>
 ```
 
-It prints the realized top-N liquid tickers (bought T-2, sold today) the model
-did NOT surface, with the miss-rate and regret, and writes a `reports/regret_*.md`
-table. The liquidity universe matches live selection, so these are winners the
-model *could* have picked.
+This is a **single-day** view (NO 90-day aggregation): the realized top-N liquid
+tickers for ONE closed window — bought T-2, sold the eval day — and whether the
+model surfaced each. The eval day is the prediction's **exact T+2 day** when it
+has closed (Stage 2 / running at T+3 or later); if T+2 hasn't closed yet (e.g.
+self-correcting today's prediction), it falls back to the **latest fully-closed
+[T-2 -> today] window**. Returns are REAL for that one window — never a stale
+spike a name posted weeks ago and has since round-tripped. The liquidity universe
+matches live selection, so these are winners the model *could* have picked. Use
+`-n N` for a longer winners list and `--signature <sig>` to compare against one
+run only. (The old 90-day magnitude-sorted `--window` view is gone — it headlined
+since-crashed names like VIW and was removed; do not reintroduce it.)
 
 For the worst missed winners, investigate **why** each was missed — load its
 T-2 features (from that day's `.candidates.parquet` sidecar, or rebuild the
@@ -435,12 +449,71 @@ user doesn't over-trust a noisy edge. **Do not recommend changing the default
 method off a handful of days** — note the trend and suggest re-checking as more
 picks evaluate.
 
+## Step 4d — Recency / trend sanity-check (BOTH stages, MANDATORY)
+
+Never call a name a "winner", and never frame surfacing it as a good thing,
+without looking at what its price actually did over the window you're evaluating
+(and since). Two checks, both required on every run (Stage 1 included):
+
+1. **Regret winners are now single-day by construction** (Step 4b uses `regret
+   --on <as_of>`), so the returns shown ARE the realized move for the one closed
+   [T-2 -> eval] window — no stale 90-day spikes. You normally don't need to
+   re-pull bars. The one case that still warrants a chart glance: if you are
+   citing a winner to argue the model *should chase that kind of name going
+   forward*, confirm it hasn't since round-tripped (a name can win one window and
+   reverse the next):
+
+   ```
+   .venv\Scripts\python.exe -c "import pandas as pd; d=pd.read_parquet(r'cache\ohlcv\<SYM>.parquet'); print(d.tail(15).to_string())"
+   ```
+
+   A name that won its window but has since crashed is not a template to chase.
+
+2. **The report's OWN picks — flag any name surfaced into a downtrend.** The
+   picks JSON carries `mom_5`, `mom_20`, `rsi_14`. A pick with clearly negative
+   `mom_5` (a recent multi-day decline) — **especially when `mom_20` is positive**
+   (a faded, post-spike name rolling over) — means the model surfaced a FALLING
+   name: chasing momentum that already ended, or catching a knife. ALWAYS confirm
+   against the actual chart (`cache\ohlcv\<SYM>.parquet` tail) — the trend
+   features alone are not enough, and a falling chart overrides any bullish
+   `pred_mean` or news narrative. If a pick is in a clear downtrend at entry, state
+   it **bluntly as a finding** — never soften it to a "watch item." At Stage 1
+   this is advisory.
+
+   **The lever is NOT a `claude_prompt.md` edit.** `claude_prompt.md` explicitly
+   forbids the LLM from scoring on technicals ("Don't score on technicals (RSI,
+   momentum, etc.) — those are the ML input"), so momentum/trend is by design the
+   ML model's job. A downtrend-chasing pattern therefore points at either the ML
+   model (it has `mom_5`/`mom_20` as inputs and under-weighted them — a retrain /
+   feature question) or a **mechanical selection guard** (a new `config.yaml`
+   knob, e.g. a `mom_5` floor that excludes or penalizes names in a fresh
+   downtrend before ranking). Both are heavier than a prose tweak, so **require an
+   n>=5 systematic pattern across evaluated reports before proposing them** — one
+   downtrend pick (VIW) does not justify a model or selection-logic change. Note
+   that `mom_5`/`mom_20` only began landing in the picks JSON on 2026-06-26, so
+   that evidence base has to accumulate first.
+
+This step exists because a self-correction once reported VIW as a missed "+25%
+winner" and described the model "catching" it — while VIW had in fact peaked
+2.5 weeks earlier and was down ~21% from that peak and falling at the time it was
+surfaced (`mom_5 = -14%`). Do not repeat that: look at the chart.
+
 ## Step 5 — Diagnose (two focuses only)
 
 Diagnose **exactly two things**, nothing else: **(1) missed winners** (Step 4b)
 and **(2) entry-price misses** (the fill calibration in Step 4). Write findings
 as a numbered list. **Every finding must drive at least one proposed edit in
 Step 6.** If a pattern doesn't suggest a concrete edit, skip it.
+
+The Step 4d recency/trend check feeds **both** focuses, it is not a third focus:
+a stale/round-tripped "winner" *corrects* a Focus-1 regret claim (drop it — do
+not count it as a real miss), and a pick surfaced into a clear downtrend is a
+Focus-1 flip-side / entry-timing finding (the model chased a faded name). A
+downtrend pick that also failed to fill is BOTH a Focus-2 (the limit was deep
+because the empirical low head saw the fall) and a Focus-1 finding — say so.
+Even with n=1 on the report, a pick bought into an unmistakable downtrend MUST be
+stated as a finding (it overrides the ≥3 threshold below, which exists to stop
+over-fitting *calibration* noise, not to suppress an obvious bad entry).
 
 **Evidence threshold**: each finding must cite ≥3 same-direction misses
 on this report, **or** the report's pattern echoes an n≥5 pattern in

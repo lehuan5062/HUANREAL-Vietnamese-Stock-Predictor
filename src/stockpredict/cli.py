@@ -321,21 +321,25 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
 
 
 @cli.command("regret")
-@click.option("--window", type=int, default=90, show_default=True,
-              help="Look-back window in days.")
+@click.option("--on", "on", default=None,
+              help="Prediction buy day (as_of) to evaluate. If its T+2 window has "
+                   "closed, that exact T+2 day is scored; otherwise (T+2 not closed "
+                   "yet) the latest fully-closed [T-2 -> today] window is used. "
+                   "Default: the latest closed window.")
 @click.option("--picks", "-n", "n", type=int, default=None,
-              help="Top-N realized winners per day (default: pricing.default_picks).")
+              help="Top-N realized winners (default: pricing.default_picks).")
 @click.option("--signature", default=None,
-              help="Restrict to one run signature (e.g. base_d2).")
-def regret_cmd(window: int, n: int | None, signature: str | None) -> None:
-    """Report the realized top-N winners the model MISSED over a window."""
+              help="Restrict the model-pick comparison to one run signature.")
+def regret_cmd(on: str | None, n: int | None, signature: str | None) -> None:
+    """The top-N realized winners (bought T-2, sold the eval day) for a SINGLE
+    closed trading day, and whether the model surfaced them. No window
+    aggregation — one day only, anchored to the prediction's own T+2 day when it
+    has closed, else the latest closed window."""
     from .analyze import regret as regret_mod
     from .config import load_config, reports_dir
     nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    summary = regret_mod.aggregate_regret(window_days=window, n=nn,
-                                          signature=signature)
-    click.echo(json.dumps(summary, indent=2, default=str))
-    md = regret_mod.regret_markdown(window_days=window, n=nn, signature=signature)
+    md = regret_mod.single_day_markdown(as_of=on, n=nn, signature=signature)
+    click.echo(md)
     today = pd.Timestamp.today().strftime("%Y-%m-%d")
     suffix = f"_{signature}" if signature else ""
     out = reports_dir() / f"regret_{today}{suffix}.md"
@@ -965,6 +969,24 @@ def run_cmd(mode: str, n_picks: int | None,
             click.echo("")
             click.echo("==> NEXT: paste the prompt file's contents into Gemini Pro with browsing.")
         _maybe_ab()
+
+    # Single-day missed-winners: for the latest fully-closed [T-2 -> today]
+    # window, the top-N realized gainers and whether we surfaced them. No 90-day
+    # aggregation. Reuse the training panel when available (it carries `target`);
+    # otherwise single_day_markdown builds its own.
+    try:
+        from .analyze import regret as _regret
+        from .config import reports_dir
+        _panel = locals().get("panel")
+        md = _regret.single_day_markdown(panel=_panel, n=requested_n)
+        click.echo("")
+        click.echo(md)
+        _today = pd.Timestamp.today().strftime("%Y-%m-%d")
+        _out = reports_dir() / f"regret_{_today}.md"
+        _out.write_text(md, encoding="utf-8")
+        click.echo(f"\nmissed-winners report -> {_out}")
+    except Exception as e:  # never let the diagnostic block a prediction run
+        click.echo(f"[note] single-day missed-winners report skipped: {e}")
 
     elapsed = (_time.time() - started) / 60.0
     click.echo(f"\nelapsed: {elapsed:.1f} min")

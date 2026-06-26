@@ -69,8 +69,13 @@ method obvious at a glance; LLM-only picks are recorded in the ledger under
 .venv\Scripts\python -m stockpredict.cli backtest-ab    # writes reports/backtest_ab_<date>.md (overwrites nothing)
 .venv\Scripts\python -m stockpredict.cli run --ab       # ...or fold the A/B into a run
 
-# Missed-winners analysis: which realized top-N did the model not surface, and why
-.venv\Scripts\python -m stockpredict.cli regret --window 90
+# Missed-winners analysis: for ONE closed window (bought T-2, sold the eval day),
+# the realized top-N gainers and whether the model surfaced them. Single day only
+# — no 90-day aggregation. Default eval day = the latest fully-closed window;
+# pass --on <as_of> to anchor to a prediction's own T+2 day (used by self-correct).
+# Also printed automatically at the end of every `run`.
+.venv\Scripts\python -m stockpredict.cli regret               # latest closed window
+.venv\Scripts\python -m stockpredict.cli regret --on 2026-06-24 -n 10
 
 # Head-to-head: which prediction METHOD picked better (base vs hybrid vs LLM-only),
 # pooled over comparable same-day same-param runs. Advisory — writes reports/mode_comparison_<date>.md
@@ -744,11 +749,13 @@ use [`self_correct_prompt.md`](self_correct_prompt.md). Open Claude Code
 elapsed. It focuses on exactly **two questions** and proposes one
 narrowly-scoped, approval-gated edit per finding:
 
-1. **Missed winners** — `regret` lists the realized top-N liquid tickers (bought
-   T-2, sold today) the model didn't surface, and the loop investigates *why*
-   (a gate dropped it — e.g. `overbought_rsi_max` — or the model scored it low).
-   The lever is a config knob, or the `train-missed` → `backtest-ab` variant
-   (promote it only if its win rate holds).
+1. **Missed winners** — `regret --on <as_of>` lists, for the prediction's own
+   T+2 window (bought T-2, sold the eval day; a **single** closed day, not a
+   90-day aggregate), the realized top-N liquid tickers the model didn't surface,
+   and the loop investigates *why* (a gate dropped it — e.g. `overbought_rsi_max`
+   — or the model scored it low). If T+2 hasn't closed yet, it falls back to the
+   latest fully-closed window. The lever is a config knob, or the `train-missed`
+   → `backtest-ab` variant (promote it only if its win rate holds).
 2. **Entry-price misses** — the limit-fill calibration (`entry_limit_filled` /
    `fill_margin`), now read per conviction tier (`pred_low_alpha`), since a deep
    weak-pick dip not filling is by design.
