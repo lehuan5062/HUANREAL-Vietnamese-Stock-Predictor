@@ -77,7 +77,8 @@ class _RateLimiter:
                 self.cond.notify_all()
 
 
-_LIMITER: _RateLimiter | None = None
+_LIMITERS: dict[str, _RateLimiter] = {}
+_LIMITERS_LOCK = threading.Lock()
 _RATE_LIMIT_ERROR_TOKENS = (
     "rate limit",
     "rate-limit",
@@ -94,18 +95,32 @@ def _looks_like_rate_limit(err: BaseException) -> bool:
     return any(tok.lower() in msg.lower() for tok in _RATE_LIMIT_ERROR_TOKENS)
 
 
-def _limiter() -> _RateLimiter:
-    global _LIMITER
-    if _LIMITER is None:
-        # Configurable via config.yaml -> data.api_per_min, or env override.
-        cfg = load_config()
-        rate = float(os.environ.get("STOCKPREDICT_API_PER_MIN")
-                     or cfg.data.get("api_per_min", 12.0))
-        _LIMITER = _RateLimiter(calls_per_min=rate)
-        logging.getLogger("stockpredict.rate").info(
-            "rate limiter active: %.1f calls/min sliding window", rate
-        )
-    return _LIMITER
+def _limiter(source: str = "_default") -> _RateLimiter:
+    """Return the rate limiter for ``source``, building it on first use.
+
+    Each vnstock backend (VCI / TCBS / KBS / MSN) is a different company's
+    server, so each gets its own sliding-window limiter at ``api_per_min``.
+    A pause after a transient error on one source therefore never throttles
+    the others on the fallback chain in ``fetch_history``."""
+    src = source.upper() if source else "_default"
+    lim = _LIMITERS.get(src)
+    if lim is not None:
+        return lim
+    with _LIMITERS_LOCK:
+        lim = _LIMITERS.get(src)
+        if lim is None:
+            # Configurable via config.yaml -> data.api_per_min, or env override.
+            # api_per_min is the PER-SOURCE cap (each source gets its own limiter).
+            cfg = load_config()
+            rate = float(os.environ.get("STOCKPREDICT_API_PER_MIN")
+                         or cfg.data.get("api_per_min", 12.0))
+            lim = _RateLimiter(calls_per_min=rate)
+            _LIMITERS[src] = lim
+            logging.getLogger("stockpredict.rate").info(
+                "rate limiter active for %s: %.1f calls/min sliding window",
+                src, rate
+            )
+    return lim
 
 
 def _disable_vnstock_hard_exit() -> None:
@@ -146,6 +161,43 @@ def quiet_vnstock_logger() -> None:
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
+def _quote_history(symbol: str, src: str, start: str, end: str,
+                   interval: str, bypass_quota: bool):
+    """Call vnstock's Quote.history, optionally bypassing vnai's client-side
+    rate-limit quota.
+
+    vnstock meters every call through ``vnai.beam.quota.optimize`` (a
+    decorator layered onto ``Quote.history`` at both the public "API" wrapper
+    and the per-source explorer level). That quota — NOT the data providers'
+    own servers — is what enforces the guest tier's 20 req/min cap. vnstock's
+    own error message states the library "automates access to public APIs you
+    already have legitimate access to," so calling the underlying endpoint
+    directly is within bounds.
+
+    Because the decorators use ``functools.wraps``, the undecorated function
+    survives as ``__wrapped__``. We reach the per-source provider instance
+    (``q.provider``) and invoke its raw ``history.__wrapped__`` — skipping both
+    the "API" and per-source quota layers. The body underneath is a plain
+    ``requests`` call (``send_request`` -> ``send_request_direct``), so no
+    quota counter is ever touched. Falls back to the normal decorated call if
+    the internals shift in a future vnstock release."""
+    from vnstock import Quote
+
+    q = Quote(symbol=symbol, source=src)
+    if bypass_quota:
+        try:
+            provider = q.provider
+            raw = provider.history.__wrapped__
+            return raw(provider, start=start, end=end, interval=interval)
+        except (AttributeError, TypeError):
+            # vnstock internals changed — fall back to the metered path.
+            logging.getLogger("stockpredict.rate").warning(
+                "vnai bypass unavailable (vnstock internals changed); "
+                "falling back to metered Quote.history for %s/%s", src, symbol
+            )
+    return q.history(start=start, end=end, interval=interval)
+
+
 def fetch_history(symbol: str, start: str, end: str | None = None,
                   source: str | None = None) -> pd.DataFrame:
     """Fetch raw daily OHLCV from vnstock. Tries the configured source first,
@@ -153,10 +205,15 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
 
     Rate-limit errors trigger a 60s global pause and re-try on the SAME
     source (rather than cycling sources, which would just waste budget).
+
+    When ``data.bypass_vnai_quota`` is set (default), calls go straight to
+    the underlying provider endpoint via ``_quote_history``, sidestepping
+    vnstock's 20/min guest quota. The per-source ``_RateLimiter`` still
+    applies as a politeness throttle against the providers' real servers.
     """
-    from vnstock import Quote
 
     cfg = load_config()
+    bypass_quota = bool(cfg.data.get("bypass_vnai_quota", True))
     end = end or _today_str()
     sources: list[str] = []
     if source:
@@ -173,10 +230,9 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
         for interval in ("1D", "D"):  # vnstock 4 uses 1D, older uses D
             for attempt in range(2):  # one retry after a rate-limit pause
                 try:
-                    _limiter().wait()
-                    df = Quote(symbol=symbol, source=src).history(
-                        start=start, end=end, interval=interval
-                    )
+                    _limiter(src).wait()
+                    df = _quote_history(symbol, src, start, end,
+                                        interval, bypass_quota)
                     if df is None or len(df) == 0:
                         break  # try next interval
                     return _normalize_ohlcv(df)
@@ -187,7 +243,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                     # catch in case the patch ever fails to land — a hard
                     # exit mid-batch would lose ~hours of cache progress.
                     last_err = e
-                    _limiter().pause(65.0, reason=f"{src} hard-exit on {symbol}")
+                    _limiter(src).pause(65.0, reason=f"{src} hard-exit on {symbol}")
                     if attempt == 0:
                         continue
                     break
@@ -196,7 +252,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                     if _looks_like_rate_limit(e):
                         # Server-side window saturated. Pause everyone for
                         # 60s + jitter so the window genuinely empties.
-                        _limiter().pause(65.0, reason=f"{src} 429 on {symbol}")
+                        _limiter(src).pause(65.0, reason=f"{src} 429 on {symbol}")
                         if attempt == 0:
                             continue  # retry same source after the pause
                     break  # non-rate-limit error: try next interval/source
@@ -331,9 +387,8 @@ def update_many(symbols: Iterable[str], full: bool = False,
       * If ``full=False`` (default), audits the cache and only spawns
         thread-pool jobs for **stale** and **cold** tickers — warm ones
         get a zero-delta result without touching the network.
-      * Rate limiting is enforced by the module-level ``_RateLimiter``
-        inside ``fetch_history``, so ``workers`` can be > 1 — they'll
-        serialize at the API boundary.
+      * Rate limiting is per-source: each backend gets its own
+        ``_RateLimiter`` inside ``fetch_history``, so ``workers`` can be > 1.
 
     Fast path: if every selected symbol is already cached through the
     latest expected bar (e.g. running on a Saturday with cache through

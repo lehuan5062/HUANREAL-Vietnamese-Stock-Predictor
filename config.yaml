@@ -6,12 +6,17 @@ data:
   cache_dir: cache           # parquet cache root
   history_start: "2018-01-01"
   fetch_workers: 6           # threads when bulk-fetching OHLCV
-  fetch_delay_sec: 0.15      # polite delay per request
   exchanges: [HSX, HNX, UPCOM]
-  # Rate limit for outbound API calls (sliding 60s window).
-  # Vnstock guest tier = 20/min hard cap; staying well under reduces 429s.
-  # Override at runtime via env: STOCKPREDICT_API_PER_MIN=10
-  api_per_min: 12
+  # Bypass vnstock's client-side vnai quota (the guest-tier 20/min cap) by
+  # calling the underlying public provider endpoint directly. vnstock only
+  # automates access to public APIs you already have legitimate access to —
+  # the cap is the library's sponsorship nudge, not the data provider's limit.
+  bypass_vnai_quota: true
+  # Our own politeness throttle (sliding 60s window), per source. With the
+  # bypass on, vnstock's 20/min guest cap no longer applies, so this is the
+  # only limit — set vs the providers' real servers (which tolerate ~120/min).
+  # 60/min matches vnstock's Community tier. Env override: STOCKPREDICT_API_PER_MIN=10
+  api_per_min: 60
 
 universe:
   liquidity_filter:

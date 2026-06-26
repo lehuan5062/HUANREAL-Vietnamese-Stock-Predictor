@@ -4,8 +4,10 @@ import time
 
 import pytest
 
+import stockpredict.data.fetcher as fetcher
 from stockpredict.data.fetcher import (
     _RateLimiter,
+    _limiter,
     _looks_like_rate_limit,
     _RATE_LIMIT_ERROR_TOKENS,
 )
@@ -61,6 +63,24 @@ def test_concurrent_threads_cannot_exceed_cap():
     slow = [c for c in completed if c - t0 >= 0.3]
     assert len(fast) == 3, f"first 3 should be fast; got {len(fast)}"
     assert len(slow) == 3, f"remaining 3 should be slow; got {len(slow)}"
+
+
+def test_per_source_limiters_are_independent():
+    """Each source gets its own limiter; a pause on one never blocks another."""
+    fetcher._LIMITERS.clear()
+    vci = _limiter("VCI")
+    tcbs = _limiter("TCBS")
+    assert vci is not tcbs, "distinct sources must get distinct limiters"
+    # Same source name (case-insensitive) returns the cached instance.
+    assert _limiter("vci") is vci
+
+    # Pause VCI hard; TCBS must remain immediately available.
+    vci.pause(5.0, reason="synthetic 429")
+    t0 = time.monotonic()
+    tcbs.wait()
+    waited = time.monotonic() - t0
+    assert waited < 0.3, f"TCBS should be unaffected by VCI's pause; waited {waited:.2f}s"
+    fetcher._LIMITERS.clear()
 
 
 def test_looks_like_rate_limit_detects_vnstock_strings():

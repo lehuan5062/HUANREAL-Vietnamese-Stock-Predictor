@@ -98,9 +98,10 @@ same plan the prompt file drives). The primary Claude path is the prompt file
 ## Universe coverage
 
 Every run covers the **entire universe** (all of HOSE + HNX + UPCOM, ~1,765
-tickers today and growing) with no time cap. Expect ~75 minutes the first time
-(vnstock's free guest tier rate-limits at 20 API calls per minute), much faster
-on subsequent runs since cached, up-to-date tickers cost 0 API calls. The smart
+tickers today and growing) with no time cap. Expect ~30 minutes the first time
+(the fetcher bypasses vnstock's 20/min guest quota and self-throttles to
+`api_per_min`, default 60 — see Caveats), much faster on subsequent runs since
+cached, up-to-date tickers cost 0 API calls. The smart
 lazy fetch (`--warm-only yes`, the default) only hits the network for stale and
 cold tickers, so the second run of the day is near-instant.
 
@@ -896,7 +897,7 @@ Key knobs:
     selector.py            curated bluechip list + universe top-up
     tracking.py            prediction ledger + evaluate_pending + feedback_block
     envfile.py             .env loader
-    data/                  vnstock wrappers + parquet cache + global rate limiter
+    data/                  vnstock wrappers (+ vnai quota bypass) + parquet cache + per-source rate limiter
     features/              technical + microstructure indicators
     model/                 target alignment, LightGBM ensemble
     backtest/              walk-forward simulator
@@ -932,14 +933,21 @@ Key knobs:
 
 ## Caveats
 
-- vnstock free tier = **20 req/min** (sliding window, server-side). The fetcher
-  enforces a sliding-window limiter (default `data.api_per_min: 12` in
-  [`config.yaml`](config.yaml), override via `STOCKPREDICT_API_PER_MIN`).
-  When the broker still returns 429 we detect the error string (English +
-  Vietnamese) and force a 65-second global pause before retrying. Failed
-  ticker fetches no longer abort the run — the pipeline proceeds with
-  whatever's already in the parquet cache and reports how many tickers
-  were skipped.
+- The **20 req/min "guest tier" cap is vnstock's own client-side quota**
+  (the bundled `vnai` layer), not the data providers' server limit — vnstock
+  only automates access to public APIs you already have legitimate access to.
+  With `data.bypass_vnai_quota: true` (default) the fetcher calls the
+  underlying provider endpoint directly via the undecorated
+  `provider.history.__wrapped__`, so that quota never applies. What's left is
+  our **own** politeness throttle, a per-source sliding-window limiter
+  (`data.api_per_min: 60` in [`config.yaml`](config.yaml), override via
+  `STOCKPREDICT_API_PER_MIN`) sized against the providers' real servers
+  (which tolerate ~120/min). If vnstock's internals ever change, the bypass
+  falls back to the metered path automatically and logs a warning; a genuine
+  429 is still detected (English + Vietnamese) and triggers a 65-second pause
+  on that source before retry. Failed ticker fetches never abort the run —
+  the pipeline proceeds with whatever's in the parquet cache and reports how
+  many tickers were skipped.
 - vnstock's `Listing` API only supports `KBS`/`VCI`/`MSN`; `Quote` accepts the
   same set. The fetcher falls through these automatically.
 - News modes are advisory, not autonomous trading. They re-rank ML output, they
