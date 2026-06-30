@@ -110,17 +110,30 @@ def resolve_eval_buy_day(panel: pd.DataFrame, as_of=None):
     """The buy day to evaluate. If ``as_of`` (a prediction's buy day) is given and
     its T+2 window has realized, use it — so self-correction run at T+3 or later
     scores the prediction's EXACT T+2 day. Otherwise (its T+2 hasn't closed yet, or
-    no as_of given) use the latest buy day whose window HAS realized — i.e. the most
+    no as_of given) use the latest buy day whose window HAS closed — i.e. the most
     recent fully-closed [T-2 -> today] window. Returns a normalized Timestamp or
-    None."""
+    None.
+
+    We *prefer* buy days whose T+2 sell bar is actually present in the panel (truly
+    closed). ``target`` can be non-NaN for a buy day whose sell bar isn't present
+    yet (e.g. running before today's close is fetched), which would otherwise anchor
+    the report to an unclosed window — the "sold ?" bug. When no sell bars are
+    present at all (synthetic panels / edge), fall back to the target-non-NaN days."""
     days = realized_buy_days(panel)
     if len(days) == 0:
         return None
+    from ..config import load_config
+    k = int(load_config().target["exit_offset_days"])
+    dates = _panel_dates(panel)
+    # A buy day d is "closed" (sell bar present) iff it has k trading bars after it,
+    # i.e. d <= dates[-(k+1)] — equivalent to _sell_day(d) is not None, O(1).
+    sell_ok = days[days <= dates[-(k + 1)]] if len(dates) > k else days[:0]
+    pool = sell_ok if len(sell_ok) else days
     if as_of is not None:
         a = pd.Timestamp(as_of).normalize()
-        if a in days:
+        if a in pool:
             return a
-    return days.max()
+    return pool.max()
 
 
 def _sell_day(panel: pd.DataFrame, buy_day, exit_offset: int | None = None):
@@ -192,9 +205,16 @@ def single_day_missed_winners(panel: pd.DataFrame, ledger: pd.DataFrame,
 def single_day_markdown(panel: pd.DataFrame | None = None,
                         ledger: pd.DataFrame | None = None,
                         as_of=None, n: int = 5,
-                        signature: str | None = None) -> str:
+                        signature: str | None = None):
     """Markdown for the single-day missed-winners view (CLI / run flow /
-    self-correct prompt)."""
+    self-correct prompt).
+
+    Returns ``(md, eval_day)``. ``eval_day`` is the normalized Timestamp of the
+    sell/eval day — the day the winners' T+2 returns actually realized — so
+    callers can name the file after the day the report is *about*, not the
+    wall-clock run day (a report run on two different days for the same closed
+    window then overwrites one file instead of spawning a dupe). None when no
+    buy day has a closed T+2 window yet."""
     if panel is None:
         from ..dataset import build_panel
         # require_target=False keeps the post-window rows (e.g. today, T+1) in the
@@ -208,7 +228,7 @@ def single_day_markdown(panel: pd.DataFrame | None = None,
                                     signature=signature)
     if res is None:
         return ("### Missed winners (single day)\n\n"
-                "_No buy day has a realized T+2 window yet._")
+                "_No buy day has a realized T+2 window yet._"), None
     b, s, w = res["buy_day"], res["sell_day"], res["winners"]
     bs = pd.Timestamp(b).date()
     ss = pd.Timestamp(s).date() if s is not None else "?"
@@ -232,7 +252,12 @@ def single_day_markdown(panel: pd.DataFrame | None = None,
                    else "n/a")
             rk = (int(r.model_rank) if pd.notna(r.model_rank) else "?")
             lines.append(f"- {r.symbol} (our rank {rk}): realized {rrs}")
-    return "\n".join(lines)
+    # Anchor the filename to the eval/sell day (returns realized). The resolver
+    # guarantees a closed window, so s is normally present; fall back to the buy
+    # day only defensively.
+    eval_day = (pd.Timestamp(s).normalize() if s is not None
+                else pd.Timestamp(b).normalize())
+    return "\n".join(lines), eval_day
 
 
 def aggregate_regret(window_days: int = 90, n: int = 5,

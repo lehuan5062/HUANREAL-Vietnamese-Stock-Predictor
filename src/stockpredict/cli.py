@@ -338,11 +338,16 @@ def regret_cmd(on: str | None, n: int | None, signature: str | None) -> None:
     from .analyze import regret as regret_mod
     from .config import load_config, reports_dir
     nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    md = regret_mod.single_day_markdown(as_of=on, n=nn, signature=signature)
+    md, eval_day = regret_mod.single_day_markdown(as_of=on, n=nn, signature=signature)
     click.echo(md)
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+    # Name the file after the eval/sell day the report is about (when returns
+    # realized), not the wall-clock run day, so re-runs that score the same closed
+    # window overwrite one file instead of spawning a dupe. Fall back to today when
+    # no closed window exists yet.
+    day = (eval_day.strftime("%Y-%m-%d") if eval_day is not None
+           else pd.Timestamp.today().strftime("%Y-%m-%d"))
     suffix = f"_{signature}" if signature else ""
-    out = reports_dir() / f"regret_{today}{suffix}.md"
+    out = reports_dir() / f"regret_{day}{suffix}.md"
     out.write_text(md, encoding="utf-8")
     click.echo(f"\nreport -> {out}")
 
@@ -978,11 +983,14 @@ def run_cmd(mode: str, n_picks: int | None,
         from .analyze import regret as _regret
         from .config import reports_dir
         _panel = locals().get("panel")
-        md = _regret.single_day_markdown(panel=_panel, n=requested_n)
+        md, _eval_day = _regret.single_day_markdown(panel=_panel, n=requested_n)
         click.echo("")
         click.echo(md)
-        _today = pd.Timestamp.today().strftime("%Y-%m-%d")
-        _out = reports_dir() / f"regret_{_today}.md"
+        # Name the file after the eval/sell day the report scores (when returns
+        # realized), not the wall-clock run day, so re-runs don't spawn dated dupes.
+        _day = (_eval_day.strftime("%Y-%m-%d") if _eval_day is not None
+                else pd.Timestamp.today().strftime("%Y-%m-%d"))
+        _out = reports_dir() / f"regret_{_day}.md"
         _out.write_text(md, encoding="utf-8")
         click.echo(f"\nmissed-winners report -> {_out}")
     except Exception as e:  # never let the diagnostic block a prediction run
