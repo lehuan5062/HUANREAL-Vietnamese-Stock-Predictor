@@ -47,6 +47,45 @@ def overbought_mask(df: pd.DataFrame) -> pd.Series:
     return ~overbought.fillna(False)
 
 
+def downtrend_mask(df: pd.DataFrame) -> pd.Series:
+    """Boolean Series aligned to df.index: True where the row is in a downtrend
+    (i.e. a rebound candidate).
+
+    The rebound strategy only bets on names that have pulled back, so this gate
+    keeps rows that are BOTH trending down over the medium term and sitting a
+    meaningful distance below their recent high, within an RSI band that
+    excludes free-falling knives (too low) and already-recovered names (too
+    high). All thresholds come from ``strategy.downtrend`` in config:
+
+        mom_20        < mom20_max        (log-return; 0 => a 20-day decline)
+        high_prox_20 <= high_prox_max    (fraction below the 20-day high, e.g. -0.05)
+        rsi_14       >= rsi_floor         (0 disables this leg)
+        rsi_14       <= rsi_ceil
+
+    A missing column, or a disabled leg, is treated as passing (True) so the
+    gate degrades gracefully. When the ``strategy.downtrend`` block is absent
+    entirely the gate is a no-op (all True), preserving legacy behaviour."""
+    cfg = load_config()
+    strat = dict(getattr(cfg, "strategy", {}) or {})
+    dt = dict(strat.get("downtrend", {}) or {})
+    if not dt:
+        return pd.Series(True, index=df.index)
+
+    cond = pd.Series(True, index=df.index)
+    if "mom_20" in df.columns and dt.get("mom20_max") is not None:
+        cond &= df["mom_20"].astype(float) < float(dt["mom20_max"])
+    if "high_prox_20" in df.columns and dt.get("high_prox_max") is not None:
+        cond &= df["high_prox_20"].astype(float) <= float(dt["high_prox_max"])
+    if "rsi_14" in df.columns:
+        floor = float(dt.get("rsi_floor", 0) or 0)
+        if floor > 0:
+            cond &= df["rsi_14"].astype(float) >= floor
+        ceil = dt.get("rsi_ceil")
+        if ceil is not None:
+            cond &= df["rsi_14"].astype(float) <= float(ceil)
+    return cond.fillna(False)
+
+
 @lru_cache(maxsize=1)
 def _ceiling_params() -> tuple[dict, float]:
     cfg = load_config().pricing

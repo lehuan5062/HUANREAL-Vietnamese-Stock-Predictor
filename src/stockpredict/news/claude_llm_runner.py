@@ -1,10 +1,11 @@
 """Build a markdown plan for the LLM-ONLY Claude mode.
 
-Unlike the hybrid plan (``claude_runner.write_plan``), there is NO ML mean head
-here: the candidates are the WHOLE mechanically-filtered universe (uncapped, no
-``pred_mean``), and the in-session Claude does the entire job — select which
-names to buy, rank them by its own conviction, and set the entry / target / stop
-prices itself from its research.
+Unlike the hybrid plan (``claude_runner.write_plan``), there is NO model ranking
+here: the candidates are the WHOLE mechanically-filtered downtrend universe
+(uncapped), and the in-session Claude does the whole job — select which names to
+buy, rank them by its own conviction, and set a profit ``target_vnd`` per pick.
+As in the rest of the rebound pipeline, you BUY AT TODAY'S CLOSE and there is NO
+stop-loss (hold until the target).
 
 Workflow:
   1. ``predict.eligible_universe`` produces the filtered universe (no scoring)
@@ -70,15 +71,15 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         "(liquidity / tradable / ceiling / corporate-action filtered) — it is NOT",
         "ranked or pre-scored. Your job is to do the whole pick:",
         "",
-        f"1. **Select** the best **{int(n_picks)}** name(s) for a T+2 trade from the",
+        f"1. **Select** the best **{int(n_picks)}** name(s) to rebound from the",
         "   universe table, using your own research — fundamentals, news, sector,",
         "   macro, technicals. You may research as many candidates as you need.",
         "2. **Rank** your chosen names by a numeric **conviction** score (higher =",
         "   stronger). The final picks JSON is ordered by this score.",
-        "3. **Price each pick yourself** — set `entry_vnd`, `target_vnd`, `stop_vnd`",
-        "   in VND PER SHARE based on your research (support/resistance, ATR-sized",
-        "   risk, the catalyst). There is no mechanical limit-dip here; the entry",
-        "   MAY sit above today's close if a catalyst warrants guaranteeing a fill.",
+        "3. **Set a profit `target_vnd`** per pick (VND PER SHARE) — the price you'd",
+        "   sell at. You BUY AT TODAY'S CLOSE (the `close` column, ×1000 for VND) —",
+        "   do NOT set an entry. There is NO stop-loss: the trade holds until it",
+        "   reaches your target.",
         "4. For each chosen name, write a `### TICKER — Company` section (template",
         "   below) documenting the business, the dimensions you researched, and",
         "   your findings — then fill the results table at the bottom.",
@@ -160,14 +161,15 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         "",
         "One row per pick, ordered however you like (the finalize step re-sorts by",
         "`conviction`, highest first). `conviction` is any positive number on a",
-        "consistent scale; `entry_vnd` / `target_vnd` / `stop_vnd` are VND per",
-        "share. Write `DROP` in `conviction` to exclude a row you listed.",
+        "consistent scale; `target_vnd` is the sell price in VND per share (you",
+        "buy at the close; no stop). Write `DROP` in `conviction` to exclude a",
+        "row you listed.",
         "",
-        "| rank | symbol | conviction | entry_vnd | target_vnd | stop_vnd |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| rank | symbol | conviction | target_vnd |",
+        "| --- | --- | --- | --- |",
     ]
     for i in range(int(n_picks)):
-        lines.append(f"| {i + 1} |  |  |  |  |  |")
+        lines.append(f"| {i + 1} |  |  |  |")
     lines += [
         "",
         "When done, run:",
@@ -184,14 +186,14 @@ _NUM_RE = re.compile(r"^[+\-]?\d+(?:\.\d+)?$")
 
 
 def _parse_result_row(line: str):
-    """Parse one results-table row: ``| rank | symbol | conviction | entry |
-    target | stop |``. Returns (symbol, conviction|DROP_SENTINEL, entry, target,
-    stop) or None for non-data rows (header / separator / blank cells)."""
+    """Parse one results-table row: ``| rank | symbol | conviction | target_vnd |``.
+    Returns (symbol, conviction|DROP_SENTINEL, target) or None for non-data rows
+    (header / separator / blank cells)."""
     stripped = line.strip()
     if not stripped.startswith("|"):
         return None
     cells = [c.strip() for c in stripped.strip("|").split("|")]
-    if len(cells) < 6:
+    if len(cells) < 4:
         return None
     sym = cells[1].upper()
     if not _SYM_RE.match(sym):
@@ -203,16 +205,15 @@ def _parse_result_row(line: str):
         conviction = float(conv_str)
     else:
         return None
-    entry = _parse_price_cell(cells[3])
-    target = _parse_price_cell(cells[4])
-    stop = _parse_price_cell(cells[5])
-    return sym, conviction, entry, target, stop
+    target = _parse_price_cell(cells[3])
+    return sym, conviction, target
 
 
 def parse_llm_plan(path: str | Path) -> pd.DataFrame:
     """Read the filled LLM-only plan and return DataFrame[symbol, conviction,
-    entry_vnd, target_vnd, stop_vnd, business, dimensions, key_news,
-    dimensions_cited]. ``conviction == DROP_SENTINEL`` marks a dropped row."""
+    target_vnd, business, dimensions, key_news, dimensions_cited]. Entry is the
+    close (set at finalize) and there is no stop. ``conviction == DROP_SENTINEL``
+    marks a dropped row."""
     text = Path(path).read_text(encoding="utf-8")
     sections = _split_per_ticker_sections(text)
     rows = []
@@ -227,7 +228,7 @@ def parse_llm_plan(path: str | Path) -> pd.DataFrame:
         parsed = _parse_result_row(line)
         if not parsed:
             continue
-        sym, conviction, entry, target, stop = parsed
+        sym, conviction, target = parsed
         if sym in seen:
             continue
         seen.add(sym)
@@ -236,9 +237,7 @@ def parse_llm_plan(path: str | Path) -> pd.DataFrame:
         rows.append({
             "symbol": sym,
             "conviction": conviction,
-            "entry_vnd": entry,
             "target_vnd": target,
-            "stop_vnd": stop,
             "business": _extract_step(sec, "Business"),
             "dimensions": _extract_step(sec, "Research dimensions")
                           or _extract_step(sec, "Key drivers"),

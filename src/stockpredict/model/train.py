@@ -1,54 +1,153 @@
-"""Train the LightGBM ensembles on the long panel of (symbol, date, features, target).
+"""Train the rebound recovery estimator on the long panel of
+(symbol, date, features, recovery-targets).
 
-Two heads are trained from the same feature matrix:
-
-* **Mean head** (``TrainedModel``) — regression on ``target`` (forward
-  close-to-close return). This is the existing ranker that decides which
-  tickers are top-K candidates.
-* **Low head** (``RollingEmpiricalQuantileModel``) — a per-ticker rolling
-  empirical quantile of ``target_low`` (next-day low return). Used to
-  predict a realistic limit-buy entry price below today's close. Each
-  ticker is judged on its OWN recent dip distribution, so a name that has
-  not been dipping lately (a momentum runner) quotes an entry near today's
-  close (reachable) rather than an unfillable deep dip. The quantile
-  ``alpha`` is configurable: alpha=0.5 ≈ median dip (fills ~half the time);
-  smaller alpha = deeper dip, lower fill rate.
-
-  This replaced a LightGBM quantile-regression head that had *negative*
-  predictive skill (it quoted its deepest dips on names that gapped up,
-  placing unreachable limits on exactly the wrong tickers). See
-  ``reports/self_correction_2026-06-05_*_stage1.md``.
+The sole head is the **Kaplan-Meier recovery estimator** (``RecoveryKMModel``):
+per downtrend candidate it estimates, from history, the eventual recovery
+probability, the days-to-recovery (N), and the profit at recovery (P). The
+strongest signal is the ticker's OWN downtrend-recovery history (reliable
+bouncers cluster near recovery_prob ~1.0, chronic decliners near 0.0), with a
+coarse RSI × distance-below-high bucket and a pooled all-downtrend fallback for
+thin tickers.
 """
 from __future__ import annotations
 
 import datetime as dt
-import math
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
 from ..config import load_config, models_dir
-from ..dataset import FEATURE_COLS
+
+
+def _km_curve(times: np.ndarray, events: np.ndarray) -> np.ndarray:
+    """Kaplan-Meier survival estimate. ``times`` are integer days-to-event (or
+    censoring time), ``events`` is True where the event (recovery) was observed.
+    Returns an array of [t, S(t)] rows at each distinct time, S the probability
+    of NOT having recovered by t. Censored observations correctly stay in the
+    at-risk set up to their censoring time and never trigger a drop."""
+    times = np.asarray(times, dtype=float)
+    events = np.asarray(events, dtype=bool)
+    n = times.size
+    if n == 0:
+        return np.empty((0, 2))
+    order = np.argsort(times, kind="stable")
+    t = times[order]
+    e = events[order]
+    uniq = np.unique(t)
+    at_risk = n
+    S = 1.0
+    rows = []
+    for tt in uniq:
+        at_tt = t == tt
+        d = int(np.sum(at_tt & e))       # recoveries at tt
+        c = int(np.sum(at_tt & ~e))      # censored at tt
+        if at_risk > 0 and d > 0:
+            S *= (1.0 - d / at_risk)
+        rows.append((tt, S))
+        at_risk -= (d + c)
+    return np.asarray(rows, dtype=float)
+
+
+def _km_summarize(times: np.ndarray, events: np.ndarray) -> tuple[float, float]:
+    """From a KM curve return (recovery_prob, days_to_recover).
+
+    * ``recovery_prob`` = eventual recovery fraction = 1 - S at the last observed
+      time (bounded [0, 1]).
+    * ``days_to_recover`` = KM median survival time (smallest t with S(t) <= 0.5).
+      When the curve never crosses 0.5 (recovery is rare in this bucket), fall
+      back to the restricted mean survival time (area under S), which stays
+      finite and orders buckets sensibly."""
+    curve = _km_curve(times, events)
+    if len(curve) == 0:
+        return 0.0, float("nan")
+    t = curve[:, 0]
+    S = curve[:, 1]
+    recovery_prob = float(min(max(1.0 - S[-1], 0.0), 1.0))
+    below = np.where(S <= 0.5)[0]
+    if below.size:
+        days = float(t[below[0]])
+    else:
+        # Restricted mean survival time: area under the step function from 0..t[-1].
+        edges = np.concatenate([[0.0], t])
+        widths = np.diff(edges)
+        heights = np.concatenate([[1.0], S[:-1]]) if len(S) > 1 else np.array([1.0])
+        days = float(np.sum(widths * heights))
+    return recovery_prob, max(days, 1.0)
 
 
 @dataclass
-class TrainedModel:
-    boosters: list[lgb.Booster]
-    feature_cols: list[str]
+class RecoveryKMModel:
+    """Kaplan-Meier empirical estimator of the rebound recovery episode.
+
+    Downtrend candidates are bucketed by a coarse state (RSI band x
+    distance-below-20d-high band). Each bucket stores, from history:
+
+    * ``recovery_prob`` — eventual fraction that turn profitable (censoring-aware).
+    * ``days`` (N) — KM median days-to-recovery (restricted-mean fallback).
+    * ``profit`` (P) — the ``p_quantile`` of realized profit over that bucket's
+      RECOVERED episodes only (censored rows never poison the magnitude).
+
+    Thin/empty buckets fall back to the ``pooled`` all-downtrend estimate.
+    ``predict`` returns [pred_recovery_prob, pred_days, pred_profit]; the ranker
+    turns these into score = P/N * recovery_prob. ``boosters`` stays empty so
+    call sites echoing ``len(model.boosters)`` keep working."""
+
+    buckets: dict
+    pooled: dict
+    rsi_edges: list
+    high_prox_edges: list
+    p_quantile: float
+    min_bucket_obs: int
     train_end: pd.Timestamp
     train_rows: int
+    boosters: list = field(default_factory=list)
+    # Per-ticker recovery stats {symbol: {recovery_prob, days, profit, n}}. A
+    # ticker's OWN downtrend history is the strongest "healthy vs falling knife"
+    # signal — reliably-bouncing names cluster near recovery_prob ~1.0, chronic
+    # decliners near 0.0 — so it is preferred over the coarse cross-sectional
+    # bucket when the ticker has enough history. Optional (read via getattr) so
+    # older pickles still load.
+    ticker_stats: dict = field(default_factory=dict)
+    min_ticker_obs: int = 100
 
-    def predict(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Returns DataFrame [pred_mean, pred_std] aligned to X.index."""
-        x = X[self.feature_cols].to_numpy(dtype=np.float32)
-        preds = np.column_stack([b.predict(x) for b in self.boosters])
+    def _bucket_key(self, rsi: float, high_prox: float) -> tuple[int, int]:
+        ri = int(np.digitize([float(rsi)], self.rsi_edges)[0])
+        hi = int(np.digitize([float(high_prox)], self.high_prox_edges)[0])
+        return (ri, hi)
+
+    def _lookup(self, symbol: str, rsi: float, high_prox: float) -> dict:
+        # 1) per-ticker (strongest health signal) when it has enough history.
+        tstats = getattr(self, "ticker_stats", None) or {}
+        t = tstats.get(str(symbol))
+        if t is not None and int(t.get("n", 0)) >= int(getattr(self, "min_ticker_obs", 100)):
+            return t
+        # 2) coarse RSI x distance-below-high bucket.
+        if np.isfinite(rsi) and np.isfinite(high_prox):
+            b = self.buckets.get(self._bucket_key(rsi, high_prox))
+            if b is not None and int(b.get("n", 0)) >= self.min_bucket_obs:
+                return b
+        # 3) pooled all-downtrend fallback.
+        return self.pooled
+
+    def predict(self, X: pd.DataFrame,
+                history: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Return [pred_recovery_prob, pred_days, pred_profit] aligned to X.index.
+        ``history`` is accepted for signature parity with the other heads and is
+        unused (the estimator is fully baked at train time)."""
+        rsi = X.get("rsi_14", pd.Series(np.nan, index=X.index)).astype(float).to_numpy()
+        hp = X.get("high_prox_20", pd.Series(np.nan, index=X.index)).astype(float).to_numpy()
+        syms = X.get("symbol", pd.Series("", index=X.index)).astype(str).to_numpy()
+        prob = np.empty(len(X)); days = np.empty(len(X)); profit = np.empty(len(X))
+        for i in range(len(X)):
+            b = self._lookup(syms[i], rsi[i], hp[i])
+            prob[i] = b["recovery_prob"]
+            days[i] = b["days"]
+            profit[i] = b["profit"]
         return pd.DataFrame(
-            {"pred_mean": preds.mean(axis=1), "pred_std": preds.std(axis=1)},
+            {"pred_recovery_prob": prob, "pred_days": days, "pred_profit": profit},
             index=X.index,
         )
 
@@ -57,310 +156,95 @@ class TrainedModel:
             pickle.dump(self, f)
 
     @staticmethod
-    def load(path: str | Path) -> "TrainedModel":
+    def load(path: str | Path) -> "RecoveryKMModel":
         with open(path, "rb") as f:
             return pickle.load(f)
 
 
-def derive_lookback(alpha: float, target_tail_obs: int,
-                    floor: int = 30, cap: int = 120) -> int:
-    """Trading-day window sized so the alpha-quantile rests on ~``target_tail_obs``
-    observations in the tail.
-
-    ``alpha * lookback`` observations fall below the quantile, so to keep
-    ~``target_tail_obs`` of them we need ``lookback ≈ target_tail_obs / alpha``.
-    Bounded by ``floor`` (never so short it's jumpy) and ``cap`` (never so long
-    it goes stale). Self-adjusts when ``entry_low_alpha`` changes — a deeper
-    alpha automatically widens the window.
-    """
-    raw = math.ceil(target_tail_obs / alpha)
-    return int(min(max(raw, floor), cap))
+def _bucket_stats(sub: pd.DataFrame, p_quantile: float) -> dict:
+    """Compute (recovery_prob, days, profit, n) for a set of downtrend rows."""
+    times = sub["target_days_to_recover"].to_numpy(dtype=float)
+    events = sub["target_recovered"].to_numpy(dtype=bool)
+    recovery_prob, days = _km_summarize(times, events)
+    p_recovered = sub.loc[events, "target_recovery_return"].to_numpy(dtype=float)
+    p_recovered = p_recovered[np.isfinite(p_recovered)]
+    profit = float(np.quantile(p_recovered, p_quantile)) if p_recovered.size else float("nan")
+    return {"recovery_prob": recovery_prob, "days": days,
+            "profit": profit, "n": int(len(sub))}
 
 
-@dataclass
-class RollingEmpiricalQuantileModel:
-    """Per-ticker rolling empirical quantile of ``target_low`` (= ``low[T+1]/
-    close[T] - 1``).
+def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
+    """Build the Kaplan-Meier recovery estimator from a feature panel.
 
-    For a prediction on date T, the entry dip for a ticker is the empirical
-    ``alpha``-quantile of that ticker's OWN trailing ``lookback`` next-day-low
-    returns (using only observations whose realized low is known by T — i.e.
-    rows strictly before T, so no lookahead). ``P(fill) ≈ alpha`` per ticker,
-    interpreted against its own recent dip distribution.
-
-    Fallback chain when a ticker has too little history: pooled
-    ``global_quantile`` (market-typical dip), then ``0.0`` (entry == close).
-
-    Stored as a tiny pickle (``models/low_latest.pkl``) so the mean head can be
-    rebuilt independently and old installs without a low model fall through to
-    the close-anchored entry.
-
-    ``boosters`` is always empty — kept only so call sites that echo
-    ``len(model.boosters)`` keep working unchanged.
-    """
-
-    alpha: float
-    target_tail_obs: int
-    lookback: int
-    min_obs: int
-    global_quantile: float
-    train_end: pd.Timestamp
-    train_rows: int
-    boosters: list = field(default_factory=list)
-    # Pooled (market-wide) quantile curve: shape (G, 2) of [alpha, value], so the
-    # thin-ticker fallback can serve an ARBITRARY per-row alpha by interpolation.
-    # Optional + read via getattr so old pickles (without it) still load.
-    global_quantile_grid: "np.ndarray | None" = None
-
-    def _grid_quantile(self, alpha: float) -> float | None:
-        """Pooled (market-wide) quantile at an ARBITRARY alpha, interpolated from
-        the stored ``global_quantile_grid``. Returns None when no grid is stored
-        (old pickles) so the caller can fall back to the scalar global."""
-        grid = getattr(self, "global_quantile_grid", None)
-        if grid is None or len(grid) == 0:
-            return None
-        return float(np.interp(float(alpha), grid[:, 0], grid[:, 1]))
-
-    def _quantile_from_obs(self, obs: np.ndarray, alpha: float | None = None) -> float:
-        a = self.alpha if alpha is None else float(alpha)
-        if obs.size >= self.min_obs:
-            return float(np.quantile(obs, a))
-        # Thin ticker: prefer the pooled grid (honors an arbitrary per-row
-        # alpha), then the scalar global (back-compat), then entry == close.
-        g = self._grid_quantile(a)
-        if g is not None and np.isfinite(g):
-            return g
-        if np.isfinite(self.global_quantile):
-            return float(self.global_quantile)
-        return 0.0
-
-    def predict(self, X: pd.DataFrame,
-                history: pd.DataFrame | None = None,
-                alphas: "np.ndarray | pd.Series | None" = None) -> pd.Series:
-        """Per-row empirical quantile of next-day-low for each row's symbol.
-
-        ``X`` is a cross-section (one row per symbol) indexed by the as-of date,
-        with a ``symbol`` column. ``history`` is the in-memory panel (indexed by
-        date, with ``symbol`` and ``target_low`` columns) — preferred, no I/O.
-        When ``history`` is None, each ticker's history is read from the OHLCV
-        cache instead (used by tests / callers that pass only a snapshot).
-        Built positionally so duplicate index timestamps across symbols are safe.
-
-        ``alphas`` optionally overrides the dip quantile PER ROW (aligned to
-        ``X``) so a caller can demand a deeper dip for a weaker pick. When None,
-        every row uses the model's single ``alpha`` (the original behavior).
-        """
-        arr: np.ndarray | None = None
-        if alphas is not None:
-            arr = np.asarray(alphas, dtype=float)
-            if arr.shape[0] != len(X):
-                raise ValueError(
-                    f"alphas length {arr.shape[0]} != X rows {len(X)}")
-
-        groups: dict[str, pd.Series] = {}
-        if history is not None and not history.empty and "target_low" in history.columns:
-            hist = history[["symbol", "target_low"]].dropna(subset=["target_low"])
-            groups = {str(sym): g["target_low"] for sym, g in hist.groupby("symbol")}
-
-        from ..data.cache import read_ohlcv
-        from .target import next_day_low_return
-
-        out = np.empty(len(X), dtype=float)
-        symbols = X["symbol"].astype(str).to_numpy()
-        asofs = X.index.to_numpy()
-        for i in range(len(X)):
-            a_i = None if arr is None else arr[i]
-            sym = symbols[i]
-            asof = pd.Timestamp(asofs[i])
-            series = groups.get(sym)
-            if series is None and history is None:
-                df = read_ohlcv(sym)
-                if not df.empty and "low" in df.columns:
-                    series = next_day_low_return(df).dropna()
-            if series is None or series.empty:
-                out[i] = self._quantile_from_obs(np.empty(0), alpha=a_i)
-                continue
-            # Strictly before the as-of date → only lows already known at T close.
-            obs = series[series.index < asof].to_numpy()
-            if self.lookback > 0:
-                obs = obs[-self.lookback:]
-            out[i] = self._quantile_from_obs(obs, alpha=a_i)
-        return pd.Series(out, index=X.index, name="pred_low")
-
-    def save(self, path: str | Path) -> None:
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def load(path: str | Path) -> "RollingEmpiricalQuantileModel":
-        with open(path, "rb") as f:
-            return pickle.load(f)
-
-
-def _temporal_split(panel: pd.DataFrame, val_frac: float) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split by date so that the validation set is strictly after the train set."""
-    dates = sorted(panel.index.unique())
-    cutoff = dates[int(len(dates) * (1 - val_frac))]
-    return panel[panel.index < cutoff], panel[panel.index >= cutoff]
-
-
-def train(panel: pd.DataFrame, seeds: Iterable[int] | None = None,
-          weights: pd.Series | None = None) -> TrainedModel:
-    """Fit an ensemble of LightGBM regressors on the mean ``target``.
-
-    ``weights`` (optional, index-aligned to ``panel``) per-row sample weights for
-    the TRAIN split only — used by the missed-winners retrain variant to upweight
-    realized winners. The validation split stays unweighted so early stopping
-    reflects the true distribution. ``weights=None`` reproduces the standard fit
-    exactly."""
+    Filters the panel to downtrend rows (the rebound candidates) with a defined
+    recovery episode, buckets them by (RSI band x distance-below-high band), and
+    fits a KM survival curve per bucket plus a pooled all-downtrend fallback.
+    Reads its knobs from ``strategy.recovery``."""
     if panel.empty:
         raise ValueError("empty training panel")
-    cfg = load_config().model
-    seeds = list(seeds) if seeds is not None else list(cfg["ensemble_seeds"])
-    val_frac = float(cfg["validation_fraction"])
-    early_stop = int(cfg["early_stopping_rounds"])
-    params = dict(cfg["params"])
+    from ..filters import downtrend_mask  # local import to avoid a cycle at load
 
-    if weights is not None:
-        # Carry weights through the split as a column so the temporal split aligns
-        # them positionally — the panel index has duplicate dates, so reindex
-        # can't be used. FEATURE_COLS excludes it, so it never reaches the model.
-        panel = panel.copy()
-        panel["__weight__"] = weights.to_numpy(dtype=np.float32)
-    train_df, val_df = _temporal_split(panel, val_frac)
-    X_tr = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    y_tr = train_df["target"].to_numpy(dtype=np.float32)
-    X_val = val_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    y_val = val_df["target"].to_numpy(dtype=np.float32)
-    w_tr = (None if weights is None
-            else train_df["__weight__"].to_numpy(dtype=np.float32))
-
-    boosters: list[lgb.Booster] = []
-    for seed in seeds:
-        p = dict(params)
-        p["seed"] = seed
-        n_estimators = int(p.pop("n_estimators", 400))
-        dtrain = lgb.Dataset(X_tr, label=y_tr, weight=w_tr,
-                             feature_name=list(FEATURE_COLS))
-        dval = lgb.Dataset(X_val, label=y_val, reference=dtrain,
-                           feature_name=list(FEATURE_COLS))
-        booster = lgb.train(
-            params=p,
-            train_set=dtrain,
-            num_boost_round=n_estimators,
-            valid_sets=[dval],
-            callbacks=[lgb.early_stopping(early_stop, verbose=False),
-                       lgb.log_evaluation(0)],
-        )
-        boosters.append(booster)
-
-    return TrainedModel(
-        boosters=boosters,
-        feature_cols=list(FEATURE_COLS),
-        train_end=panel.index.max(),
-        train_rows=len(panel),
-    )
-
-
-def train_quantile(panel: pd.DataFrame, alpha: float | None = None,
-                   seeds: Iterable[int] | None = None,
-                   target_col: str = "target_low") -> RollingEmpiricalQuantileModel:
-    """Build the per-ticker rolling-empirical-quantile low head from ``panel``.
-
-    ``alpha`` defaults to ``pricing.entry_low_alpha`` from config. The only
-    value fitted at train time is ``global_quantile`` (the pooled alpha-quantile
-    of ``target_col`` across the whole panel), used as a fallback for tickers
-    without enough history; the per-ticker quantiles are computed at predict
-    time from each ticker's own trailing window (see
-    ``RollingEmpiricalQuantileModel.predict``).
-
-    ``seeds`` is accepted but unused (kept so existing call sites that pass it
-    keep working); the empirical quantile has no random seeds.
-    """
-    if panel.empty:
-        raise ValueError("empty training panel")
-    if target_col not in panel.columns:
-        raise KeyError(f"panel missing target column: {target_col}")
+    need = {"target_days_to_recover", "target_recovered", "target_recovery_return",
+            "rsi_14", "high_prox_20"}
+    missing = need - set(panel.columns)
+    if missing:
+        raise KeyError(f"recovery panel missing columns: {sorted(missing)}")
 
     cfg = load_config()
-    if alpha is None:
-        alpha = float(cfg.pricing.get("entry_low_alpha", 0.5))
-    alpha_f = float(alpha)
-    if not 0.0 < alpha_f < 1.0:
-        raise ValueError(f"alpha must be in (0, 1); got {alpha_f}")
+    strat = dict(getattr(cfg, "strategy", {}) or {})
+    recovery = dict(strat.get("recovery", {}) or {})
+    p_quantile = float(recovery.get("p_quantile", 0.5))
+    buckets_cfg = dict(recovery.get("state_buckets", {}) or {})
+    rsi_edges = list(buckets_cfg.get("rsi_edges", [30, 40, 50]))
+    high_prox_edges = list(buckets_cfg.get("high_prox_edges", [-0.20, -0.10, -0.05]))
+    min_bucket_obs = int(recovery.get("min_bucket_obs", 50))
+    min_ticker_obs = int(recovery.get("min_ticker_obs", 100))
 
-    target_tail_obs = int(cfg.pricing.get("entry_low_target_tail_obs", 15))
-    # Size the window for the DEEPEST alpha prediction can request under
-    # conviction coupling (base * weak_mult), so a deep weak-pick dip still
-    # rests on ~target_tail_obs in its tail. With coupling off this equals the
-    # base alpha, so the window is unchanged.
-    hard_min = float(cfg.pricing.get("entry_alpha_hard_min", 0.05))
-    hard_max = float(cfg.pricing.get("entry_alpha_hard_max", 0.75))
-    if bool(cfg.pricing.get("entry_alpha_couple_conviction", True)):
-        weak_mult = float(cfg.pricing.get("entry_alpha_weak_mult", 0.6))
-        deepest_alpha = min(max(alpha_f * weak_mult, hard_min), hard_max)
-    else:
-        deepest_alpha = alpha_f
-    lookback = derive_lookback(deepest_alpha, target_tail_obs)
-    min_obs = target_tail_obs
+    dt_rows = panel[downtrend_mask(panel)].copy()
+    dt_rows = dt_rows.dropna(subset=["target_days_to_recover"])
+    if dt_rows.empty:
+        raise ValueError("no downtrend rows with a recovery label in the panel")
 
-    y = panel[target_col].to_numpy(dtype=float)
-    has_y = bool(np.isfinite(y).any())
-    global_quantile = float(np.nanquantile(y, alpha_f)) if has_y else 0.0
-    # Pooled quantile curve so the thin-ticker fallback can serve any per-row
-    # alpha (not just the base). Monotonic in alpha by construction.
-    if has_y:
-        grid_alphas = np.round(np.arange(0.01, 1.00, 0.01), 2)
-        grid_vals = np.nanquantile(y, grid_alphas)
-        global_quantile_grid = np.column_stack([grid_alphas, grid_vals])
-    else:
-        global_quantile_grid = None
+    ri = np.digitize(dt_rows["rsi_14"].astype(float).to_numpy(), rsi_edges)
+    hi = np.digitize(dt_rows["high_prox_20"].astype(float).to_numpy(), high_prox_edges)
+    dt_rows["__ri__"] = ri
+    dt_rows["__hi__"] = hi
 
-    return RollingEmpiricalQuantileModel(
-        alpha=alpha_f,
-        target_tail_obs=target_tail_obs,
-        lookback=lookback,
-        min_obs=min_obs,
-        global_quantile=global_quantile,
+    buckets: dict[tuple[int, int], dict] = {}
+    for (rk, hk), sub in dt_rows.groupby(["__ri__", "__hi__"]):
+        buckets[(int(rk), int(hk))] = _bucket_stats(sub, p_quantile)
+
+    # Per-ticker recovery reliability — the primary "healthy vs falling knife"
+    # signal. A chronic decliner (e.g. LCC) lands near recovery_prob 0; a name
+    # that reliably bounces near 1.0.
+    ticker_stats: dict[str, dict] = {}
+    if "symbol" in dt_rows.columns:
+        for sym, sub in dt_rows.groupby("symbol"):
+            ticker_stats[str(sym)] = _bucket_stats(sub, p_quantile)
+
+    pooled = _bucket_stats(dt_rows, p_quantile)
+
+    return RecoveryKMModel(
+        buckets=buckets,
+        pooled=pooled,
+        rsi_edges=rsi_edges,
+        high_prox_edges=high_prox_edges,
+        p_quantile=p_quantile,
+        min_bucket_obs=min_bucket_obs,
         train_end=panel.index.max(),
-        train_rows=int(panel[target_col].notna().sum()),
-        global_quantile_grid=global_quantile_grid,
+        train_rows=int(len(dt_rows)),
+        ticker_stats=ticker_stats,
+        min_ticker_obs=min_ticker_obs,
     )
 
 
-def latest_model_path() -> Path:
-    return models_dir() / "latest.pkl"
+def latest_recovery_model_path() -> Path:
+    return models_dir() / "recovery_latest.pkl"
 
 
-def latest_low_model_path() -> Path:
-    return models_dir() / "low_latest.pkl"
-
-
-def latest_missed_model_path() -> Path:
-    """The missed-winners retrain variant — a SEPARATE mean head, parallel to
-    ``latest.pkl``, so the standard model is never overwritten by the experiment."""
-    return models_dir() / "latest_missed.pkl"
-
-
-def save_latest(model: TrainedModel) -> Path:
-    p = latest_model_path()
+def save_latest_recovery(model: RecoveryKMModel) -> Path:
+    p = latest_recovery_model_path()
     model.save(p)
-    stamped = models_dir() / f"model_{dt.date.today().isoformat()}.pkl"
-    model.save(stamped)
-    return p
-
-
-def save_latest_missed(model: TrainedModel) -> Path:
-    p = latest_missed_model_path()
-    model.save(p)
-    stamped = models_dir() / f"model_missed_{dt.date.today().isoformat()}.pkl"
-    model.save(stamped)
-    return p
-
-
-def save_latest_low(model: RollingEmpiricalQuantileModel) -> Path:
-    p = latest_low_model_path()
-    model.save(p)
-    stamped = models_dir() / f"low_model_{dt.date.today().isoformat()}_a{int(model.alpha * 100):03d}.pkl"
+    stamped = models_dir() / f"recovery_model_{dt.date.today().isoformat()}.pkl"
     model.save(stamped)
     return p

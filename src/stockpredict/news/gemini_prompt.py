@@ -20,20 +20,9 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     horizon = int(exit_offset_days) if exit_offset_days is not None else int(
         load_config().target["exit_offset_days"]
     )
-    # Compute the target sell day in Vietnamese trading-day space so the prompt
-    # can quote a concrete date back at Gemini, who can then ask the user
-    # about scheduling a reminder. Reminder fires on the sell day itself at
-    # 11:30 ICT — late morning, just before the noon lunch break.
-    from ..tracking import _next_trading_offset
-    target_date = _next_trading_offset(pd.Timestamp(on), horizon).date()
-    reminder_date = target_date
-    if horizon == 2:
-        sell_window = "13:00–14:30 ICT (afternoon session, after T+2 settlement)"
-        reminder_note = "30 min before T+2 settlement at noon"
-    else:
-        sell_window = "09:00–14:30 ICT (any time during the trading day)"
-        reminder_note = "late morning of sell day, before lunch break"
-    suggested_time = "11:30 ICT"
+    # Rebound uses a flexible exit (hold until the target) — no fixed sell day,
+    # so no sell-day/reminder computation here (see the flexible-exit note at
+    # the end of the prompt). ``horizon`` is kept only for the VN-Index window.
 
     from .company_info import enrich
     candidates = enrich(candidates)
@@ -50,11 +39,16 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
     parts: list[str] = []
     parts.append(
-        f"You are a Vietnamese equities analyst doing thorough RESEARCH on "
-        f"each candidate ticker. Today is {on.isoformat()}. An ML model has "
-        f"narrowed the universe to the candidates below for a T+2 swing "
-        f"trade (buy at today's close, sell at the close two trading days "
-        f"later in the afternoon session, after settlement)."
+        f"You are a Vietnamese equities analyst VETTING rebound candidates. "
+        f"Today is {on.isoformat()}. A model has narrowed the universe to "
+        f"DOWNTREND names it judges statistically likely to bounce back to a "
+        f"small profit (each cleared a per-ticker recovery-probability filter). "
+        f"The trade: buy at today's close and HOLD until the price recovers to "
+        f"the profit target (a flexible exit, typically a few days to a couple "
+        f"of weeks — there is no fixed sell day). Your job is the human check "
+        f"the statistics can't do: for each name, is it a healthy company in a "
+        f"temporary dip that will recover, or a FALLING KNIFE (fraud, delisting, "
+        f"insolvency, structural decline) where the drop is justified?"
     )
     parts.append("")
     if "missed_only" in candidates.columns or ab_verdict:
@@ -102,16 +96,21 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         parts.append(ETF_GUIDANCE_MD)
         parts.append("")
     parts.append(
-        "4. **Score** -1 / 0 / +1 based on what you actually found. Price/"
-        "technical noise alone = 0."
+        "4. **Score the rebound** -1 / 0 / +1: `+1` = news supports the bounce "
+        "(recovery catalyst, or a sound company in a temporary/technical dip); "
+        "`0` = nothing material, the statistical case stands; `-1` = news works "
+        "AGAINST the bounce (deteriorating fundamentals, dilution, governance "
+        "concern — the dip may be justified). Price/technical noise alone = 0."
     )
     parts.append("")
     parts.append(
-        "**Hard override**: if a ticker is delisted / suspended / in bankruptcy, "
-        "score it -1 and write `DROP:` at the start of the rationale."
+        "**Hard override**: if a ticker is delisted / suspended / in bankruptcy "
+        "/ fraud, write `DROP:` at the start of the rationale — it must not be "
+        "traded no matter how attractive its score (this is exactly the falling "
+        "knife the statistical filter can miss)."
     )
     parts.append("")
-    parts.append(f"Adjusted score formula: adjusted = pred_mean * (1 + {weight} * news_score)")
+    parts.append(f"Adjusted score formula: adjusted = score * (1 + {weight} * news_score)")
     parts.append("")
 
     parts.append("## Vietnamese news sources to consult")
@@ -167,28 +166,31 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
     parts.append("## Candidates")
     parts.append("")
-    parts.append("| symbol | type | company | pred_mean | entry_vnd | target_vnd | stop_vnd | fees_vnd | net_vnd | rr | below_bar | flag |")
-    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    parts.append("| symbol | type | company | score | N_days | P | recov_prob | buy_vnd | target_vnd | net_vnd | below_bar |")
+    parts.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for _, r in candidates.iterrows():
         name = (r.get("organ_name") or "")[:50]
         itype = str(r.get("instrument_type", "STOCK") or "STOCK").upper()
-        entry = int(r["entry_vnd"]) if "entry_vnd" in r and pd.notna(r.get("entry_vnd")) else 0
+        entry = int(r["close_vnd"]) if "close_vnd" in r and pd.notna(r.get("close_vnd")) else 0
         target = int(r["target_vnd"]) if "target_vnd" in r and pd.notna(r.get("target_vnd")) else 0
-        stop = int(r["stop_vnd"]) if "stop_vnd" in r and pd.notna(r.get("stop_vnd")) else 0
-        fees = int(r["fees_round_trip_vnd"]) if "fees_round_trip_vnd" in r and pd.notna(r.get("fees_round_trip_vnd")) else 0
         net = int(r["net_reward_vnd"]) if "net_reward_vnd" in r and pd.notna(r.get("net_reward_vnd")) else 0
-        rr = r.get("rr_ratio", float("nan"))
-        rr_str = f"{rr:.2f}" if pd.notna(rr) else "-"
-        below = "yes" if r.get("below_breakeven", False) else "no"
-        flag = ("missed-only" if r.get("missed_only", False)
-                else ("also-missed" if r.get("also_missed", False) else "standard"))
+        score = r.get("score", float("nan"))
+        nd = r.get("pred_days", float("nan"))
+        nd_str = f"{nd:.0f}" if pd.notna(nd) else "-"
+        pp = r.get("pred_profit", float("nan"))
+        pp_str = f"{pp:+.3f}" if pd.notna(pp) else "-"
+        rp = r.get("pred_recovery_prob", float("nan"))
+        rp_str = f"{rp:.0%}" if pd.notna(rp) else "-"
+        below = "yes" if r.get("below_recovery_bar", False) else "no"
         parts.append(
-            f"| {r['symbol']} | {itype} | {name} | {r['pred_mean']:+.4f} | "
-            f"{entry:,} | {target:,} | {stop:,} | {fees:,} | {net:+,} | {rr_str} | {below} | {flag} |"
+            f"| {r['symbol']} | {itype} | {name} | {score:.4f} | {nd_str} | "
+            f"{pp_str} | {rp_str} | {entry:,} | {target:,} | {net:+,} | {below} |"
         )
     parts.append("")
     parts.append("All VND values are PER SHARE; position sizing is left to the user.")
-    parts.append("`net_vnd` already accounts for ACBS round-trip fees (commission + VAT + PIT).")
+    parts.append("`score` = P/N × recovery_prob (profit-per-day × bounce probability). "
+                 "`N_days` = expected trading days to bounce; `P` = expected profit at the "
+                 "bounce; `net_vnd` already accounts for ACBS round-trip fees.")
     parts.append("")
 
     parts.append("## Output format")
@@ -209,7 +211,7 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append('     "business": "1-line description of what the company does",')
     parts.append('     "dimensions": ["the 3-7 dimensions YOU derived for this ticker"],')
     parts.append('     "drivers": ["the 2-3 most material drivers among the dimensions"],')
-    parts.append('     "ml_score": 0.0017, "news_score": 1, "adjusted": 0.001785,')
+    parts.append('     "score": 0.0167, "news_score": 1, "adjusted": 0.0184,')
     parts.append('     "adj_entry_vnd": 13400, "adj_target_vnd": 13900,')
     parts.append('     "rationale": "1-2 sentences citing specific findings with dates",')
     parts.append('     "key_news": ["finding 1 (date, source)", "finding 2"]}')
@@ -219,46 +221,29 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("")
     parts.append(
         "**`adj_entry_vnd` / `adj_target_vnd` (optional, news-adjusted trade).** "
-        "The `entry_vnd` / `target_vnd` in the candidates table are mechanical: "
-        "the entry is a per-ticker dip limit that ignores today's news, so on a "
-        "broad news-driven melt-up the dip never comes and the limit never fills. "
-        "If your research says a ticker will gap up (or down), set `adj_entry_vnd` "
-        "and `adj_target_vnd` to the entry and target you'd actually place (VND "
-        "per share). These do NOT replace the mechanical prices — the program "
-        "keeps both and shows the news-adjusted trade alongside. Unlike the "
-        "mechanical entry, `adj_entry_vnd` MAY sit ABOVE today's close to "
-        "guarantee a fill on a strong catalyst. Omit both (or set them equal to "
-        "the mechanical `entry_vnd` / `target_vnd`) when you have no price view."
+        "The `buy_vnd` / `target_vnd` in the candidates table are mechanical: buy "
+        "at today's close, target = close × (1 + expected profit). If your "
+        "research says a ticker will gap up or down on a catalyst (so the plain "
+        "close-entry / target no longer fits), set `adj_entry_vnd` and "
+        "`adj_target_vnd` to the entry and target you'd actually place (VND per "
+        "share). These do NOT replace the mechanical prices — the program keeps "
+        "both and shows the news-adjusted trade alongside. Omit both (or set them "
+        "equal to the mechanical prices) when you have no price view."
     )
     parts.append("")
     parts.append("List ALL candidates below, sorted by `adjusted` descending "
                  "(drop any you judge should be excluded on the news).")
     parts.append("")
-    parts.append("## Final step — sell reminder (after the JSON, in chat)")
+    parts.append("## Final step — flexible exit (after the JSON, in chat)")
     parts.append("")
     parts.append(
-        f"After you output the JSON, note that every candidate above is a "
-        f"pick (the program returns a fixed number, ranked by score). The "
-        f"`below_bar: yes` flag just marks a weaker-edge pick — useful "
-        f"context, not a reason to skip the reminder."
-    )
-    parts.append("")
-    parts.append(
-        f"Ask the user — in plain text after the JSON, NOT inside the JSON — "
-        f"whether they would like to schedule a reminder in **GMT+7 "
-        f"(Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit.\n"
-        f"- Sell day: {target_date.isoformat()} ({sell_window}).\n"
-        f"- Reminder fires: {reminder_date.isoformat()} {suggested_time} — "
-        f"on the sell day itself ({reminder_note}). "
-        f"This gives the user time to review and queue exit orders for the "
-        f"afternoon session."
-    )
-    parts.append("")
-    parts.append(
-        "Suggest concrete options: a Google Calendar event, a phone alarm, "
-        "or whatever the user prefers. If the user says yes, give them an "
-        "ICS-style summary they can paste in: `BEGIN:VEVENT … DTSTART;TZID="
-        "Asia/Ho_Chi_Minh:…`."
+        "After the JSON, remind the user in plain text that this is a REBOUND "
+        "trade with a FLEXIBLE exit: there is no fixed sell day. Each pick has a "
+        "target price (`target_vnd`) and an expected hold (`N_days` to bounce). "
+        "The user monitors and sells manually when the price reaches the target. "
+        "So do NOT propose a hard sell-day alarm; if the user wants a nudge, "
+        "suggest an optional check-in around N_days out (GMT+7) to re-examine any "
+        "pick that hasn't recovered yet — 'take a look', not 'sell now'."
     )
     return "\n".join(parts)
 

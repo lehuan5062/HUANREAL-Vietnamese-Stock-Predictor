@@ -41,26 +41,57 @@ features:
   realized_vol_window: 20
 
 target:
-  # Horizon for the swing trade. T+2 close-to-close by default.
-  # Switch entry to "next_open" if you plan to buy at T+1 open instead of T close.
-  entry: close              # close | next_open
-  exit_offset_days: 2       # T -> T+2
+  # Nominal horizon used ONLY as a label in run signatures / ledger rows and
+  # report filenames (e.g. the `d2` token). The rebound strategy exits flexibly
+  # (hold until the profit target), so this does not drive any exit.
+  exit_offset_days: 2
 
-model:
-  algorithm: lightgbm
-  params:
-    n_estimators: 400
-    learning_rate: 0.03
-    num_leaves: 31
-    min_child_samples: 50
-    feature_fraction: 0.85
-    bagging_fraction: 0.85
-    bagging_freq: 5
-    objective: regression
-    verbose: -1
-  ensemble_seeds: [11, 22, 33, 44, 55]
-  early_stopping_rounds: 40
-  validation_fraction: 0.15
+strategy:
+  # The rebound / mean-reversion strategy: filter to downtrend names, predict
+  # days-to-recovery (N) and the profit at recovery (P), rank by P/N × recovery
+  # probability, and hold until the position first turns profitable (flexible
+  # exit — no fixed sell day).
+  downtrend:
+    # A candidate is "in a downtrend" (and therefore a rebound candidate) when
+    # ALL enabled conditions hold. Loosen these to widen the candidate pool.
+    mom20_max: 0.0           # require mom_20 < this (log-return; 0 = 20-day decline)
+    high_prox_max: -0.05     # require close <= this fraction below the 20-day high
+    rsi_floor: 0             # require rsi_14 >= this (excludes free-falling knives). 0 disables.
+    rsi_ceil: 50             # require rsi_14 <= this (not already recovered hard)
+  recovery:
+    # "Profitable point" = first future day whose close beats entry by
+    # (round-trip cost + profit_margin). See pricing.profit_threshold().
+    profit_margin: 0.005     # extra return above fees to call a day "profitable"
+    p_quantile: 0.5          # per-bucket P summary (0.5 = median recovered profit)
+    # Cap (trading days) on the historical recovery-labeling scan. NOT a trading
+    # policy cap (the strategy holds until recovery) — it only bounds labeling so
+    # it stays O(H) per symbol. Rows not recovered within it are right-censored.
+    label_max_horizon: 250
+    # There is no stop-loss and no time cap: the strategy holds each pick until
+    # it recovers to the profit target. (Backtests showed a stop hurts this
+    # mean-reversion bet, and the min_recovery_prob healthy filter is what keeps
+    # chronic decliners out in the first place.)
+    # Healthy-ticker gate: drop candidates whose estimated recovery probability
+    # is below this. The estimate is dominated by the ticker's OWN historical
+    # downtrend-recovery rate (chronic decliners ~0, reliable bouncers ~1), so
+    # this screens out falling knives that would otherwise be held forever under
+    # the no-stop / no-cap flexible exit. 0 disables. ~0.85 keeps roughly the
+    # top three-quarters of tickers by reliability.
+    min_recovery_prob: 0.85
+    # A candidate uses its OWN recovery history once it has at least this many
+    # downtrend rows; thinner tickers fall back to the RSI x drawdown bucket,
+    # then to the pooled all-downtrend estimate.
+    min_ticker_obs: 100
+    # A state bucket must hold at least this many historical downtrend rows to be
+    # trusted; thinner buckets fall back to the pooled all-downtrend estimate.
+    min_bucket_obs: 50
+    # Coarse state buckets the Kaplan-Meier recovery estimator conditions on.
+    # A candidate's (RSI band x distance-below-high band) picks its bucket; the
+    # estimator reads that bucket's historical recovery curve. Thin/empty
+    # buckets fall back to the pooled (all-downtrend) curve.
+    state_buckets:
+      rsi_edges: [30, 40, 50]
+      high_prox_edges: [-0.20, -0.10, -0.05]
 
 backtest:
   start: "2020-01-01"
@@ -85,118 +116,28 @@ broker:
   # gate (rr / net) is size-invariant.
 
 pricing:
-  # How wide to set the stop-loss, in multiples of ATR(14).
-  # 1.0 = very tight (often stopped out by noise);
-  # 1.5 = moderate; 2.0 = loose (expensive when wrong).
-  stop_atr_mult: 1.5
-  # Take-profit distance, in multiples of ATR(14). The reward leg is ATR-scaled
-  # (like the stop) rather than derived from the model's tiny 2-day return
-  # forecast. This is the fix for the "only one actionable pick" pathology: the
-  # old target = close*(1+pred_mean) put reward on the scale of a ~0.1% forecast
-  # while risk sat on a ~4% ATR stop, so rr_ratio was structurally ~0.2 and the
-  # 0.8 gate was reachable ONLY by prediction outliers — which are almost always
-  # split / corporate-action data glitches (hence low accuracy too). With an
-  # ATR-scaled target, rr_ratio ≈ target_atr_mult / stop_atr_mult is controlled,
-  # and selection comes from the directional edge gate below.
-  target_atr_mult: 2.0
-  # Minimum required net risk-reward (after fees) to flag a pick as actionable.
-  # The CLI shows `actionable: True/False` based on this gate. With an ATR-scaled
-  # target this is now a sanity floor (rr is ~target_atr_mult/stop_atr_mult);
-  # the real selectivity is the directional edge gate (min_edge_over_cost).
-  min_rr_ratio: 0.8
-  # Directional edge gate. A pick is actionable only if the model's predicted
-  # forward return clears this multiple of the round-trip cost (fees as a % of
-  # entry, i.e. breakeven_pct). 1.0 = the forecast must at least beat breakeven;
-  # higher = demand a stronger signal and surface fewer names. This is what
-  # decides HOW MANY tickers are actionable now that rr no longer does.
-  min_edge_over_cost: 1.0
-  # Sanity guard against unadjusted split / corporate-action artifacts. The mean
-  # head is a calibrated 2-day return predictor; a |forecast| above this fraction
-  # is almost never a real signal — it's the model extrapolating a huge bounce
-  # off a broken price (e.g. mom_20 ≈ -0.9 from a missed split). Such rows are
-  # dropped from the candidate set before ranking/pricing. Set to 0 to disable.
-  max_abs_pred_mean: 0.05
-  # How many picks to return. The program always surfaces EXACTLY this many
-  # names — it ranks the whole scored universe by pred_mean and keeps the top
-  # `default_picks`, so the difficulty (the implicit edge cutoff) floats to
-  # whatever admits exactly this count. Picks whose forecast is below the
-  # break-even quality bar (pred_mean < min_edge_over_cost × breakeven_pct) are
-  # still returned but flagged `below_breakeven` and counted in a warning.
-  # Override per-run with `--picks N` / `-n N`.
+  # How many picks to return. The program surfaces EXACTLY this many names —
+  # the top `default_picks` downtrend candidates by rebound score (P/N ×
+  # recovery_prob). Override per-run with `--picks N`.
   default_picks: 1
-  # Quantile alpha used by the "low" head to predict the next-day dip
-  # the user can place as a limit-buy. The low head computes, per ticker, the
-  # alpha-th empirical quantile of that ticker's OWN recent next-day-low
-  # returns. P(fill) ≈ alpha against the ticker's own recent dip distribution.
-  #   0.25 = aggressive (deeper dip, ~25% fill, cheaper when filled)
-  #   0.50 = median (fills ~half the time)
-  #   0.75 = conservative (shallow dip, ~75% fill)
-  # When no `models/low_latest.pkl` is present, the program falls back
-  # to entry = today's close (the legacy behavior).
-  #
-  # NOTE: with conviction coupling on (below), `entry_low_alpha` is the BASE /
-  # pivot alpha for a pick sitting exactly on the break-even bar; the actual
-  # per-pick alpha is `base × conviction-multiplier`.
-  entry_low_alpha: 0.40
-  # Conviction-coupled entry dip-depth. The limit-buy dip quantile alpha varies
-  # PER PICK, inversely to conviction: a strong pick (pred_mean well above the
-  # cost bar) gets a SHALLOW dip (high alpha, fills easily — "get me in"); a
-  # marginal / below-breakeven pick gets a DEEP dip (low alpha, only fills at a
-  # bargain, so the exact-N "always return N" rule can't force a bad trade).
-  # The band is multipliers of `entry_low_alpha`, so it rescales if you retune
-  # the base. edge_ratio = pred_mean / (min_edge_over_cost × round-trip-cost);
-  # edge_ratio 1.0 (on the bar) -> alpha = base.
-  entry_alpha_couple_conviction: true
-  entry_alpha_weak_mult: 0.6      # alpha multiplier at zero edge (weak pick)
-  entry_alpha_strong_mult: 1.25   # alpha multiplier at/above strong_edge (kept modest — fill-chasing risk)
-  entry_alpha_strong_edge: 3.0    # edge_ratio that reaches strong_mult
-  entry_alpha_hard_min: 0.05      # absolute clamp on the per-pick alpha
-  entry_alpha_hard_max: 0.75
-  # Overbought ALSO hardens the dynamic entry (soft complement to the hard RSI
-  # gate below): the more overbought a surviving pick, the lower its alpha ->
-  # deeper dip -> only fills on a real pullback. Multiplies the conviction alpha.
-  # Ramp: no penalty below `start`, linear down to `mult` at/above `full`.
-  # Set mult=1.0 to disable. Only active when entry_alpha_couple_conviction.
-  entry_alpha_overbought_start: 60   # RSI where the penalty begins
-  entry_alpha_overbought_full: 85    # RSI where the penalty is fully applied
-  entry_alpha_overbought_mult: 0.5   # alpha multiplier at/above `full`
-  # Exclude names locked limit-up: a stock that closed at the daily ceiling
-  # opens the next session with a buy queue and no sellers, so a limit-buy
-  # can't fill (you "can't buy it for days"). Per-exchange daily price-band
-  # limits (fractions); a bar is treated as a ceiling-lock when it closed at
-  # its high AND the 1-day return is within `ceiling_tol` of the band (the
-  # tolerance absorbs tick rounding, which shaves the realized ceiling gain a
-  # bit below the nominal band).
-  # Overbought hard gate (RSI-only). Drop any candidate whose rsi_14 exceeds
-  # this level before ranking — an overbought blow-off (run too far) tends to
-  # reverse, and historically RSI>80 names win far less often. This is distinct
-  # from the liquidity volume-spike defense (min_adv_active_days), which guards
-  # tradability, not exhaustion. 0 disables the gate.
+  # Overbought hard gate (RSI-only). Drop any candidate whose rsi_14 exceeds this
+  # level before ranking. 0 disables (the downtrend filter already excludes
+  # high-RSI names, so this is usually redundant and left off).
   overbought_rsi_max: 0
+  # Per-exchange daily price-band limits (fractions) + tolerance, used to detect
+  # ceiling-locked bars (a name that closed at its ceiling can't be bought next
+  # session) and corporate-action glitches.
   ceiling_limits: {HSX: 0.07, HNX: 0.10, UPCOM: 0.15}
   ceiling_tol: 0.015
-  # Corporate-action guard. Vietnamese exchanges cap a single day's close-to-close
-  # move at the band above (HOSE 7% / HNX 10% / UPCOM 15%), so any 1-day return
-  # beyond the band is impossible without a corporate action (split, rights issue,
-  # special dividend) — the unadjusted feed then shows a phantom crash/spike that
-  # poisons mom_*/atr_14/rsi_14. A ticker is dropped from the candidate set while
-  # a band-breaking move sits inside this lookback window (matches the longest
-  # feature window, mom_20, so contamination is fully covered). Set to 0 to disable.
+  # Corporate-action guard. A 1-day close-to-close move beyond the exchange band
+  # is impossible without a corporate action (split / rights / special dividend);
+  # the unadjusted feed then shows a phantom spike that poisons the features. A
+  # ticker is dropped while such a band-break sits inside this lookback window.
+  # Set to 0 to disable.
   corp_action_lookback: 20
-  # Target number of observations the alpha-quantile should rest on in the tail.
-  # The per-ticker trailing window auto-sizes to lookback =
-  # clip(ceil(target_tail_obs / alpha), 30, 120) trading days, so a deeper alpha
-  # automatically widens the window and the quantile estimate stays stable when
-  # entry_low_alpha is retuned. Tickers with fewer than this many observations
-  # fall back to the pooled (market-wide) alpha-quantile, then to entry = close.
-  entry_low_target_tail_obs: 15
-  # Advisory position-size cap, expressed as a participation rate against the
-  # stock's 20-day average daily traded value (adv_vnd_20). The program suggests
-  # suggested_max_units = max_participation_pct/100 * adv_vnd_20_in_VND / entry_vnd
-  # so a position can be entered/exited without dominating the tape. Absolute
-  # percent (1.0 means 1% of ADV). Purely informational — it does NOT affect the
-  # actionable gate (which stays size-invariant). When adv_vnd_20 is missing the
-  # cap column is left null. Set to 0 to disable the suggestion entirely.
+  # Advisory position-size cap: suggested_max_units = max_participation_pct/100 ×
+  # adv_vnd_20_in_VND / buy_price, so a position can be entered/exited without
+  # dominating the tape. Purely informational. Set to 0 to disable.
   max_participation_pct: 1.0
 
 modes:

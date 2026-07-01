@@ -1,10 +1,10 @@
 @echo off
-title Vietnamese T+2 Predictor - BASE mode
+title Vietnamese Rebound Predictor - BASE mode
 cd /d "%~dp0"
 
 echo.
-echo === Vietnamese T+2 Stock Predictor (BASE mode) ===
-echo Pure ML + technical filter. No news, no LLM.
+echo === Vietnamese Rebound Stock Predictor (BASE mode) ===
+echo Downtrend filter + Kaplan-Meier recovery model, ranked by P/N. No news, no LLM.
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
@@ -14,7 +14,8 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-rem Horizon is always T+2 (Vietnamese settlement). Choose how many picks.
+rem Rebound trade: buy at close, hold until the price recovers to the profit
+rem target (flexible exit — no fixed sell day). Choose how many picks.
 set /p PICKS=Number of picks to return [1]:
 if "%PICKS%"=="" set PICKS=1
 
@@ -51,24 +52,14 @@ if /I "%WARM%"=="always" set WARM_VALUE=always
 if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
-rem Missed-winners variant: ON by default (writes a 2nd _missed report alongside
-rem the standard one; nothing is overwritten). Answer n to skip it.
-set MISSED_FLAG=
-set /p MISSED=Also build the missed-winners variant report? y/n [y]:
-if /I "%MISSED%"=="n" set MISSED_FLAG=--no-missed
-
-rem Standard-vs-missed A/B backtest: OFF by default for base (slow ~10 min,
-rem retrains across years, result barely moves day-to-day). Answer y to also
-rem write reports\backtest_ab_<date>.md.
-set AB_FLAG=--no-ab
-set /p AB=Run the slow standard-vs-missed A/B backtest too? y/n [n]:
-if /I "%AB%"=="y" set AB_FLAG=--ab
+rem (The missed-winners variant and its A/B backtest were retired with the
+rem rebound pivot — those prompts are gone.)
 
 echo.
-echo Running: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base  missed=%MISSED%  ab=%AB%
+echo Running: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  mode=base
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% %MISSED_FLAG% %AB_FLAG% --mode base
+.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode base
 
 echo.
 echo === Done. Picks saved to reports\ ===

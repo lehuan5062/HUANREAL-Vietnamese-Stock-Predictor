@@ -1,1 +1,1 @@
-"""Analysis helpers (missed-winners / regret)."""
+"""Analysis helpers (cross-method comparison)."""

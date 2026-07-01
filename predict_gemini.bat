@@ -1,9 +1,9 @@
 @echo off
-title Vietnamese T+2 Predictor - GEMINI mode
+title Vietnamese Rebound Predictor - GEMINI mode
 cd /d "%~dp0"
 
 echo.
-echo === Vietnamese T+2 Stock Predictor (GEMINI mode) ===
+echo === Vietnamese Rebound Stock Predictor (GEMINI mode) ===
 echo Step 1: ML stage runs locally and writes a prompt file.
 echo Step 2: You paste the prompt into Gemini Chat (web, with browsing).
 echo Step 3: Save Gemini's JSON response, then re-run this .bat to finalize.
@@ -27,7 +27,9 @@ echo Invalid choice.
 goto menu
 
 :step1
-rem Horizon is always T+2 (Vietnamese settlement). Choose how many picks.
+rem Rebound trade: buy at close, hold until recovery to the profit target
+rem (flexible exit). Gemini vets each candidate (healthy bounce vs falling
+rem knife). Choose how many picks.
 set /p PICKS=Number of picks to return [1]:
 if "%PICKS%"=="" set PICKS=1
 
@@ -64,25 +66,14 @@ if /I "%WARM%"=="always" set WARM_VALUE=always
 if "%WARM%"=="" set WARM=y
 set WARM_FLAG=--warm-only %WARM_VALUE%
 
-rem Missed-winners variant: ON by default. UNIONs the variant's top picks into
-rem the candidates Gemini researches (flagged in the prompt) so it judges both
-rem rankings. Answer n to research only the standard candidates.
-set MISSED_FLAG=
-set /p MISSED=Include the missed-winners variant candidates (union)? y/n [y]:
-if /I "%MISSED%"=="n" set MISSED_FLAG=--no-missed
-
-rem Standard-vs-missed A/B backtest: ON by default for Gemini mode, so the prompt
-rem embeds the verdict for Gemini to weigh. SLOW (~10 min). Answer n to skip;
-rem the prompt then uses the most recent prior A/B report if one exists.
-set AB_FLAG=--ab
-set /p AB=Run the standard-vs-missed A/B backtest (verdict goes into the prompt)? y/n [y]:
-if /I "%AB%"=="n" set AB_FLAG=--no-ab
+rem (The missed-winners variant and its A/B backtest were retired with the
+rem rebound pivot — those prompts are gone.)
 
 echo.
-echo Running ML stage: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%  missed=%MISSED%  ab=%AB%
+echo Running rebound stage: picks=%PICKS%  hose-only=%HOSE%  etfs=%ETFS%  exclude=%EXCLUDE%  warm-only=%WARM_VALUE%
 echo.
 
-.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% %MISSED_FLAG% %AB_FLAG% --mode gemini
+.venv\Scripts\python.exe -m stockpredict.cli run --picks %PICKS% %HOSE_FLAG% %ETF_FLAG% %EXCLUDE_FLAG% %WARM_FLAG% --mode gemini
 
 echo.
 echo Opening today's prompt file in Notepad.

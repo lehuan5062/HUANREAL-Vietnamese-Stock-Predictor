@@ -7,7 +7,7 @@ The Gemini prompt (built by news/gemini_prompt.py) instructs Gemini to return:
       "global_summary": "...",
       "picks": [
         {"symbol": "DXG", "business": "...", "drivers": ["..."],
-         "ml_score": 0.0017, "news_score": 1, "adjusted": 0.001785,
+         "score": 0.0167, "news_score": 1, "adjusted": 0.0184,
          "rationale": "...", "key_news": ["..."]}
       ]
     }

@@ -28,7 +28,7 @@ def test_read_backfills_missing_slippage_columns(monkeypatch, tmp_path):
     later_added = (set(tracking._NEW_FLOAT_COLUMNS)
                    | set(tracking._NEW_STRING_COLUMNS)
                    | set(tracking._NEW_BOOL_COLUMNS)
-                   | {"t0_evaluated"})
+                   | {"t0_evaluated", "actual_exit_date", "exit_reason"})
     legacy_cols = [c for c in tracking._LEDGER_COLUMNS if c not in later_added]
     today = pd.Timestamp("2026-05-05").normalize()
     legacy = pd.DataFrame([{

@@ -114,7 +114,9 @@ def build_panel(symbols: list[str] | None = None,
     panel = _drop_corporate_action_rows(panel, exit_offset_days)
     panel = panel.dropna(subset=FEATURE_COLS)
     if require_target:
-        panel = panel.dropna(subset=["target"])
+        # Recovery labeling assigns N to every row (event time or censoring
+        # time), so this only drops rows with too little history to label.
+        panel = panel.dropna(subset=["target_days_to_recover"])
     # Canonical (date, symbol) row order. A plain ``sort_index()`` orders by
     # date only, leaving same-date rows in concat (i.e. input-symbol) order —
     # so the row layout depended on the order symbols were passed in. Because

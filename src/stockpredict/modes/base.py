@@ -19,13 +19,11 @@ def run(on: str | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
         include_etfs: bool = True,
-        exclude: list[str] | None = None,
-        variant: str = "standard") -> tuple[pd.DataFrame, Path]:
+        exclude: list[str] | None = None) -> tuple[pd.DataFrame, Path]:
     cfg = load_config()
     requested_n = int(n_picks) if n_picks else int(cfg.pricing.get("default_picks", 5))
     picks = rank_today(n_picks=requested_n, on=on,
-                       exit_offset_days=exit_offset_days, symbols=symbols,
-                       model_variant=variant)
+                       exit_offset_days=exit_offset_days, symbols=symbols)
     if on is not None:
         today_ts = pd.Timestamp(on)
     else:
@@ -37,15 +35,13 @@ def run(on: str | None = None,
     )
     sig = run_signature(mode="base", exit_offset_days=eff_horizon,
                         hose_only=hose_only,
-                        include_etfs=include_etfs, exclude=exclude,
-                        variant=variant)
+                        include_etfs=include_etfs, exclude=exclude)
     out = reports_dir() / f"picks_{today}_{sig}{picks_suffix(picks)}.json"
     excl_list = sorted({s.upper() for s in (exclude or [])})
-    n_below = int(picks["below_breakeven"].fillna(True).sum()) if "below_breakeven" in picks.columns else 0
+    n_below = int(picks["below_recovery_bar"].fillna(True).sum()) if "below_recovery_bar" in picks.columns else 0
     payload = {
         "as_of": today,
         "mode": "base",
-        "model_variant": variant,
         "exit_offset_days": eff_horizon,
         "hose_only": hose_only,
         "include_etfs": include_etfs,

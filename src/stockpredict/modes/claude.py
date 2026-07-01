@@ -110,18 +110,6 @@ def emit_plan(on: str | None = None,
     candidates = rank_today(n_picks=requested_n, on=on,
                             exit_offset_days=exit_offset_days, symbols=symbols)
     ab_verdict = None
-    if union_missed:
-        # UNION in the missed-variant's top picks so the LLM researches and
-        # judges both rankings; embed the A/B verdict so it weights the winner.
-        from ..analyze.regret import latest_ab_summary, union_candidates
-        try:
-            missed = rank_today(n_picks=requested_n, on=on,
-                                exit_offset_days=exit_offset_days, symbols=symbols,
-                                model_variant="missed")
-        except Exception:
-            missed = None
-        candidates = union_candidates(candidates, missed)
-        ab_verdict = latest_ab_summary()
     if on is not None:
         on_date = dt.date.fromisoformat(on)
     else:
@@ -196,7 +184,8 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     else:
         # Older plans without sidecar: fall back to the bare score table.
         merged = scored
-    merged["adjusted"] = merged["pred_mean"] * (1.0 + weight * merged["news_score"])
+    # Nudge the P/N ``score`` by the LLM's news vetting.
+    merged["adjusted"] = merged["score"] * (1.0 + weight * merged["news_score"])
     # Parallel news-adjusted entry/target economics (adj_* columns). Purely
     # additive — the mechanical entry/target/rr columns are untouched.
     from ..pricing import add_adjusted_price_suggestions
@@ -231,7 +220,9 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     # so after the LLM's news re-rank, keep the top N by adjusted score.
     if requested_n and len(merged) > int(requested_n):
         merged = merged.head(int(requested_n)).reset_index(drop=True)
-    n_below = int(merged["below_breakeven"].fillna(True).sum()) if "below_breakeven" in merged.columns else 0
+    bar_col = ("below_recovery_bar" if "below_recovery_bar" in merged.columns
+               else "below_breakeven")
+    n_below = int(merged[bar_col].fillna(True).sum()) if bar_col in merged.columns else 0
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
     out = reports_dir() / f"picks_claude_{today}_{sig}{picks_suffix(merged)}.json"
@@ -280,22 +271,22 @@ def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     if scored.empty:
         raise RuntimeError("all picks dropped")
 
-    # Every LLM pick must carry a full price set — without it there is no trade.
-    price_cols = ["entry_vnd", "target_vnd", "stop_vnd"]
-    bad = scored[scored[price_cols].isna().any(axis=1)]
+    # Every LLM pick must carry a profit target — the buy price is the close and
+    # there is no stop, so target_vnd is the only price the LLM must supply.
+    bad = scored[scored["target_vnd"].isna()]
     if not bad.empty:
         print(f"[claude-llm] WARNING: dropping {len(bad)} pick(s) missing "
-              f"entry/target/stop: {', '.join(bad['symbol'].tolist())}")
-    scored = scored[scored[price_cols].notna().all(axis=1)].copy()
+              f"target_vnd: {', '.join(bad['symbol'].tolist())}")
+    scored = scored[scored["target_vnd"].notna()].copy()
     if scored.empty:
-        raise RuntimeError("no picks with a complete entry/target/stop price set")
+        raise RuntimeError("no picks with a target_vnd")
 
-    # Recover reference columns (close / atr / organ_name / instrument_type) from
-    # the universe sidecar so the picks JSON and economics carry them.
+    # Recover reference columns (close / organ_name / instrument_type / adv) from
+    # the universe sidecar — the buy price and economics need the close.
     sidecar = plan_path.with_suffix(".candidates.parquet")
     if sidecar.exists():
         universe = pd.read_parquet(sidecar)
-        ref_cols = [c for c in ["symbol", "close", "atr_14", "rsi_14", "mom_20",
+        ref_cols = [c for c in ["symbol", "close", "rsi_14", "mom_20",
                                 "adv_vnd_20", "organ_name", "instrument_type"]
                     if c in universe.columns]
         merged = scored.merge(universe[ref_cols], on="symbol", how="left")
@@ -325,7 +316,9 @@ def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     requested_n = meta.get("n_picks")
     if requested_n and len(merged) > int(requested_n):
         merged = merged.head(int(requested_n)).reset_index(drop=True)
-    n_below = int(merged["below_breakeven"].fillna(True).sum()) if "below_breakeven" in merged.columns else 0
+    bar_col = ("below_recovery_bar" if "below_recovery_bar" in merged.columns
+               else "below_breakeven")
+    n_below = int(merged[bar_col].fillna(True).sum()) if bar_col in merged.columns else 0
     today_ts = effective_today_for_trading()
     today = today_ts.strftime("%Y-%m-%d")
     out = reports_dir() / f"picks_claude_llm_{today}_{sig}{picks_suffix(merged)}.json"

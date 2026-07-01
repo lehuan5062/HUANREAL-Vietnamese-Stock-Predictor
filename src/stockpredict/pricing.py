@@ -1,25 +1,14 @@
-"""Translate ML predictions into actionable buy/target/stop prices, on a
-per-share basis and net of broker fees.
+"""Translate rebound predictions into buy / target prices, per share and net of
+broker fees.
 
-vnstock prices are in **thousand VND** (e.g. close=15.35 means 15,350 VND).
-We expose all suggestion columns in absolute VND (integer) since that's how
+vnstock prices are in **thousand VND** (e.g. close=15.35 means 15,350 VND). We
+expose all suggestion columns in absolute VND (integer) since that's how
 Vietnamese traders enter orders in their broker app.
 
-Two entries are surfaced:
-
-* ``entry_vnd`` — the **limit-buy** price the user should place. When a
-  ``pred_low`` column is present (produced by the quantile low head),
-  it equals ``close * (1 + pred_low) * 1000`` (clipped so we never quote
-  a limit above today's close). When ``pred_low`` is absent, this falls
-  back to ``close * 1000`` so legacy installs still work.
-* ``close_vnd`` — today's close in VND, kept as a reference column so
-  the user can compare quoted entry against the close even when the
-  limit-prediction shifts ``entry_vnd`` below it.
-
-All risk-reward, fees, and the ``actionable`` gate use ``entry_vnd`` (the
-realistic limit price), so what the user sees is exactly the trade they'd
-place if the limit fills. All P&L figures are per share — the user decides
-their own position size; the gate is size-invariant.
+The rebound trade buys at the close (``close_vnd`` — there is no entry-price
+prediction) and sells at ``target_vnd = close × (1 + pred_profit)``; the exit is
+flexible (hold until the target). All P&L figures are per share — the user
+decides their own position size.
 
 ACBS fee model (default — override in config.yaml):
   buy  cost = trade_value * commission_pct * (1 + vat_pct/100)
@@ -32,6 +21,37 @@ import numpy as np
 import pandas as pd
 
 from .config import load_config
+
+
+def round_trip_cost_fraction(broker: dict | None = None) -> float:
+    """ACBS round-trip fee as a fraction of trade value: buy + sell commission
+    (each with VAT) + sell PIT = ``2*c*(1+v) + p`` (~0.0043).
+
+    This is the single shared cost definition used by the pricing math, the
+    conviction bar in ranking, and the rebound ``profit_threshold`` (so
+    "profitable" always means "clears the same round-trip cost the pricing
+    charges"). ``broker`` defaults to the configured broker block."""
+    if broker is None:
+        cfg = load_config()
+        broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
+    c = float(broker.get("commission_pct", 0.15)) / 100.0
+    v = float(broker.get("vat_pct", 10)) / 100.0
+    p = float(broker.get("pit_pct", 0.10)) / 100.0
+    return 2.0 * c * (1.0 + v) + p
+
+
+def profit_threshold(broker: dict | None = None, margin: float | None = None) -> float:
+    """The rebound "profitable point" return bar: round-trip cost + a margin.
+
+    A future close clears this bar when ``close[T+k]/close[T] - 1 >=`` this value
+    — i.e. the position is profitable *after* fees plus ``margin``. ``margin``
+    defaults to ``strategy.recovery.profit_margin`` in config."""
+    if margin is None:
+        cfg = load_config()
+        strat = dict(getattr(cfg, "strategy", {}) or {})
+        recovery = dict(strat.get("recovery", {}) or {})
+        margin = float(recovery.get("profit_margin", 0.005))
+    return round_trip_cost_fraction(broker) + float(margin)
 
 
 def _broker_costs(buy_value: pd.Series, sell_value: pd.Series, broker: dict
@@ -59,53 +79,22 @@ def _broker_costs(buy_value: pd.Series, sell_value: pd.Series, broker: dict
     return buy_fee, sell_fee, total, sell_pit  # last is just for audit if needed
 
 
-def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
-    """Append entry / target / stop / fees / net P&L columns to a candidates frame.
+def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
+    """Append rebound-strategy price / economics columns to a candidates frame.
 
-    Required input columns (already produced by the feature pipeline):
-        close      — today's close in thousand VND
-        pred_mean  — predicted forward return (e.g. +0.0017 = +0.17%)
-        pred_std   — model dispersion across the seed ensemble
-        atr_14     — 14-day ATR in thousand VND
+    Buys at today's close and holds until the position first turns profitable
+    (flexible exit — no ATR stop, no fixed horizon). Required input columns:
+    ``close``, ``pred_profit`` (P), ``pred_days`` (N), ``pred_recovery_prob``.
 
-    Optional input column:
-        pred_low   — quantile prediction of ``low[T+1]/close[T] - 1``
-                     (typically negative). When present, ``entry_vnd``
-                     becomes the limit-buy price at that predicted dip
-                     and the stop is anchored on the limit (so the
-                     stop_atr_mult * ATR risk distance is exact). When
-                     absent, ``entry_vnd = close * 1000`` (legacy).
-
-    All P&L is computed PER SHARE — there is no position-size input. Position
-    sizing is left entirely to the user; the ``actionable`` gate (and rr_ratio /
-    breakeven_pct) is size-invariant, so a per-share view is sufficient. The one
-    sizing hint we surface is ``suggested_max_units`` — an *advisory* liquidity
-    cap derived from ``adv_vnd_20`` (see below) that never touches the gate.
-
-    Output columns appended (all VND per share, integer where applicable):
-        entry_vnd                limit-buy price (= close*(1+pred_low) when present)
-        close_vnd                reference: today's close in VND
-        entry_limit_pct          predicted dip relative to close (clipped <= 0)
-        target_vnd, target_low_vnd, target_high_vnd, stop_vnd
-        gross_reward_vnd         target - entry (per share)
-        max_loss_vnd             entry - stop (per share)
-        fees_round_trip_vnd      buy commission+VAT + sell commission+VAT + sell PIT
-        net_reward_vnd           gross_reward - fees   (the headline number)
-        net_loss_vnd             max_loss + fees       (worst-case if stopped out)
-        rr_ratio                 net_reward / net_loss (≈ target_atr_mult/stop_atr_mult)
-        breakeven_pct            price move needed just to cover fees
-        below_breakeven          True when the pick does NOT clear the quality
-                                 bar (pred_mean < min_edge_over_cost*breakeven_pct,
-                                 OR net_reward <= 0, OR rr invalid). Informational
-                                 only — selection is exactly-N by pred_mean, so a
-                                 below_breakeven pick is still returned but flagged
-                                 weak. The take-profit is entry + target_atr_mult*ATR
-                                 (NOT close*(1+pred_mean)); pred_mean only drives
-                                 ranking and this quality flag.
-        suggested_max_units      advisory liquidity cap = floor(
-                                 max_participation_pct% * adv_vnd_20*1000 / entry_vnd);
-                                 null when adv_vnd_20 absent or the cap is disabled.
-                                 Informational only — never feeds selection.
+    Output columns appended (VND per share where applicable):
+        close_vnd            the buy price = today's close (no entry-price
+                             prediction — you buy at the close)
+        target_vnd           close * (1 + pred_profit) — the profit target
+        hold_days            estimated trading days held (= round(pred_days))
+        score                P/N * recovery_prob — the ranking objective
+        gross_reward_vnd, fees_round_trip_vnd, net_reward_vnd, breakeven_pct
+        below_recovery_bar   True when the pick fails the quality bar
+        suggested_max_units  advisory liquidity cap
     """
     if df is None or len(df) == 0:
         return df
@@ -113,199 +102,115 @@ def add_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     cfg = load_config()
     broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
     pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
-
-    stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
-    target_mult = float(pricing_cfg.get("target_atr_mult", 2.0))
-    min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
-    min_edge_over_cost = float(pricing_cfg.get("min_edge_over_cost", 1.0))
+    strat = dict(getattr(cfg, "strategy", {}) or {})
+    recovery_cfg = dict(strat.get("recovery", {}) or {})
+    min_recovery_prob = float(recovery_cfg.get("min_recovery_prob", 0.0) or 0.0)
     max_participation_pct = float(pricing_cfg.get("max_participation_pct", 0.0))
+    thr = profit_threshold(broker)
 
     out = df.copy()
-
     close_k = out["close"].astype(float)
-    pred = out["pred_mean"].astype(float)
-    pred_std = out.get("pred_std", pd.Series(0.0, index=out.index)).astype(float)
-    atr_k = out.get("atr_14", pd.Series(np.nan, index=out.index)).astype(float)
+    pred_profit = out.get("pred_profit", pd.Series(np.nan, index=out.index)).astype(float)
+    pred_days = out.get("pred_days", pd.Series(np.nan, index=out.index)).astype(float)
+    pred_prob = out.get("pred_recovery_prob", pd.Series(np.nan, index=out.index)).astype(float)
 
-    # Predicted next-day low return. Default to 0 (entry == close) so the
-    # legacy code path — feature frames without a low model — keeps the
-    # original behavior. Clip at 0 so we never quote an entry ABOVE close
-    # (placing a limit above the market would just buy at market on open
-    # and defeats the purpose of a limit-buy).
-    pred_low = out.get("pred_low", pd.Series(0.0, index=out.index)).astype(float)
-    pred_low_eff = pred_low.fillna(0.0).clip(upper=0.0)
-
-    # Per-share prices in VND. ``entry_v`` is the limit price (= close at
-    # the configured dip); ``close_v`` keeps the close-in-VND for display.
+    # Buy at the close — there is NO entry-price prediction (the dip/limit head
+    # was removed), so ``close_vnd`` is the single buy price.
     close_v = (close_k * 1000.0).round(0)
-    entry_v = (close_k * (1.0 + pred_low_eff) * 1000.0).round(0)
-    # Take-profit and stop are BOTH anchored on the LIMIT entry and scaled by
-    # ATR(14), so the realized risk-reward (target_atr_mult / stop_atr_mult) is
-    # controlled by config rather than hostage to the model's near-zero 2-day
-    # return forecast. ``pred_mean`` no longer sets the target price — it only
-    # drives ranking and the directional edge gate (see ``actionable`` below).
-    # ``target_low/high`` keep a forecast-uncertainty band (±pred_std) around the
-    # ATR target so the displayed range still reflects model dispersion.
-    entry_k = entry_v / 1000.0
-    band_k = pred_std * entry_k
-    target_v = ((entry_k + target_mult * atr_k) * 1000.0).round(0)
-    target_low_v = ((entry_k + target_mult * atr_k - band_k) * 1000.0).round(0)
-    target_high_v = ((entry_k + target_mult * atr_k + band_k) * 1000.0).round(0)
-    stop_v = ((entry_k - stop_mult * atr_k) * 1000.0).round(0)
+    target_v = (close_v * (1.0 + pred_profit.clip(lower=0.0))).round(0)
+    hold_days = pred_days.round(0)
+    score = (pred_profit / pred_days.clip(lower=1.0)) * pred_prob
 
-    # Per-share P&L. The user sizes the position themselves; everything below
-    # is one share's worth of reward / risk / fees. The actionable gate and
-    # rr_ratio are size-invariant, so a per-share view is sufficient.
-    gross_reward = target_v - entry_v
-    max_loss_units = entry_v - stop_v
-
-    buy_fee, sell_fee, fees_total, _ = _broker_costs(entry_v, target_v, broker)
+    gross_reward = target_v - close_v
+    _, _, fees_total, _ = _broker_costs(close_v, target_v, broker)
     net_reward = gross_reward - fees_total
-    net_loss = max_loss_units + fees_total
+    breakeven_pct = (fees_total / close_v).round(4)
 
-    # rr_ratio: net upside vs net downside, undefined when stop is missing/invalid
-    rr = pd.Series(np.nan, index=out.index, dtype=float)
-    valid = (max_loss_units > 0) & net_loss.notna()
-    rr[valid] = net_reward[valid] / net_loss[valid]
+    below_bar = (
+        (pred_prob < min_recovery_prob)
+        | (net_reward <= 0)
+        | (pred_profit <= thr)
+    ).fillna(True)
 
-    breakeven_pct = (fees_total / entry_v).round(4)
-    # Quality bar (informational only — selection is now exactly-N by pred_mean):
-    # a pick "clears the bar" when the model's predicted forward return beats
-    # ``min_edge_over_cost`` times the round-trip cost (breakeven_pct), has
-    # positive net reward, and a valid rr. ``below_breakeven`` flags the picks
-    # that DON'T — they're still returned (to honor the exact-N count) but
-    # surfaced as weak so the user knows the difficulty was loosened to reach N.
-    edge_ok = pred >= (min_edge_over_cost * breakeven_pct)
-    clears_bar = edge_ok & (net_reward > 0) & (rr >= min_rr) & valid
-    below_breakeven = ~clears_bar.fillna(False)
-
-    # Advisory liquidity-driven unit cap. adv_vnd_20 is the 20-day average daily
-    # traded value in THOUSAND-VND (close-in-thousand-VND * shares), so *1000 to
-    # get VND, then participation_pct% of that, divided by the per-share entry,
-    # gives the max number of shares that stays within the participation rate.
-    # Purely informational; never feeds the actionable gate. Null when ADV is
-    # missing or the cap is disabled (max_participation_pct <= 0).
     max_units = pd.Series(pd.NA, index=out.index, dtype="Float64")
     if max_participation_pct > 0 and "adv_vnd_20" in out.columns:
         adv_vnd = out["adv_vnd_20"].astype(float) * 1000.0
         budget = (max_participation_pct / 100.0) * adv_vnd
-        units = (budget / entry_v).where((entry_v > 0) & adv_vnd.notna())
+        units = (budget / close_v).where((close_v > 0) & adv_vnd.notna())
         max_units = np.floor(units)
 
-    out["entry_vnd"] = entry_v.astype("Int64")
     out["close_vnd"] = close_v.astype("Int64")
-    out["entry_limit_pct"] = pred_low_eff.round(6)
     out["target_vnd"] = target_v.astype("Int64")
-    out["target_low_vnd"] = target_low_v.astype("Int64")
-    out["target_high_vnd"] = target_high_v.astype("Int64")
-    out["stop_vnd"] = stop_v.astype("Int64")
+    out["hold_days"] = hold_days.astype("Int64")
+    out["score"] = score.round(6)
     out["gross_reward_vnd"] = gross_reward.round(0).astype("Int64")
-    out["max_loss_vnd"] = max_loss_units.round(0).astype("Int64")
     out["fees_round_trip_vnd"] = fees_total.round(0).astype("Int64")
     out["net_reward_vnd"] = net_reward.round(0).astype("Int64")
-    out["net_loss_vnd"] = net_loss.round(0).astype("Int64")
-    out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
-    out["below_breakeven"] = below_breakeven
+    out["below_recovery_bar"] = below_bar
     out["suggested_max_units"] = pd.array(max_units, dtype="Int64")
     return out
 
 
 def economics_from_llm_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the per-share economics columns from LLM-SUPPLIED entry / target /
-    stop prices — for the LLM-only Claude mode, where there is no ML mean head
-    and no mechanical (low-head + ATR) pricing.
+    """Per-share economics for the LLM-only Claude mode. Like the rest of the
+    rebound pipeline, the buy price is today's **close** (``close_vnd`` — the LLM
+    does NOT set an entry) and there is **no stop-loss**; the LLM supplies only a
+    profit ``target_vnd`` (VND per share). Applies the ACBS fee model so the picks
+    JSON carries the same fee / net-P&L / breakeven fields as base/claude/gemini.
 
-    Unlike :func:`add_price_suggestions` (which derives entry from the dip head
-    and target/stop from ATR), every price here comes straight from the LLM:
-
-        entry_vnd, target_vnd, stop_vnd   — VND per share, set by the LLM
-
-    The same ACBS fee model and risk-reward math are applied so the picks JSON
-    carries identical economic fields (fees / net P&L / rr / breakeven). The
-    ``below_breakeven`` flag drops the ``pred_mean`` edge term (there is no ML
-    forecast) and keeps only the price-based quality checks: positive net reward,
-    valid stop, and rr above ``min_rr_ratio``.
-    """
+    Requires ``close`` (thousand VND) and ``target_vnd``. ``below_recovery_bar``
+    flags a pick whose target doesn't clear fees (non-positive net reward)."""
     if df is None or len(df) == 0:
         return df
 
     cfg = load_config()
     broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
-    pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
-    min_rr = float(pricing_cfg.get("min_rr_ratio", 0.8))
 
     out = df.copy()
-
-    entry_v = out["entry_vnd"].astype("float64").round(0)
+    close_v = (out["close"].astype(float) * 1000.0).round(0)
     target_v = out["target_vnd"].astype("float64").round(0)
-    stop_v = out["stop_vnd"].astype("float64").round(0)
-    # Reference close in VND when the universe row carried a close (thousand VND).
-    if "close" in out.columns:
-        out["close_vnd"] = (out["close"].astype(float) * 1000.0).round(0).astype("Int64")
 
-    gross_reward = target_v - entry_v
-    max_loss_units = entry_v - stop_v
-
-    _, _, fees_total, _ = _broker_costs(entry_v, target_v, broker)
+    gross_reward = target_v - close_v
+    _, _, fees_total, _ = _broker_costs(close_v, target_v, broker)
     net_reward = gross_reward - fees_total
-    net_loss = max_loss_units + fees_total
+    breakeven_pct = (fees_total / close_v).round(4)
+    below_bar = (net_reward <= 0).fillna(True)
 
-    rr = pd.Series(np.nan, index=out.index, dtype=float)
-    valid = (max_loss_units > 0) & net_loss.notna()
-    rr[valid] = net_reward[valid] / net_loss[valid]
-
-    breakeven_pct = (fees_total / entry_v).round(4)
-    clears_bar = (net_reward > 0) & (rr >= min_rr) & valid
-    below_breakeven = ~clears_bar.fillna(False)
-
-    out["entry_vnd"] = entry_v.astype("Int64")
+    out["close_vnd"] = close_v.astype("Int64")
     out["target_vnd"] = target_v.astype("Int64")
-    out["stop_vnd"] = stop_v.astype("Int64")
     out["gross_reward_vnd"] = gross_reward.round(0).astype("Int64")
-    out["max_loss_vnd"] = max_loss_units.round(0).astype("Int64")
     out["fees_round_trip_vnd"] = fees_total.round(0).astype("Int64")
     out["net_reward_vnd"] = net_reward.round(0).astype("Int64")
-    out["net_loss_vnd"] = net_loss.round(0).astype("Int64")
-    out["rr_ratio"] = rr.round(2)
     out["breakeven_pct"] = breakeven_pct
-    out["below_breakeven"] = below_breakeven
+    out["below_recovery_bar"] = below_bar
     return out
 
 
 def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     """Append a PARALLEL set of ``adj_*`` columns derived from LLM-supplied
-    entry / target overrides — **without** touching any of the mechanical
-    columns produced by :func:`add_price_suggestions`.
+    entry / target overrides — **without** touching the mechanical columns
+    from :func:`add_recovery_price_suggestions`.
 
-    Motivation: the mechanical ``entry_vnd`` is a per-ticker dip limit that the
-    news stage cannot move. On a news-driven melt-up (e.g. a macro catalyst
-    lifting the whole market), that dip never comes and the limit never fills.
-    This lets the Claude / Gemini news stage quote its OWN entry and target —
-    informed by the catalyst — and surfaces the matching risk-reward so the
-    user can compare the news-adjusted trade against the mechanical one
-    side by side.
+    Motivation: the mechanical buy is today's close and the target is
+    ``close × (1 + pred_profit)``. If the LLM's research says a name will gap up
+    or down on a catalyst, it can quote its OWN entry / target here, and this
+    surfaces the matching economics so the user can compare side by side.
 
     Inputs (optional, in VND per share; produced by the news parsers):
-        adj_entry_vnd   — limit/entry price the LLM wants placed. Unlike the
-                          mechanical entry, this is NOT clipped at the close:
-                          on a strong catalyst the LLM may quote an entry ABOVE
-                          today's close to guarantee a fill.
+        adj_entry_vnd   — buy price the LLM wants placed.
         adj_target_vnd  — exit target the LLM wants.
 
     When either is missing / NaN for a row, that row's ``adj_*`` outputs mirror
-    the mechanical values (``entry_vnd`` / ``target_vnd``), so the columns are
-    always fully populated and an un-adjusted pick reads identically to its
-    mechanical twin.
+    the mechanical values (``close_vnd`` / ``target_vnd``), so the columns are
+    always fully populated and an un-adjusted pick reads identically.
 
-    Output columns appended (all VND per share unless noted), each the
-    ``adj_`` twin of a mechanical column:
-        adj_entry_vnd, adj_target_vnd  (echoed back, NaN-filled to mechanical)
-        adj_stop_vnd                   stop anchored on the adjusted entry
-        adj_gross_reward_vnd, adj_max_loss_vnd
+    Output columns appended (all VND per share). The rebound trade has NO
+    stop-loss (flexible hold-until-target exit), so there is no adj stop / rr:
+        adj_entry_vnd, adj_target_vnd  (echoed back, NaN-filled to close/target)
+        adj_gross_reward_vnd
         adj_fees_round_trip_vnd
-        adj_net_reward_vnd, adj_net_loss_vnd
-        adj_rr_ratio
+        adj_net_reward_vnd
         adj_breakeven_pct
     """
     if df is None or len(df) == 0:
@@ -313,49 +218,28 @@ def add_adjusted_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
 
     cfg = load_config()
     broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
-    pricing_cfg = dict(cfg.pricing) if hasattr(cfg, "pricing") else {}
-    stop_mult = float(pricing_cfg.get("stop_atr_mult", 1.5))
 
     out = df.copy()
 
-    # Mechanical anchors to fall back on (these must already exist; if a
-    # legacy frame lacks them, default to NaN so the adj columns are NaN too).
-    mech_entry = out.get("entry_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
+    # Mechanical anchors: the buy price is close_vnd (no entry-price prediction),
+    # the target is target_vnd. When the LLM leaves adj_* blank, mirror these.
+    mech_entry = out.get("close_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
     mech_target = out.get("target_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
-    atr_k = out.get("atr_14", pd.Series(np.nan, index=out.index)).astype(float)
 
-    # LLM overrides — when absent or NaN, mirror the mechanical price.
     adj_entry = out.get("adj_entry_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
     adj_target = out.get("adj_target_vnd", pd.Series(np.nan, index=out.index)).astype("float64")
     adj_entry_v = adj_entry.where(adj_entry.notna(), mech_entry).round(0)
     adj_target_v = adj_target.where(adj_target.notna(), mech_target).round(0)
 
-    # Stop anchored on the ADJUSTED entry, same rule as the mechanical stop:
-    # risk distance is exactly stop_atr_mult * ATR below the entry.
-    adj_entry_k = adj_entry_v / 1000.0
-    adj_stop_v = ((adj_entry_k - stop_mult * atr_k) * 1000.0).round(0)
-
     adj_gross_reward = adj_target_v - adj_entry_v
-    adj_max_loss = adj_entry_v - adj_stop_v
-
     _, _, adj_fees_total, _ = _broker_costs(adj_entry_v, adj_target_v, broker)
     adj_net_reward = adj_gross_reward - adj_fees_total
-    adj_net_loss = adj_max_loss + adj_fees_total
-
-    adj_rr = pd.Series(np.nan, index=out.index, dtype=float)
-    valid = (adj_max_loss > 0) & adj_net_loss.notna()
-    adj_rr[valid] = adj_net_reward[valid] / adj_net_loss[valid]
-
     adj_breakeven_pct = (adj_fees_total / adj_entry_v).round(4)
 
     out["adj_entry_vnd"] = adj_entry_v.astype("Int64")
     out["adj_target_vnd"] = adj_target_v.astype("Int64")
-    out["adj_stop_vnd"] = adj_stop_v.astype("Int64")
     out["adj_gross_reward_vnd"] = adj_gross_reward.round(0).astype("Int64")
-    out["adj_max_loss_vnd"] = adj_max_loss.round(0).astype("Int64")
     out["adj_fees_round_trip_vnd"] = adj_fees_total.round(0).astype("Int64")
     out["adj_net_reward_vnd"] = adj_net_reward.round(0).astype("Int64")
-    out["adj_net_loss_vnd"] = adj_net_loss.round(0).astype("Int64")
-    out["adj_rr_ratio"] = adj_rr.round(2)
     out["adj_breakeven_pct"] = adj_breakeven_pct
     return out

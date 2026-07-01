@@ -19,6 +19,8 @@ import pandas as pd
 
 from .config import cache_dir, load_config
 from .data.cache import read_ohlcv
+from .model.target import resolve_exit
+from .pricing import profit_threshold
 
 
 _LEDGER_FILE = "predictions.parquet"
@@ -61,20 +63,34 @@ _LEDGER_COLUMNS = [
     # evaluation, so a Claude self-correction can be triggered the very
     # next trading day instead of waiting for the realized return.
     "pred_low", "entry_limit_price", "entry_limit_filled", "t0_evaluated",
+    # Rebound-strategy fields (strategy.mode: rebound). ``pred_days`` (N) and
+    # ``pred_profit`` (P) are the KM head's estimates; ``pred_recovery_prob`` its
+    # eventual-recovery probability; the pick's ``target_date`` is
+    # ``as_of + round(pred_days)`` trading days (the PREDICTED sell day). The
+    # flexible-exit evaluator scans forward from ``as_of`` for the first day the
+    # close first clears the profit threshold and stamps ``actual_exit_date`` +
+    # ``recovered_flag`` there (which may differ from the predicted target_date).
+    # A pick that has not recovered yet stays pending (evaluated=False).
+    "pred_days", "pred_profit", "pred_recovery_prob",
+    "actual_exit_date", "recovered_flag",
+    # How a rebound pick was closed: "recovery" | "" (open / not yet
+    # resolved / legacy row). Filled by evaluate_pending.
+    "exit_reason",
 ]
 
 
 # Columns that may be missing from old ledger files; _read backfills them
 # with NaN so the file stays readable across schema changes.
 _NEW_FLOAT_COLUMNS = ("t0_open", "t0_low", "t0_close", "entry_slippage",
-                      "pred_low", "entry_limit_price")
-_NEW_STRING_COLUMNS = ("dimensions_cited",)
+                      "pred_low", "entry_limit_price",
+                      "pred_days", "pred_profit", "pred_recovery_prob")
+_NEW_STRING_COLUMNS = ("dimensions_cited", "exit_reason")
 # Boolean columns added in the low-prediction release. Default for legacy
 # rows: ``entry_limit_filled`` is False (no limit was placed); for
 # ``t0_evaluated`` the backfill is "True if evaluated else False" because
 # pre-existing evaluated rows already had their t0 bar stamped during
 # the original evaluate_pending pass.
-_NEW_BOOL_COLUMNS = ("entry_limit_filled",)
+_NEW_BOOL_COLUMNS = ("entry_limit_filled", "recovered_flag")
 
 
 def _normalize_dimensions(value) -> str:
@@ -148,6 +164,10 @@ def _read() -> pd.DataFrame:
             df["t0_evaluated"] = df["evaluated"].astype(bool)
         else:
             df["t0_evaluated"] = False
+    # Rebound exit-date on legacy ledgers is NaT (recovered_flag is backfilled
+    # False via _NEW_BOOL_COLUMNS above).
+    if "actual_exit_date" not in df.columns:
+        df["actual_exit_date"] = pd.NaT
     return df
 
 
@@ -435,6 +455,7 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
 
     as_of = (pd.to_datetime(as_of) if as_of is not None
              else effective_today_for_trading())
+    # Legacy fixed-horizon target (rebound picks override this per-row below).
     target = _next_trading_offset(as_of, exit_off)
     sig = run_signature(mode=mode, exit_offset_days=exit_off,
                         hose_only=hose_only,
@@ -466,12 +487,31 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
             limit_price = close_for_limit * (1.0 + min(pred_low_val, 0.0))
         else:
             limit_price = np.nan
+        # Rebound picks carry a per-row predicted hold (N). The pick's
+        # target_date is as_of + round(N) trading days (the predicted sell day),
+        # and its exit_offset_days is that same per-row N — so the scalar horizon
+        # only applies to legacy picks.
+        pred_days_val = (float(r["pred_days"])
+                         if "pred_days" in r and pd.notna(r["pred_days"])
+                         else np.nan)
+        pred_profit_val = (float(r["pred_profit"])
+                           if "pred_profit" in r and pd.notna(r["pred_profit"])
+                           else np.nan)
+        pred_prob_val = (float(r["pred_recovery_prob"])
+                         if "pred_recovery_prob" in r and pd.notna(r["pred_recovery_prob"])
+                         else np.nan)
+        if not np.isnan(pred_days_val):
+            row_off = max(int(round(pred_days_val)), 1)
+            row_target = _next_trading_offset(as_of, row_off)
+        else:
+            row_off = exit_off
+            row_target = target
         rows.append({
             "run_id": rid,
             "signature": sig,
             "as_of": as_of.normalize(),
-            "target_date": target,
-            "exit_offset_days": exit_off,
+            "target_date": row_target,
+            "exit_offset_days": row_off,
             "mode": mode,
             "symbol": sym,
             "rank": int(r.get("rank", i + 1)),
@@ -497,6 +537,13 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
             "entry_limit_price": limit_price,
             "entry_limit_filled": False,
             "t0_evaluated": False,
+            # Rebound-strategy fields (NaN/NaT/False for legacy picks).
+            "pred_days": pred_days_val,
+            "pred_profit": pred_profit_val,
+            "pred_recovery_prob": pred_prob_val,
+            "actual_exit_date": pd.NaT,
+            "recovered_flag": False,
+            "exit_reason": "",
         })
     add = pd.DataFrame(rows)
     df = _read()
@@ -541,7 +588,13 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
     # Union of: rows needing T+0 stamping AND rows needing T+N stamping.
     # A row may need either, both, or neither on any given pass.
     t0_pending_mask = (~df["t0_evaluated"]) & (df["as_of"] <= today_ts)
-    tN_pending_mask = (~df["evaluated"]) & (df["target_date"] <= today_ts)
+    # Rebound picks (pred_profit set) exit flexibly — they may recover before or
+    # after their predicted target_date, so re-check them every pass once the buy
+    # day exists, not only after target_date. Legacy picks wait for target_date.
+    is_rebound = df["pred_profit"].notna() if "pred_profit" in df.columns else pd.Series(False, index=df.index)
+    tN_pending_mask = (~df["evaluated"]) & (
+        (df["target_date"] <= today_ts) | (is_rebound & (df["as_of"] <= today_ts))
+    )
     pending = df[t0_pending_mask | tN_pending_mask]
     if pending.empty:
         return pending
@@ -597,8 +650,37 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
                 df.at[idx, "t0_evaluated"] = True
                 changed = True
 
-        # --- Stage 2: T+N realized-return stamping ----------------------
-        needs_tN = (not bool(row["evaluated"])
+        # --- Stage 2a: rebound flexible-exit stamping -------------------
+        # A rebound pick (pred_profit set) is held until the close first clears
+        # the profit threshold above the entry (today's close on the buy day).
+        # Scan forward from the buy day; the first such day is the realized exit.
+        # If no cached bar has recovered yet, the position is still open — leave
+        # it pending (evaluated stays False) so a later pass resolves it.
+        is_rebound_row = ("pred_profit" in row and pd.notna(row["pred_profit"]))
+        if is_rebound_row and not bool(row["evaluated"]):
+            entry = row["entry_price"]
+            if pd.notna(entry) and float(entry) > 0:
+                thr = profit_threshold()
+                fut = ohlcv[ohlcv.index > as_of]
+                ex = resolve_exit(fut["close"].astype(float).to_numpy(),
+                                  float(entry), thr)
+                # Only a resolved exit whose bar has actually landed closes the
+                # position; otherwise it stays pending (open) for a later pass.
+                if ex is not None:
+                    k = int(ex["k"])
+                    exit_date = pd.Timestamp(fut.index[k - 1]).normalize()
+                    actual_exit = float(ex["exit_close"])
+                    df.at[idx, "actual_exit"] = actual_exit
+                    df.at[idx, "actual_exit_date"] = exit_date
+                    df.at[idx, "realized_return"] = actual_exit / float(entry) - 1.0
+                    df.at[idx, "recovered_flag"] = ex["reason"] == "recovery"
+                    df.at[idx, "exit_reason"] = ex["reason"]
+                    df.at[idx, "evaluated"] = True
+                    changed = True
+
+        # --- Stage 2b: legacy fixed-horizon realized-return stamping -----
+        needs_tN = (not is_rebound_row
+                    and not bool(row["evaluated"])
                     and pd.Timestamp(row["target_date"]).normalize() <= today_ts)
         if needs_tN:
             target = pd.Timestamp(row["target_date"]).normalize()

@@ -165,7 +165,9 @@ def test_read_backfills_missing_dimensions_cited(monkeypatch, tmp_path):
     # release like low-prediction). _read should backfill them all.
     later_added = (set(tracking._NEW_STRING_COLUMNS)
                    | set(tracking._NEW_BOOL_COLUMNS)
-                   | {"pred_low", "entry_limit_price", "t0_evaluated"})
+                   | {"pred_low", "entry_limit_price", "t0_evaluated",
+                      "pred_days", "pred_profit", "pred_recovery_prob",
+                      "actual_exit_date", "exit_reason"})
     legacy_cols = [c for c in tracking._LEDGER_COLUMNS if c not in later_added]
     today = pd.Timestamp.today().normalize()
     legacy = pd.DataFrame([{

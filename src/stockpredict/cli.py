@@ -23,7 +23,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 @click.group()
 def cli() -> None:
-    """Vietnamese T+2 stock predictor."""
+    """Vietnamese rebound stock predictor."""
 
 
 def _format_picks(picks) -> str:
@@ -33,16 +33,17 @@ def _format_picks(picks) -> str:
     if picks is None or len(picks) == 0:
         return "(no picks)"
     show_cols = [c for c in [
-        "symbol", "close_vnd", "entry_vnd", "target_vnd", "stop_vnd",
+        "symbol", "close_vnd", "target_vnd", "hold_days",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
         "rr_ratio", "below_breakeven",
-        "pred_mean", "news_score", "adjusted",
+        "score", "pred_days", "pred_profit", "pred_recovery_prob",
+        "below_recovery_bar", "pred_mean", "news_score", "adjusted",
     ] if c in picks.columns]
     if not show_cols:
         return picks.to_string(index=False)
     fmt = picks[show_cols].copy()
     money_cols = [
-        "close_vnd", "entry_vnd", "target_vnd", "stop_vnd",
+        "close_vnd", "target_vnd", "stop_vnd",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
     ]
     for c in money_cols:
@@ -71,37 +72,58 @@ def _format_picks_explained(picks) -> str:
             header += f"  —  {business[:60]}"
         parts.append(header)
 
-        if "entry_vnd" in r and pd.notna(r["entry_vnd"]):
-            entry = int(r["entry_vnd"]); tgt = int(r["target_vnd"]); stop = int(r["stop_vnd"])
+        is_rebound = "score" in r and pd.notna(r.get("score"))
+        buy_col = "close_vnd" if is_rebound else "entry_vnd"
+        if buy_col in r and pd.notna(r.get(buy_col)):
+            entry = int(r[buy_col]); tgt = int(r["target_vnd"])
             fees = int(r.get("fees_round_trip_vnd", 0))
             net = int(r.get("net_reward_vnd", 0))
-            rr = r.get("rr_ratio", float("nan"))
-            below = bool(r.get("below_breakeven", False))
-            verdict = "BELOW-BAR (weak edge)" if below else "OK"
-            close_v = r.get("close_vnd", None)
-            dip_pct = r.get("entry_limit_pct", None)
-            if close_v is not None and pd.notna(close_v) and dip_pct is not None and pd.notna(dip_pct) and float(dip_pct) < 0:
-                # Entry sits below close — surface the predicted dip so the
-                # user knows the limit isn't a market order at close.
-                parts.append(
-                    f"  Trade: LIMIT-buy @ {entry:,} VND "
-                    f"(close {int(close_v):,}, dip {float(dip_pct):+.2%})  "
-                    f"|  target {tgt:,}  |  stop {stop:,}"
-                )
+            if is_rebound:
+                # Rebound: flexible exit, no stop. Show buy / target / hold.
+                below = bool(r.get("below_recovery_bar", False))
+                verdict = "BELOW RECOVERY BAR (weak)" if below else "OK"
+                hold = r.get("hold_days")
+                hold_s = f"{int(hold)}d" if pd.notna(hold) else "?"
+                parts.append(f"  Trade: buy @ {entry:,} VND  |  target {tgt:,}  |  hold ≈ {hold_s} (sell at target)")
+                parts.append(f"  P&L per share (after ACBS fees {fees:,}): net {net:+,}  -> {verdict}")
             else:
-                parts.append(f"  Trade: buy @ {entry:,} VND  |  target {tgt:,}  |  stop {stop:,}")
-            parts.append(f"  P&L per share (after ACBS fees {fees:,}): net {net:+,}  rr {rr:.2f}  -> {verdict}")
+                stop = int(r["stop_vnd"]) if pd.notna(r.get("stop_vnd")) else 0
+                rr = r.get("rr_ratio", float("nan"))
+                below = bool(r.get("below_breakeven", False))
+                verdict = "BELOW-BAR (weak edge)" if below else "OK"
+                close_v = r.get("close_vnd", None)
+                dip_pct = r.get("entry_limit_pct", None)
+                if close_v is not None and pd.notna(close_v) and dip_pct is not None and pd.notna(dip_pct) and float(dip_pct) < 0:
+                    parts.append(
+                        f"  Trade: LIMIT-buy @ {entry:,} VND "
+                        f"(close {int(close_v):,}, dip {float(dip_pct):+.2%})  "
+                        f"|  target {tgt:,}  |  stop {stop:,}"
+                    )
+                else:
+                    parts.append(f"  Trade: buy @ {entry:,} VND  |  target {tgt:,}  |  stop {stop:,}")
+                parts.append(f"  P&L per share (after ACBS fees {fees:,}): net {net:+,}  rr {rr:.2f}  -> {verdict}")
 
-        ml_pred = r.get("pred_mean", None)
         ns = r.get("news_score", 0)
         adj = r.get("adjusted", None)
-        if ml_pred is not None:
-            line = f"  Signal: pred_mean={ml_pred:+.4f}"
+        if is_rebound:
+            line = (f"  Signal: score={r.get('score'):.4f}  "
+                    f"N≈{r.get('pred_days', float('nan')):.0f}d  "
+                    f"P≈{r.get('pred_profit', float('nan')):+.3f}  "
+                    f"recovery_prob={r.get('pred_recovery_prob', float('nan')):.0%}")
             if pd.notna(ns):
                 line += f"  news={int(ns):+d}"
             if adj is not None and pd.notna(adj):
-                line += f"  adjusted={adj:+.4f}"
+                line += f"  adjusted={adj:.4f}"
             parts.append(line)
+        else:
+            ml_pred = r.get("pred_mean", None)
+            if ml_pred is not None:
+                line = f"  Signal: pred_mean={ml_pred:+.4f}"
+                if pd.notna(ns):
+                    line += f"  news={int(ns):+d}"
+                if adj is not None and pd.notna(adj):
+                    line += f"  adjusted={adj:+.4f}"
+                parts.append(line)
 
         if business and organ:
             parts.append(f"  Business: {business}")
@@ -153,57 +175,39 @@ def _print_pick_warnings(picks, requested_n: int) -> None:
         click.echo(f"==> SHORTFALL: only {n} of {requested_n} requested pick(s) "
                    f"available — the eligible universe is smaller than N "
                    f"(heavy --exclude / --hose-only / tiny cache).")
-    if picks is None or n == 0 or "below_breakeven" not in picks.columns:
+    # Rebound uses below_recovery_bar; legacy uses below_breakeven.
+    bar_col = ("below_recovery_bar" if picks is not None
+               and "below_recovery_bar" in picks.columns else "below_breakeven")
+    if picks is None or n == 0 or bar_col not in picks.columns:
         return
-    k = int(picks["below_breakeven"].fillna(True).astype(bool).sum())
+    k = int(picks[bar_col].fillna(True).astype(bool).sum())
     if k > 0:
+        label = ("below the recovery bar (weak — low bounce probability)"
+                 if bar_col == "below_recovery_bar"
+                 else "below the break-even bar (weak edge — forecast under round-trip cost)")
         click.echo("")
-        click.echo(f"==> QUALITY: {k} of {n} pick(s) are below the break-even "
-                   f"bar (weak edge — forecast under round-trip cost). They're "
+        click.echo(f"==> QUALITY: {k} of {n} pick(s) are {label}. They're "
                    f"shown to honor --picks; treat them with extra caution.")
 
 
-def _print_sell_reminder(picks, *, as_of, exit_offset_days, mode_label) -> None:
-    """Surface a structured sell-reminder block for the returned picks. Both
-    the LLM (Claude / Gemini) running in the surrounding session and the user
-    reading the terminal can act on this: schedule a reminder for the target
-    sell day, in GMT+7 (Asia/Ho_Chi_Minh, Vietnamese ICT)."""
+def _print_sell_reminder(picks, *, as_of=None, exit_offset_days=None,
+                         mode_label="") -> None:
+    """Surface the flexible-exit plan for the returned picks. The rebound trade
+    holds until the profit target (no fixed sell day), so this shows the target
+    + expected hold per pick and leaves the sell timing to the user."""
     if picks is None or len(picks) == 0:
         return
-    n_picks = int(len(picks))
-    if exit_offset_days is None:
-        return
-    from .tracking import _next_trading_offset, effective_today_for_trading
-
-    as_of_ts = (pd.Timestamp(as_of) if as_of is not None
-                else effective_today_for_trading())
-    n = int(exit_offset_days)
-    target_date = _next_trading_offset(as_of_ts, n)
-    # Reminder fires at 11:30 ICT on the sell day itself — late morning,
-    # just before the lunch break. For T+2 this lands 30 min before noon
-    # settlement, giving the user time to queue afternoon-session orders;
-    # for T+>2 it's the natural mid-day check-in before the afternoon close.
-    reminder_date = target_date
-    reminder_time = "11:30 ICT"
-    if n == 2:
-        sell_window = ("13:00–14:30 ICT  (afternoon session, "
-                       "after T+2 settlement at noon)")
-        reminder_note = "30 min before T+2 settlement"
-    else:
-        sell_window = "09:00–14:30 ICT  (any time during the trading day)"
-        reminder_note = "late morning of sell day, before lunch break"
-    sym_list = ", ".join(picks["symbol"].astype(str).tolist())
     click.echo("")
-    click.echo("==> SELL-REMINDER (GMT+7, Asia/Ho_Chi_Minh — Vietnamese ICT):")
-    click.echo(f"    {n_picks} pick(s): {sym_list}")
-    click.echo(f"    Sell day: {target_date.strftime('%Y-%m-%d (%A)')} "
-               f"({sell_window}).")
-    click.echo(f"    Suggested reminder: "
-               f"{reminder_date.strftime('%Y-%m-%d (%A)')} {reminder_time} "
-               f"({reminder_note}).")
+    click.echo("==> EXIT PLAN (flexible — sell when the price reaches the target):")
+    for _, r in picks.reset_index(drop=True).iterrows():
+        tgt = r.get("target_vnd")
+        hold = r.get("hold_days")
+        tgt_s = f"{int(tgt):,}" if pd.notna(tgt) else "?"
+        hold_s = f", expected ≈ {int(hold)}d" if pd.notna(hold) else ""
+        click.echo(f"    {r['symbol']}: target {tgt_s} VND{hold_s}")
     if mode_label in ("claude", "gemini"):
-        click.echo(f"    {mode_label.title()}: ask the user whether they want a "
-                   f"reminder scheduled for that day/time in GMT+7.")
+        click.echo(f"    {mode_label.title()}: there is NO fixed sell day — do not "
+                   f"schedule a hard sell alarm. Offer an optional check-in only if asked.")
 
 
 # ---------------------------- data -----------------------------------------
@@ -257,47 +261,23 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
 @cli.command("train")
 @click.option("--start", default=None)
 @click.option("--end", default=None)
-@click.option("--skip-low/--no-skip-low", default=False, show_default=True,
-              help="Skip the low-quantile head (entry-limit predictor). "
-                   "When skipped, predictions fall back to entry = close.")
-def train_cmd(start: str | None, end: str | None, skip_low: bool) -> None:
-    """Build the panel and fit fresh mean + low models.
-
-    Saves the mean head to ``models/latest.pkl`` and the low-quantile head
-    to ``models/low_latest.pkl`` (unless ``--skip-low`` is set)."""
+def train_cmd(start: str | None, end: str | None) -> None:
+    """Build the panel and fit the rebound recovery estimator
+    (``models/recovery_latest.pkl``)."""
     from .dataset import build_panel
-    from .model.train import save_latest, save_latest_low, train, train_quantile
+    from .model.train import save_latest_recovery, train_recovery
 
     click.echo("building panel...")
-    # require_target=False so target_low rows survive; we drop NaN per-head.
     panel = build_panel(start=start, end=end, require_target=False)
     click.echo(f"panel: {len(panel):,} rows across {panel['symbol'].nunique()} symbols")
     if panel.empty:
         click.echo("no data — run update-data first.", err=True)
         sys.exit(1)
 
-    panel_mean = panel.dropna(subset=["target"])
-    click.echo(f"  mean head: {len(panel_mean):,} rows with target")
-    model = train(panel_mean)
-    path = save_latest(model)
-    click.echo(f"  trained {len(model.boosters)} boosters; saved -> {path}")
-
-    if skip_low:
-        click.echo("  skipping low head (--skip-low).")
-        return
-    if "target_low" not in panel.columns:
-        click.echo("  no target_low column — OHLCV cache may lack 'low' "
-                   "(re-run update-data). Skipping low head.")
-        return
-    panel_low = panel.dropna(subset=["target_low"])
-    if panel_low.empty:
-        click.echo("  no rows with target_low — skipping low head.")
-        return
-    click.echo(f"  low head: {len(panel_low):,} rows with target_low")
-    low_model = train_quantile(panel_low)
-    low_path = save_latest_low(low_model)
-    click.echo(f"  built empirical low head (alpha={low_model.alpha:.2f}, "
-               f"lookback={low_model.lookback}d); saved -> {low_path}")
+    rec = train_recovery(panel)
+    rpath = save_latest_recovery(rec)
+    click.echo(f"  recovery head: {rec.train_rows:,} downtrend rows, "
+               f"{len(rec.buckets)} state buckets; saved -> {rpath}")
 
 
 # ---------------------------- backtest -------------------------------------
@@ -315,41 +295,6 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
     out = write_report(res)
     click.echo(json.dumps(res.summary, indent=2))
     click.echo(f"report -> {out}")
-
-
-# ---------------------------- missed-winners -------------------------------
-
-
-@cli.command("regret")
-@click.option("--on", "on", default=None,
-              help="Prediction buy day (as_of) to evaluate. If its T+2 window has "
-                   "closed, that exact T+2 day is scored; otherwise (T+2 not closed "
-                   "yet) the latest fully-closed [T-2 -> today] window is used. "
-                   "Default: the latest closed window.")
-@click.option("--picks", "-n", "n", type=int, default=None,
-              help="Top-N realized winners (default: pricing.default_picks).")
-@click.option("--signature", default=None,
-              help="Restrict the model-pick comparison to one run signature.")
-def regret_cmd(on: str | None, n: int | None, signature: str | None) -> None:
-    """The top-N realized winners (bought T-2, sold the eval day) for a SINGLE
-    closed trading day, and whether the model surfaced them. No window
-    aggregation — one day only, anchored to the prediction's own T+2 day when it
-    has closed, else the latest closed window."""
-    from .analyze import regret as regret_mod
-    from .config import load_config, reports_dir
-    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    md, eval_day = regret_mod.single_day_markdown(as_of=on, n=nn, signature=signature)
-    click.echo(md)
-    # Name the file after the eval/sell day the report is about (when returns
-    # realized), not the wall-clock run day, so re-runs that score the same closed
-    # window overwrite one file instead of spawning a dupe. Fall back to today when
-    # no closed window exists yet.
-    day = (eval_day.strftime("%Y-%m-%d") if eval_day is not None
-           else pd.Timestamp.today().strftime("%Y-%m-%d"))
-    suffix = f"_{signature}" if signature else ""
-    out = reports_dir() / f"regret_{day}{suffix}.md"
-    out.write_text(md, encoding="utf-8")
-    click.echo(f"\nreport -> {out}")
 
 
 @cli.command("compare-modes")
@@ -377,94 +322,6 @@ def compare_modes_cmd(window: int, as_of: str | None, modes: str | None) -> None
     out = reports_dir() / f"mode_comparison_{today}.md"
     out.write_text(md, encoding="utf-8")
     click.echo(f"\nreport -> {out}")
-
-
-@cli.command("train-missed")
-@click.option("--upweight", type=float, default=3.0, show_default=True,
-              help="Sample weight on realized top-N winner rows.")
-@click.option("--picks", "-n", "n", type=int, default=None,
-              help="Top-N winners per day to upweight (default: pricing.default_picks).")
-def train_missed_cmd(upweight: float, n: int | None) -> None:
-    """Train the missed-winners VARIANT mean head (upweights realized winners).
-
-    Saves to ``models/latest_missed.pkl`` — the standard ``latest.pkl`` is left
-    untouched. Use with ``run --variant missed`` and validate via ``backtest-ab``
-    before trusting it (upweighting the tail can LOWER win rate)."""
-    from .analyze.regret import missed_winner_weights
-    from .config import load_config
-    from .dataset import build_panel
-    from .model.train import save_latest_missed, train
-
-    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    click.echo("building panel...")
-    panel = build_panel(require_target=False)
-    panel_mean = panel.dropna(subset=["target"])
-    if panel_mean.empty:
-        click.echo("no training rows. aborting.", err=True)
-        sys.exit(1)
-    weights = missed_winner_weights(panel_mean, n=nn, upweight=upweight)
-    n_up = int((weights > 1.0).sum())
-    click.echo(f"  upweighting {n_up:,} winner rows (x{upweight}) of "
-               f"{len(panel_mean):,} total")
-    model = train(panel_mean, weights=weights)
-    path = save_latest_missed(model)
-    click.echo(f"  saved variant -> {path}")
-
-
-def _write_backtest_ab_report(bt_run, missed_winner_weights, *, n,
-                              start=None, end=None, top=None, upweight=3.0):
-    """Run the standard-vs-missed walk-forward A/B, print the table, and write
-    reports/backtest_ab_<date>.md with BOTH models' numbers. Overwrites NO
-    model — it's advisory only. Returns the report path."""
-    from .config import reports_dir
-    a = bt_run(start=start, end=end, top_k=top).summary
-    b = bt_run(start=start, end=end, top_k=top,
-               weights_fn=lambda p: missed_winner_weights(p, n=n, upweight=upweight)).summary
-    keys = ["n_trades", "hit_rate", "hit_rate_net", "mean_return", "mean_return_net"]
-    fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else str(v)
-    click.echo(f"\n{'metric':<18}{'standard':>14}{'missed':>14}")
-    for k in keys:
-        click.echo(f"{k:<18}{fmt(a.get(k)):>14}{fmt(b.get(k)):>14}")
-    better = (b.get("hit_rate", 0) or 0) >= (a.get("hit_rate", 0) or 0)
-    verdict = ("variant win_rate >= standard — candidate looks OK" if better
-               else "variant win_rate < standard — keep the standard model")
-    click.echo(f"\n==> {verdict}")
-    today = pd.Timestamp.today().strftime("%Y-%m-%d")
-    lines = [f"# Backtest A/B — standard vs missed-winners variant ({today})", "",
-             f"upweight={upweight}, picks={n}, "
-             f"window={a.get('start','?')}..{a.get('end','?')}", "",
-             "| metric | standard | missed |", "| --- | --- | --- |"]
-    lines += [f"| {k} | {fmt(a.get(k))} | {fmt(b.get(k))} |" for k in keys]
-    lines += ["", f"**Verdict:** {verdict}.",
-              "", "_Advisory only — no model was overwritten. The standard model "
-              "stays live; the variant is `models/latest_missed.pkl`, used only "
-              "via the `_missed` reports._"]
-    out = reports_dir() / f"backtest_ab_{today}.md"
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return out
-
-
-@cli.command("backtest-ab")
-@click.option("--start", default=None)
-@click.option("--end", default=None)
-@click.option("--top", type=int, default=None)
-@click.option("--upweight", type=float, default=3.0, show_default=True)
-@click.option("--picks", "-n", "n", type=int, default=None)
-def backtest_ab_cmd(start, end, top, upweight, n) -> None:
-    """A/B the standard model vs the missed-winners variant on win rate.
-
-    Writes reports/backtest_ab_<date>.md with both models' numbers. Advisory
-    only — overwrites NO model. You decide whether the variant is worth using
-    (it stays at models/latest_missed.pkl, surfaced via the _missed reports)."""
-    from .analyze.regret import missed_winner_weights
-    from .backtest.walk_forward import run
-    from .config import load_config
-
-    nn = int(n) if n else int(load_config().pricing.get("default_picks", 5))
-    click.echo("backtest A: standard | B: missed-winners variant (slow)...")
-    out = _write_backtest_ab_report(run, missed_winner_weights, n=nn,
-                                    start=start, end=end, top=top, upweight=upweight)
-    click.echo(f"report -> {out}")
 
 
 # ---------------------------- predict --------------------------------------
@@ -610,46 +467,31 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
                    "`no` = force full re-fetch of every selected symbol "
                    "(slow, rate-limited; use only for backfill).")
 @click.option("--skip-train", is_flag=True,
-              help="Use the existing models/latest.pkl instead of retraining.")
-@click.option("--missed/--no-missed", "do_missed", default=True, show_default=True,
-              help="Involve the missed-winners variant. base mode: also writes a "
-                   "second _missed pick report. claude/gemini: UNIONs the missed "
-                   "variant's top picks into the candidates the LLM researches "
-                   "(deduped), so the LLM judges both rankings. On by default; "
-                   "--no-missed for standard candidates only.")
-@click.option("--ab/--no-ab", "do_ab", default=None,
-              help="After predicting, run the standard-vs-missed walk-forward A/B "
-                   "and write reports/backtest_ab_<date>.md (overwrites no model). "
-                   "Default: OFF for base, ON for claude/gemini (so the LLM can "
-                   "weigh the verdict). SLOW (~10 min, retrains across years).")
+              help="Use the existing models/recovery_latest.pkl instead of retraining.")
 @click.option("--llm-only", is_flag=True,
-              help="LLM-ONLY prediction (claude mode only): no ML model is used "
-                   "to select or rank. The whole mechanically-filtered universe "
-                   "(no pred_mean) is handed to Claude, which picks, ranks and "
-                   "prices every name itself. Emits a `claude_llm_plan_<date>.md` "
-                   "instead of the hybrid `claude_news_plan_*`. Forces "
-                   "--no-missed --no-ab (no ML to union/backtest).")
+              help="LLM-ONLY prediction (claude mode only): no model ranking. The "
+                   "whole mechanically-filtered downtrend universe is handed to "
+                   "Claude, which picks, ranks and prices every name itself. Emits "
+                   "a `claude_llm_plan_<date>.md` instead of `claude_news_plan_*`.")
 @click.option("--workers", type=int, default=2,
               help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
-            skip_train: bool, do_missed: bool, do_ab: bool | None,
-            llm_only: bool, workers: int) -> None:
+            skip_train: bool, llm_only: bool, workers: int) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
-    universe (no time cap); lazy caching keeps repeat runs fast. The horizon is
-    always T+2 (Vietnamese settlement); ``--picks N`` controls how many names
-    are surfaced.
+    universe (no time cap); lazy caching keeps repeat runs fast. The rebound
+    trade holds until recovery (flexible exit); ``--picks N`` controls how many
+    names are surfaced.
     """
     import time as _time
 
     from .data.cache import cached_symbols
     from .data.fetcher import update_many
     from .dataset import build_panel
-    from .model.train import (save_latest, save_latest_low,
-                              train as train_model, train_quantile)
+    from .model.train import save_latest_recovery, train_recovery
     from .selector import select as select_symbols
 
     # ---- input validation ----
@@ -659,17 +501,10 @@ def run_cmd(mode: str, n_picks: int | None,
     if llm_only and mode != "claude":
         click.echo("ERROR: --llm-only is only valid with --mode claude.", err=True)
         sys.exit(2)
-    if llm_only:
-        # No ML model in the loop → nothing to union or A/B-backtest.
-        do_missed = False
-        do_ab = False
-    # Horizon is always T+2 (Vietnamese settlement); sourced from config.
+    # exit_offset_days is only a signature/label horizon now (rebound exits flexibly).
     days = int(load_config().target["exit_offset_days"])
     requested_n = int(n_picks) if n_picks else int(
         load_config().pricing.get("default_picks", 5))
-    # The A/B defaults OFF for base, ON for claude/gemini (LLM weighs the verdict).
-    if do_ab is None:
-        do_ab = (mode != "base")
     # Normalize --exclude: split each value on commas so BAT-style single
     # comma-separated input works alongside the repeatable form, uppercase,
     # dedupe, sort for stable signature ordering.
@@ -686,8 +521,8 @@ def run_cmd(mode: str, n_picks: int | None,
 
     started = _time.time()
     click.echo(f"mode={mode}  universe=entire (no cap)  picks={requested_n}")
-    click.echo(f"  horizon: T+{days}  "
-               f"(T+2: sell in afternoon session only — settlement noon T+2)")
+    click.echo("  rebound: buy at close, hold until the profit target "
+               "(flexible exit — no fixed sell day)")
     click.echo("")
 
     # Auto-evaluate any predictions that are now T+2 or later. This must run
@@ -846,59 +681,20 @@ def run_cmd(mode: str, n_picks: int | None,
     pred_syms = syms
 
     if llm_only:
-        click.echo("LLM-only: skipping ML training (no model used).")
+        click.echo("LLM-only: skipping model training (no model used).")
         click.echo("")
     elif not skip_train:
-        click.echo(f"training (horizon T+{days})...")
-        # Build once with require_target=False so both heads can see all
-        # rows; drop NaN per-head before fitting.
+        click.echo("training rebound recovery head...")
         panel = build_panel(symbols=syms, require_target=False,
                             exit_offset_days=days)
-        panel_mean = panel.dropna(subset=["target"]) if not panel.empty else panel
-        if panel_mean.empty:
+        if panel.empty:
             click.echo("no training rows. aborting.", err=True)
             sys.exit(1)
-        click.echo(f"  mean head: {len(panel_mean):,} rows / "
-                   f"{panel_mean['symbol'].nunique()} symbols")
-        model = train_model(panel_mean)
-        save_latest(model)
-        click.echo("  mean model saved.")
-
-        # Low head: same panel, dropna on target_low. Independent of
-        # exit_offset_days (target_low only looks at next-day low).
-        if "target_low" in panel.columns:
-            panel_low = panel.dropna(subset=["target_low"])
-            if not panel_low.empty:
-                click.echo(f"  low head: {len(panel_low):,} rows / "
-                           f"{panel_low['symbol'].nunique()} symbols")
-                low_model = train_quantile(panel_low)
-                save_latest_low(low_model)
-                click.echo(f"  low model saved (alpha={low_model.alpha:.2f}).")
-            else:
-                click.echo("  low head: no rows with target_low — skipped.")
-
-        # Missed-winners variant mean head: same panel, upweight realized
-        # winners. Saved to latest_missed.pkl — the standard model is untouched.
-        if do_missed:
-            from .analyze.regret import missed_winner_weights
-            from .model.train import save_latest_missed
-            weights = missed_winner_weights(panel_mean, n=requested_n, upweight=3.0)
-            n_up = int((weights > 1.0).sum())
-            click.echo(f"  missed variant: upweighting {n_up:,} winner rows (x3.0)")
-            save_latest_missed(train_model(panel_mean, weights=weights))
-            click.echo("  missed variant saved.")
+        rec = train_recovery(panel)
+        save_latest_recovery(rec)
+        click.echo(f"  recovery head: {rec.train_rows:,} downtrend rows / "
+                   f"{len(rec.buckets)} state buckets saved.")
         click.echo("")
-
-    def _maybe_ab():
-        """Run the standard-vs-missed A/B and write its report (no model overwrite)."""
-        if not do_ab:
-            return
-        click.echo("")
-        click.echo("running standard-vs-missed A/B backtest (slow)...")
-        from .analyze.regret import missed_winner_weights
-        from .backtest.walk_forward import run as _bt_run
-        click.echo(f"A/B report -> "
-                   f"{_write_backtest_ab_report(_bt_run, missed_winner_weights, n=requested_n)}")
 
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
@@ -906,30 +702,18 @@ def run_cmd(mode: str, n_picks: int | None,
         picks, out = base.run(exit_offset_days=days, n_picks=requested_n,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
-                              exclude=exclude_list, variant="standard")
+                              exclude=exclude_list)
         click.echo("")
-        click.echo("=== STANDARD model ===")
         click.echo(_format_picks(picks))
         _print_pick_warnings(picks, requested_n)
         click.echo(f"saved -> {out}")
-        if do_missed:
-            m_picks, m_out = base.run(exit_offset_days=days, n_picks=requested_n,
-                                      symbols=pred_syms, hose_only=hose_only,
-                                      include_etfs=include_etfs,
-                                      exclude=exclude_list, variant="missed")
-            click.echo("")
-            click.echo("=== MISSED-WINNERS variant (experimental; nothing overwritten) ===")
-            click.echo(_format_picks(m_picks))
-            _print_pick_warnings(m_picks, requested_n)
-            click.echo(f"saved -> {m_out}")
-        _maybe_ab()
     elif mode == "claude":
         from .modes import claude
         result, out, tag = claude.run(exit_offset_days=days, n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
-                                       exclude=exclude_list, union_missed=do_missed,
+                                       exclude=exclude_list,
                                        llm_only=llm_only)
         click.echo("")
         if not llm_only:
@@ -953,16 +737,13 @@ def run_cmd(mode: str, n_picks: int | None,
             click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
         click.echo("    2. Then run:")
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
-        # Refresh the A/B verdict AFTER emitting the plan (the plan embeds the
-        # PREVIOUS report, so the user isn't blocked ~10 min for the research plan).
-        _maybe_ab()
     elif mode == "gemini":
         from .modes import gemini
         result, out, tag = gemini.run(exit_offset_days=days, n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
-                                       exclude=exclude_list, union_missed=do_missed)
+                                       exclude=exclude_list)
         click.echo("")
         click.echo(_format_picks(result))
         _print_pick_warnings(result, requested_n)
@@ -973,28 +754,6 @@ def run_cmd(mode: str, n_picks: int | None,
         if tag == "prompt-only":
             click.echo("")
             click.echo("==> NEXT: paste the prompt file's contents into Gemini Pro with browsing.")
-        _maybe_ab()
-
-    # Single-day missed-winners: for the latest fully-closed [T-2 -> today]
-    # window, the top-N realized gainers and whether we surfaced them. No 90-day
-    # aggregation. Reuse the training panel when available (it carries `target`);
-    # otherwise single_day_markdown builds its own.
-    try:
-        from .analyze import regret as _regret
-        from .config import reports_dir
-        _panel = locals().get("panel")
-        md, _eval_day = _regret.single_day_markdown(panel=_panel, n=requested_n)
-        click.echo("")
-        click.echo(md)
-        # Name the file after the eval/sell day the report scores (when returns
-        # realized), not the wall-clock run day, so re-runs don't spawn dated dupes.
-        _day = (_eval_day.strftime("%Y-%m-%d") if _eval_day is not None
-                else pd.Timestamp.today().strftime("%Y-%m-%d"))
-        _out = reports_dir() / f"regret_{_day}.md"
-        _out.write_text(md, encoding="utf-8")
-        click.echo(f"\nmissed-winners report -> {_out}")
-    except Exception as e:  # never let the diagnostic block a prediction run
-        click.echo(f"[note] single-day missed-winners report skipped: {e}")
 
     elapsed = (_time.time() - started) / 60.0
     click.echo(f"\nelapsed: {elapsed:.1f} min")
@@ -1113,21 +872,19 @@ def status_cmd() -> None:
     click.echo(f"cached symbols: {len(syms)}")
     if syms:
         click.echo(f"  example: {syms[:5]}")
-    m = models_dir() / "latest.pkl"
-    click.echo(f"latest mean model: {'present' if m.exists() else 'missing'}  ({m})")
-    lm = models_dir() / "low_latest.pkl"
-    if lm.exists():
+    rm = models_dir() / "recovery_latest.pkl"
+    if rm.exists():
         try:
-            from .model.train import RollingEmpiricalQuantileModel
-            low = RollingEmpiricalQuantileModel.load(lm)
-            click.echo(f"latest low model:  present  ({lm})  alpha={low.alpha:.2f}  "
-                       f"lookback={low.lookback}d  trained_on={low.train_rows:,} rows")
+            from .model.train import RecoveryKMModel
+            rec = RecoveryKMModel.load(rm)
+            click.echo(f"recovery model:  present  ({rm})  "
+                       f"{rec.train_rows:,} downtrend rows  "
+                       f"{len(rec.buckets)} state buckets  "
+                       f"{len(getattr(rec, 'ticker_stats', {}))} tickers")
         except Exception as e:
-            click.echo(f"latest low model:  present but unreadable ({e}) "
-                       f"— retrain to rebuild (entries fall back to close meanwhile)")
+            click.echo(f"recovery model:  present but unreadable ({e}) — retrain.")
     else:
-        click.echo(f"latest low model:  missing  ({lm}) "
-                   f"— predictions fall back to entry = close")
+        click.echo(f"recovery model:  missing  ({rm}) — run `train` (or `run`).")
 
 
 def main() -> None:

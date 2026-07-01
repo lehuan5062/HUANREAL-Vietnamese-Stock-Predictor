@@ -1,12 +1,12 @@
 """Build a markdown news-research plan that an in-session Claude can execute via WebFetch.
 
-Workflow:
-  1. base ML stage selects the top-N candidates
+Workflow (rebound strategy):
+  1. the rebound model selects the top-N downtrend candidates by P/N score
   2. write_plan() produces a markdown checklist with per-ticker URLs
-     and a +1 / 0 / -1 sentiment rubric
+     and a +1 / 0 / -1 / DROP vetting rubric ("healthy bounce vs falling knife")
   3. Claude (running this session) fills in the rubric using WebFetch
-  4. parse_plan() reads the filled markdown and returns adjusted scores
-  5. modes/claude.py.finalize() re-ranks: adjusted = ml * (1 + news_weight * news)
+  4. parse_plan() reads the filled markdown and returns the news scores
+  5. modes/claude.py.finalize() re-ranks: adjusted = score * (1 + news_weight * news)
 """
 from __future__ import annotations
 
@@ -26,7 +26,8 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
                current_signature: str | None = None,
                ab_verdict: str | None = None) -> Path:
     """Emit the markdown plan file. `candidates` must include columns
-    [symbol, pred_mean, pred_std, close, rsi_14, mom_5, mom_20].
+    [symbol, score, pred_days, pred_profit, pred_recovery_prob, close, rsi_14,
+    mom_5, mom_20, high_prox_20].
     `run_signature` is appended to the filename so distinct same-day
     runs (different horizon / hose-only) don't override each
     other — pass it from the mode caller for full uniqueness."""
@@ -98,7 +99,16 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
             "the final N on conviction.", "",
         ]
     lines += [
-        "## Method — emergent research, not a fixed checklist",
+        "## Method — vet the rebound, emergent research (not a fixed checklist)",
+        "",
+        "These are all DOWNTREND names the rebound model judged statistically",
+        "likely to bounce back to a small profit (they cleared a per-ticker",
+        "recovery-probability filter). **Your job is the human check the",
+        "statistics can't do: is each one a healthy company in a temporary dip",
+        "that will recover — or a falling knife (fraud, delisting, insolvency,",
+        "structural decline) where the drop is justified and the bounce won't",
+        "come?** Confirm the healthy ones (+1), flag the broken ones (-1), and",
+        "`DROP` the un-tradeable ones outright.",
         "",
         "For each candidate, you decide what to research. We do not give you",
         "a fixed checklist of dimensions — different companies have different",
@@ -129,40 +139,38 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     if has_etf_candidates:
         lines.extend([ETF_GUIDANCE_MD, ""])
     lines.extend([
-        "Score key:",
-        "  +1 = material bullish development (earnings beat, sector tailwind,",
-        "       contract win, favorable policy)",
-        "   0 = nothing material — or only generic market noise",
-        "  -1 = material bearish development (earnings miss, sector headwind,",
-        "       regulatory action, dividend cut)",
+        "Score key — you are VETTING THE BOUNCE (is this a healthy pullback that",
+        "will recover, or a falling knife that keeps dropping?):",
+        "  +1 = news supports the rebound (a real recovery catalyst, or simply a",
+        "       fundamentally sound company in a temporary/technical dip)",
+        "   0 = nothing material — the statistical rebound case stands on its own",
+        "  -1 = news works AGAINST the rebound (deteriorating fundamentals, sector",
+        "       headwind, dilution, governance concern — the dip may be justified)",
         "",
         "**Hard override**: if you find a delisting / trading halt / bankruptcy",
-        "filing for a ticker, score it `-1` AND write `DROP` in the rationale.",
-        "Such tickers should not be traded regardless of the ML score.",
+        "filing / fraud for a ticker, write `DROP` — it must not be traded no",
+        "matter how attractive the P/N score looks (this is exactly the falling",
+        "knife the statistical filter can miss).",
         "",
-        f"Re-rank rule: `adjusted = pred_mean * (1 + {cfg['news_weight']} * news_score)`",
+        f"Re-rank rule: `adjusted = score * (1 + {cfg['news_weight']} * news_score)`",
         "",
         "When done, fill the score table at the bottom and run:",
         f"  `python -m stockpredict.cli claude-finalize reports/{path.name}`",
         "",
-        "## Step 7 — Sell-day reminder (after finalize)",
+        "## Step 7 — Exit is flexible (hold until the target)",
         "",
-        f"Once `claude-finalize` finishes, it prints the explained picks and a",
-        f"`==> SELL-REMINDER:` block. Ask the user — in plain conversation —",
-        f"whether they would like a reminder scheduled in **GMT+7 "
-        f"(Asia/Ho_Chi_Minh, Vietnamese ICT)** to prepare the exit.",
+        "This is a REBOUND trade with a **flexible exit**: there is no fixed",
+        "sell day. Each pick shows a target price (`target_vnd`) and an expected",
+        "hold (`N≈…d to bounce`). The user **monitors and sells manually** when",
+        "the price reaches the target — that human judgement is deliberate.",
         "",
-        f"- **Sell day** (the actual trade): {target_iso} ({sell_window}).",
-        f"- **Reminder fires**: {reminder_iso} {suggested_time} — on the sell",
-        f"  day itself ({reminder_note}). This gives the user time to review",
-        f"  and queue exit orders for the afternoon session.",
-        "",
-        "If the user says yes, use whatever scheduling tool you have available",
-        "(Claude Code's scheduled-tasks / cron / `at` / Windows `schtasks`),",
-        "or — if no scheduler is available — give the user a paste-ready ICS",
-        "calendar event with `TZID=Asia/Ho_Chi_Minh`. Do NOT silently set the",
-        "reminder; always confirm reminder date+time, sell day, tickers, and",
-        "method first.",
+        "So do NOT schedule a hard T+2 sell reminder. Instead, after",
+        "`claude-finalize`, tell the user per pick: the buy price, the target,",
+        "and the expected days-to-bounce. If — and only if — the user asks for a",
+        "nudge, offer an OPTIONAL check-in reminder around `as_of + N` trading",
+        "days (in GMT+7, Asia/Ho_Chi_Minh) to re-examine any pick that hasn't",
+        "recovered yet — framed as 'take a look', not 'sell now'. Never schedule",
+        "silently; confirm date/time and tickers first.",
         "",
         "## Global / macro context (read once)",
         "",
@@ -220,24 +228,28 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
             type_tag += "  [also-missed — both models like it]"
         lines.append(f"### {sym}  —  {organ}{type_tag}")
         lines.append("")
-        lines.append(f"ML signal: pred_mean={row['pred_mean']:+.4f}  "
-                     f"(±{row.get('pred_std', 0):.4f})  close={row.get('close', float('nan')):.0f}  "
+        lines.append(f"Rebound signal: score={row.get('score', float('nan')):.4f}  "
+                     f"N≈{row.get('pred_days', float('nan')):.0f}d to bounce  "
+                     f"P≈{row.get('pred_profit', float('nan')):+.3f}  "
+                     f"recovery_prob={row.get('pred_recovery_prob', float('nan')):.0%}  "
+                     f"close={row.get('close', float('nan')):.0f}  "
                      f"rsi={row.get('rsi_14', float('nan')):.0f}  "
-                     f"mom20={row.get('mom_20', float('nan')):+.3f}")
-        # Per-share pricing if available
-        if "entry_vnd" in row and pd.notna(row.get("entry_vnd")):
-            entry = int(row["entry_vnd"])
+                     f"mom20={row.get('mom_20', float('nan')):+.3f}  "
+                     f"below20dHigh={row.get('high_prox_20', float('nan')):+.3f}")
+        # Per-share pricing if available (rebound: buy at close, no stop / rr).
+        if "close_vnd" in row and pd.notna(row.get("close_vnd")):
+            entry = int(row["close_vnd"])
             tgt = int(row["target_vnd"])
-            stop = int(row["stop_vnd"])
+            hold = row.get("hold_days")
+            hold_s = f"{int(hold)}d" if pd.notna(hold) else "?"
             fees = int(row.get("fees_round_trip_vnd", 0))
             net = int(row.get("net_reward_vnd", 0))
-            rr = row.get("rr_ratio", float("nan"))
-            below = bool(row.get("below_breakeven", False))
+            below = bool(row.get("below_recovery_bar", False))
             net_sign = "+" if net >= 0 else ""
             lines.append(
-                f"Trade (per share): entry={entry:,}  target={tgt:,}  stop={stop:,}  "
-                f"fees={fees:,}  net={net_sign}{net:,}  rr={rr:.2f}  "
-                f"{'BELOW-BAR (weak edge)' if below else 'OK'}"
+                f"Trade (per share): buy={entry:,}  target={tgt:,}  hold≈{hold_s}  "
+                f"fees={fees:,}  net={net_sign}{net:,}  "
+                f"{'BELOW RECOVERY BAR (weak)' if below else 'OK'}"
             )
         lines.append("")
         if is_etf_row:
@@ -250,7 +262,7 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         if is_etf_row:
             lines.append("**Step 2 — Research dimensions (ETF)**: pick 3-5 from {index performance, foreign net flows, VSDC creation/redemption, NAV premium/discount, upcoming rebalancing, top-weight constituent binary events within the T+N exit horizon}. Skip those that don't apply, add ones we haven't listed.")
         else:
-            lines.append("**Step 2 — Research dimensions**: derive 3-7 dimensions YOU think matter for THIS ticker on a T+2 horizon. Your own list — not ours. Skip categories that don't apply, add ones that do (idiosyncratic drivers like a key customer, a peer's earnings, a peg, a contract often matter more than any standard category).")
+            lines.append("**Step 2 — Research dimensions**: derive 3-7 dimensions YOU think matter for THIS ticker's REBOUND — will it bounce back to a small profit within the next couple of weeks, or is it a broken company that keeps falling? Your own list — not ours. Skip categories that don't apply, add ones that do (idiosyncratic drivers like a key customer, a peer's earnings, a peg, a contract, or a solvency/dilution/fraud red flag often matter more than any standard category).")
         lines.append("")
         lines.append("- ")
         lines.append("")
@@ -271,23 +283,21 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     lines.append("override the ML score and are never traded.")
     lines.append("")
     lines.append("**News-adjusted entry / target (optional).** The `adj_entry_vnd` and")
-    lines.append("`adj_target_vnd` columns are pre-filled with the mechanical limit-dip")
-    lines.append("entry and the ML target. These do NOT replace the mechanical prices —")
-    lines.append("they add a parallel, news-aware trade the user can compare. The")
-    lines.append("mechanical entry is a per-ticker dip limit that ignores today's news,")
-    lines.append("so on a broad news-driven melt-up the dip never comes and the limit")
-    lines.append("never fills. If your research says the stock will gap up (or down),")
-    lines.append("overwrite these two cells with the entry and target you'd actually")
-    lines.append("place in VND per share. Unlike the mechanical entry, `adj_entry_vnd`")
-    lines.append("MAY sit ABOVE today's close to guarantee a fill on a strong catalyst.")
-    lines.append("Leave them as-is (or blank) to keep them equal to the mechanical prices.")
+    lines.append("`adj_target_vnd` columns are pre-filled with the rebound buy price")
+    lines.append("(today's close) and the profit target. These do NOT replace the")
+    lines.append("mechanical prices — they add a parallel, news-aware trade the user can")
+    lines.append("compare. If your research says the stock will gap up or down on a")
+    lines.append("catalyst (so the plain close-entry / target no longer fits), overwrite")
+    lines.append("these two cells with the entry and target you'd actually place in VND")
+    lines.append("per share. Leave them as-is (or blank) to keep the mechanical prices.")
     lines.append("")
-    lines.append("| symbol | pred_mean | news_score | adj_entry_vnd | adj_target_vnd |")
+    lines.append("| symbol | score | news_score | adj_entry_vnd | adj_target_vnd |")
     lines.append("| --- | --- | --- | --- | --- |")
     for _, row in candidates.iterrows():
-        ae = int(row["entry_vnd"]) if "entry_vnd" in row and pd.notna(row.get("entry_vnd")) else ""
+        ae = int(row["close_vnd"]) if "close_vnd" in row and pd.notna(row.get("close_vnd")) else ""
         at = int(row["target_vnd"]) if "target_vnd" in row and pd.notna(row.get("target_vnd")) else ""
-        lines.append(f"| {row['symbol']} | {row['pred_mean']:+.4f} | 0 | {ae} | {at} |")
+        sc = row.get("score", float("nan"))
+        lines.append(f"| {row['symbol']} | {sc:.4f} | 0 | {ae} | {at} |")
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -316,9 +326,11 @@ def _parse_price_cell(cell: str) -> float:
 
 def _parse_score_row(line: str):
     """Parse one `## Scores` table row by splitting on `|`. Returns
-    (symbol, pred_mean, news_score_str, adj_entry, adj_target) or None if the
-    line isn't a data row (header, separator, prose). Backward-compatible: a
-    3-column row (no adj columns) yields NaN for adj_entry / adj_target."""
+    (symbol, model_score, news_score_str, adj_entry, adj_target) or None if the
+    line isn't a data row (header, separator, prose). ``model_score`` is the
+    rebound P/N score column (display/validation only — finalize uses the
+    sidecar's own ``score``). Backward-compatible: a 3-column row (no adj
+    columns) yields NaN for adj_entry / adj_target."""
     stripped = line.strip()
     if not stripped.startswith("|"):
         return None
@@ -329,7 +341,7 @@ def _parse_score_row(line: str):
     if not _SYM_RE.match(sym):
         return None
     try:
-        pred_mean = float(cells[1])
+        model_score = float(cells[1])
     except ValueError:
         return None
     score_str = cells[2].upper()
@@ -337,7 +349,7 @@ def _parse_score_row(line: str):
         return None
     adj_entry = _parse_price_cell(cells[3]) if len(cells) > 3 else float("nan")
     adj_target = _parse_price_cell(cells[4]) if len(cells) > 4 else float("nan")
-    return sym, pred_mean, score_str, adj_entry, adj_target
+    return sym, model_score, score_str, adj_entry, adj_target
 
 
 def _split_per_ticker_sections(text: str) -> dict[str, str]:
@@ -449,9 +461,10 @@ def _extract_dimension_tags(findings: list[str]) -> list[str]:
 
 
 def parse_plan(path: str | Path) -> pd.DataFrame:
-    """Read the filled markdown plan and return DataFrame[symbol, pred_mean,
+    """Read the filled markdown plan and return DataFrame[symbol, score,
     news_score, business, drivers, key_news]. news_score is `DROP_SENTINEL`
-    for any row scored DROP."""
+    for any row scored DROP. ``score`` is the rebound P/N model score parsed
+    from the table (display/validation; finalize uses the sidecar's own)."""
     text = Path(path).read_text(encoding="utf-8")
     sections = _split_per_ticker_sections(text)
     rows = []
@@ -464,7 +477,7 @@ def parse_plan(path: str | Path) -> pd.DataFrame:
             continue
         parsed = _parse_score_row(line)
         if parsed:
-            sym, pred_mean, score_str, adj_entry, adj_target = parsed
+            sym, model_score, score_str, adj_entry, adj_target = parsed
             if score_str == "DROP":
                 ns = DROP_SENTINEL
             else:
@@ -473,7 +486,7 @@ def parse_plan(path: str | Path) -> pd.DataFrame:
             findings = _extract_findings_list(sec)
             rows.append({
                 "symbol": sym,
-                "pred_mean": pred_mean,
+                "score": model_score,
                 "news_score": ns,
                 # News-adjusted entry / target the user/Claude wrote in the
                 # score table. NaN when left blank → downstream falls back to
