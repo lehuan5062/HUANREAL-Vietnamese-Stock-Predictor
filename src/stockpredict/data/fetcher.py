@@ -157,7 +157,8 @@ def quiet_vnstock_logger() -> None:
     from .intro import introduce
     introduce()
     _disable_vnstock_hard_exit()
-    for name in ("vnstock", "vnstock.core.utils.client", "vnstock.explorer"):
+    for name in ("vnstock", "vnstock.core.utils.client", "vnstock.explorer",
+                 "vnstock.explorer.msn.quote"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
