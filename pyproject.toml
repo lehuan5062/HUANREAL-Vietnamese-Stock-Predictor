@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "stockpredict"
 version = "0.1.0"
 description = "Vietnamese T+N swing-trade stock predictor (HOSE/HNX/UPCOM)"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10,<3.15"
 license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "Lê Vương Gia Huân" },

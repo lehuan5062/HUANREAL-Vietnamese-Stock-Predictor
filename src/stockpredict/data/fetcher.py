@@ -199,64 +199,54 @@ def _quote_history(symbol: str, src: str, start: str, end: str,
 
 
 def fetch_history(symbol: str, start: str, end: str | None = None,
-                  source: str | None = None) -> pd.DataFrame:
-    """Fetch raw daily OHLCV from vnstock. Tries the configured source first,
-    then falls back. Returns DataFrame indexed by date with float columns.
+                  source_order: list[str] | None = None) -> pd.DataFrame:
+    """Fetch raw daily OHLCV from vnstock. Tries sources in the given order.
 
-    Rate-limit errors trigger a 60s global pause and re-try on the SAME
-    source (rather than cycling sources, which would just waste budget).
+    Args:
+        symbol: Ticker symbol
+        start: Start date (YYYY-MM-DD)
+        end: End date; defaults to today
+        source_order: List of sources to try in order (e.g., [VCI, KBS, MSN, TCBS]).
+                      Defaults to [VCI, KBS, MSN, TCBS].
+
+    On any error (429, timeout, bad data), moves to the next source in the list.
+    No pause mechanism; single worker feeds requests at rate-limiter pace (1 req/sec).
 
     When ``data.bypass_vnai_quota`` is set (default), calls go straight to
     the underlying provider endpoint via ``_quote_history``, sidestepping
     vnstock's 20/min guest quota. The per-source ``_RateLimiter`` still
     applies as a politeness throttle against the providers' real servers.
     """
+    from . import source_preference
 
     cfg = load_config()
     bypass_quota = bool(cfg.data.get("bypass_vnai_quota", True))
     end = end or _today_str()
-    sources: list[str] = []
-    if source:
-        sources.append(source)
-    sources.append(cfg.data["source"])
-    # Quote API only accepts these per vnstock 4.x
-    sources.extend(["VCI", "KBS", "MSN"])
-    tried: set[str] = set()
-    last_err: Exception | None = None
-    for src in sources:
-        if src in tried or src not in ("VCI", "KBS", "MSN", "TCBS"):
+
+    if source_order is None:
+        source_order = ["VCI", "KBS", "MSN", "TCBS"]
+
+    for src in source_order:
+        if src not in ("VCI", "KBS", "MSN", "TCBS"):
             continue
-        tried.add(src)
         for interval in ("1D", "D"):  # vnstock 4 uses 1D, older uses D
-            for attempt in range(2):  # one retry after a rate-limit pause
-                try:
-                    _limiter(src).wait()
-                    df = _quote_history(symbol, src, start, end,
-                                        interval, bypass_quota)
-                    if df is None or len(df) == 0:
-                        break  # try next interval
+            try:
+                _limiter(src).wait()
+                df = _quote_history(symbol, src, start, end, interval, bypass_quota)
+                if df is not None and len(df) > 0:
+                    source_preference.track_source_success(src)
                     return _normalize_ohlcv(df)
-                except SystemExit as e:
-                    # vnstock's CleanErrorContext calls sys.exit() on rate
-                    # limits. We monkey-patch that away in
-                    # _disable_vnstock_hard_exit, but keep this defensive
-                    # catch in case the patch ever fails to land — a hard
-                    # exit mid-batch would lose ~hours of cache progress.
-                    last_err = e
-                    _limiter(src).pause(65.0, reason=f"{src} hard-exit on {symbol}")
-                    if attempt == 0:
-                        continue
-                    break
-                except Exception as e:
-                    last_err = e
-                    if _looks_like_rate_limit(e):
-                        # Server-side window saturated. Pause everyone for
-                        # 60s + jitter so the window genuinely empties.
-                        _limiter(src).pause(65.0, reason=f"{src} 429 on {symbol}")
-                        if attempt == 0:
-                            continue  # retry same source after the pause
-                    break  # non-rate-limit error: try next interval/source
-    raise RuntimeError(f"Could not fetch {symbol}: {last_err}")
+            except Exception as e:
+                logging.getLogger("stockpredict.fetcher").debug(
+                    "fetch_history(%s, %s, interval=%s) failed: %s",
+                    symbol, src, interval, type(e).__name__
+                )
+                # Try next interval for this source
+                continue
+        # All intervals failed for this source; move to next source
+        source_preference.track_source_failure(src)
+
+    raise RuntimeError(f"Could not fetch {symbol} from any source in {source_order}")
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -331,14 +321,16 @@ def audit_cache(symbols: Iterable[str],
     return warm, stale, cold
 
 
-def update_symbol(symbol: str, full: bool = False) -> int:
+def update_symbol(symbol: str, full: bool = False,
+                  source_order: list[str] | None = None) -> int:
     """Incremental update: fetch from cache_max_date+1 (or full history). Returns row delta.
 
     Skips the API call when the cache already covers the latest finalized
     end-of-day bar. Caps the fetch end-date at that same latest finalized
     bar — never asks the broker for today's intraday partial bar during
     trading hours, which would pollute the cache with mid-session noise
-    and force an extra refetch later."""
+    and force an extra refetch later.
+    """
     cfg = load_config()
     start_full = cfg.data["history_start"]
     cached = read_ohlcv(symbol)
@@ -366,7 +358,7 @@ def update_symbol(symbol: str, full: bool = False) -> int:
         start = (last + dt.timedelta(days=1)).isoformat()
         if start > end_str:
             return 0
-    new = fetch_history(symbol, start=start, end=end_str)
+    new = fetch_history(symbol, start=start, end=end_str, source_order=source_order)
     before = len(cached)
     merged = merge_ohlcv(symbol, new)
     # Stamp the watermark to the expected bar so a fetch returning empty
@@ -380,25 +372,36 @@ def update_symbol(symbol: str, full: bool = False) -> int:
 
 
 def update_many(symbols: Iterable[str], full: bool = False,
-                workers: int | None = None) -> dict[str, int | str]:
+                workers: int | None = None,
+                source_order: list[str] | None = None) -> dict[str, int | str]:
     """Bulk-update OHLCV for many symbols. Returns delta or error per symbol.
 
+    Single-worker strategy: fetches symbols sequentially with a sticky source.
+    Determines source order once (from preference history or random), then cycles
+    through sources on failure. This avoids concurrent bursts that trigger 429s.
+
     Internals:
-      * If ``full=False`` (default), audits the cache and only spawns
-        thread-pool jobs for **stale** and **cold** tickers — warm ones
-        get a zero-delta result without touching the network.
-      * Rate limiting is per-source: each backend gets its own
-        ``_RateLimiter`` inside ``fetch_history``, so ``workers`` can be > 1.
+      * If ``full=False`` (default), audits the cache and only fetches
+        **stale** and **cold** tickers — warm ones get a zero-delta result
+        without touching the network.
+      * Single worker: no ThreadPoolExecutor. Sequential loop respects rate
+        limiter's per-source pacing (1 req/sec).
+      * source_order: if None, loads/generates from preference file.
 
     Fast path: if every selected symbol is already cached through the
     latest expected bar (e.g. running on a Saturday with cache through
-    Friday), no thread pool is spun up and the function returns
-    immediately."""
+    Friday), returns immediately without network calls.
+    """
+    from . import source_preference
+
     cfg = load_config()
-    workers = workers or cfg.data.get("fetch_workers", 2)
     syms = list(symbols)
     if not syms:
         return {}
+
+    # Generate/load source order once, reuse for all symbols
+    if source_order is None:
+        source_order = source_preference.get_source_order()
 
     if full:
         # User asked for an unconditional re-fetch — every symbol gets a job.
@@ -411,16 +414,11 @@ def update_many(symbols: Iterable[str], full: bool = False,
         if not to_fetch:
             return results  # everything's current, no work to do
 
-    def _job(sym: str) -> tuple[str, int | str]:
+    # Single-worker sequential loop (no ThreadPoolExecutor)
+    for sym in tqdm(to_fetch, desc="update", ncols=80):
         try:
-            return sym, update_symbol(sym, full=full)
+            delta = update_symbol(sym, full=full, source_order=source_order)
+            results[sym] = delta
         except Exception as e:
-            return sym, f"ERR: {type(e).__name__}: {str(e)[:160]}"
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(_job, s) for s in to_fetch]
-        for f in tqdm(as_completed(futs), total=len(futs),
-                      desc="update", ncols=80):
-            sym, res = f.result()
-            results[sym] = res
+            results[sym] = f"ERR: {type(e).__name__}: {str(e)[:160]}"
     return results

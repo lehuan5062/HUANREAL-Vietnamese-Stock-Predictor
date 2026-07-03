@@ -223,6 +223,7 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
     """Refresh the OHLCV parquet cache from vnstock."""
     from .data.fetcher import update_many
     from .data.intro import introduce
+    from .data.source_preference import get_source_order
     from .data.universe import filter_exchanges, load_universe
 
     introduce()
@@ -246,8 +247,9 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
                 seen.add(s.upper())
     if limit:
         syms = syms[:limit]
+    source_order = get_source_order()
     click.echo(f"Updating {len(syms)} symbols (full={full})...")
-    results = update_many(syms, full=full)
+    results = update_many(syms, full=full, source_order=source_order)
     ok = sum(1 for v in results.values() if isinstance(v, int))
     err = len(results) - ok
     click.echo(f"done. ok={ok} err={err}")
@@ -471,12 +473,10 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
                    "whole mechanically-filtered downtrend universe is handed to "
                    "Claude, which picks, ranks and prices every name itself. Emits "
                    "a `claude_llm_plan_<date>.md` instead of `claude_news_plan_*`.")
-@click.option("--workers", type=int, default=2,
-              help="Parallel fetcher threads. Keep low to stay under 20 req/min.")
 def run_cmd(mode: str, n_picks: int | None,
             hose_only: bool, include_etfs: bool,
             exclude: tuple[str, ...], warm_only: str,
-            skip_train: bool, llm_only: bool, workers: int) -> None:
+            skip_train: bool, llm_only: bool) -> None:
     """End-to-end: fetch -> train -> predict over the entire universe.
 
     Designed to be invoked from a double-click .bat. Always runs on the full
@@ -542,6 +542,7 @@ def run_cmd(mode: str, n_picks: int | None,
     # Quiet vnstock's noisy ERROR-level logger before bulk fetching — its
     # transient errors are already handled by our fallback + rate limiter.
     from .data.fetcher import audit_cache, quiet_vnstock_logger
+    from .data.source_preference import get_source_order
     quiet_vnstock_logger()
     from .tracking import latest_expected_bar_date
     _expected_pre = latest_expected_bar_date()
@@ -593,7 +594,7 @@ def run_cmd(mode: str, n_picks: int | None,
                        f"{len(cold)} cold)")
     else:  # warm_mode == "no"
         click.echo(f"  --warm-only=no: forcing full re-fetch of all "
-                   f"{len(syms)} symbols (rate-limited, slow)")
+                   f"{len(syms)} symbols (single worker, rate-limited)")
     click.echo("")
 
     if warm_mode == "always":
@@ -603,11 +604,12 @@ def run_cmd(mode: str, n_picks: int | None,
         ok = len(results)
         err = 0
     else:
-        click.echo(f"updating data (workers={workers})...")
+        source_order = get_source_order()
+        click.echo(f"updating data (single worker, source order: {', '.join(source_order)})...")
         # warm_mode == "yes" → update_many internally audits and only
         # fetches stale + cold (lazy).
         # warm_mode == "no" → full=True forces re-fetch of every symbol.
-        results = update_many(syms, full=(warm_mode == "no"), workers=workers)
+        results = update_many(syms, full=(warm_mode == "no"), source_order=source_order)
         ok = sum(1 for v in results.values() if isinstance(v, int))
         err = len(results) - ok
         # Re-audit AFTER the fetch so the user can see what actually persisted
@@ -772,6 +774,7 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
     explicit in the CLI surface.
     """
     from .data.fetcher import update_many
+    from .data.source_preference import get_source_order
     from .tracking import _read, evaluate_pending
 
     if refresh_data:
@@ -781,7 +784,8 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
             if pending_syms:
                 click.echo(f"refreshing data for {len(pending_syms)} symbols "
                            f"with un-stamped T+0 fills...")
-                update_many(pending_syms, full=False, workers=2)
+                source_order = get_source_order()
+                update_many(pending_syms, full=False, source_order=source_order)
 
     updated = evaluate_pending()
     click.echo(f"newly stamped: {len(updated)}")
@@ -800,6 +804,7 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
 def evaluate_cmd(refresh_data: bool) -> None:
     """Score past predictions whose T+2 has now passed."""
     from .data.fetcher import update_many
+    from .data.source_preference import get_source_order
     from .tracking import _read, evaluate_pending, recent_performance
 
     if refresh_data:
@@ -808,7 +813,8 @@ def evaluate_cmd(refresh_data: bool) -> None:
             pending_syms = sorted(df[~df["evaluated"]]["symbol"].unique().tolist())
             if pending_syms:
                 click.echo(f"refreshing data for {len(pending_syms)} symbols...")
-                update_many(pending_syms, full=False, workers=2)
+                source_order = get_source_order()
+                update_many(pending_syms, full=False, source_order=source_order)
 
     updated = evaluate_pending()
     click.echo(f"newly evaluated (T+0 limit-fill or T+N realized): {len(updated)}")
