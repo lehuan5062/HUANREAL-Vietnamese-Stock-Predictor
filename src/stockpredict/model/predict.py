@@ -49,7 +49,6 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
                on: str | pd.Timestamp | None = None,
                n_picks: int = 5,
                panel: pd.DataFrame | None = None,
-               exit_offset_days: int | None = None,
                symbols: list[str] | None = None) -> pd.DataFrame:
     """Rebound ranking: score the downtrend-filtered cross-section by
     ``score = P/N * recovery_prob`` (profit per day held, risk-adjusted by the
@@ -61,8 +60,7 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
     if recovery_model is None:
         recovery_model = _try_load_recovery_model()
     if panel is None:
-        panel = build_panel(symbols=symbols, require_target=False,
-                            exit_offset_days=exit_offset_days)
+        panel = build_panel(symbols=symbols, require_target=False)
     elif symbols is not None:
         panel = panel[panel["symbol"].astype(str).str.upper().isin(
             {s.upper() for s in symbols})]
@@ -102,7 +100,6 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
 
 def eligible_universe(on: str | pd.Timestamp | None = None,
                       panel: pd.DataFrame | None = None,
-                      exit_offset_days: int | None = None,
                       symbols: list[str] | None = None) -> pd.DataFrame:
     """Return the mechanically-filtered cross-section of tradable names on the
     given date — UNCAPPED, with NO model scoring and NO pricing.
@@ -118,8 +115,7 @@ def eligible_universe(on: str | pd.Timestamp | None = None,
     """
     if panel is None:
         # require_target=False so we keep the most recent rows even without a known target
-        panel = build_panel(symbols=symbols, require_target=False,
-                            exit_offset_days=exit_offset_days)
+        panel = build_panel(symbols=symbols, require_target=False)
     elif symbols is not None:
         panel = panel[panel["symbol"].astype(str).str.upper().isin(
             {s.upper() for s in symbols}

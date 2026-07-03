@@ -86,35 +86,35 @@ def test_after_cutoff_with_holiday(monkeypatch):
 def test_run_signature_distinct_for_distinct_params():
     """Different parameter combos yield different signatures."""
     sigs = {
-        tracking.run_signature("base", 2, hose_only=False),
-        tracking.run_signature("base", 2, hose_only=True),
-        tracking.run_signature("claude", 2, hose_only=False),
-        tracking.run_signature("base", 5, hose_only=False),
-        tracking.run_signature("base", 2, hose_only=False, exclude=["HPG"]),
+        tracking.run_signature("base", hose_only=False),
+        tracking.run_signature("base", hose_only=True),
+        tracking.run_signature("claude", hose_only=False),
+        tracking.run_signature("base", hose_only=False, exclude=["HPG"]),
+        tracking.run_signature("base", hose_only=False, include_etfs=False),
     }
     assert len(sigs) == 5, f"expected 5 distinct signatures; got {len(sigs)}: {sigs}"
 
 
 def test_run_signature_idempotent():
-    """Same params → same signature."""
-    a = tracking.run_signature("claude", 18, hose_only=True)
-    b = tracking.run_signature("claude", 18, hose_only=True)
+    """Same params -> same signature. No horizon token (flexible exit)."""
+    a = tracking.run_signature("claude", hose_only=True)
+    b = tracking.run_signature("claude", hose_only=True)
     assert a == b
-    assert a == "claude_d18_HOSE"
+    assert a == "claude_HOSE"
 
 
 def test_run_signature_no_hose_tag_when_off():
     """hose_only=False omits the HOSE tag — keeps signatures readable."""
-    sig = tracking.run_signature("base", 2, hose_only=False)
+    sig = tracking.run_signature("base", hose_only=False)
     assert "HOSE" not in sig
-    assert sig == "base_d2"
+    assert sig == "base"
 
 
 # ---------------------------------------------------------------------------
-# 3. by-horizon feedback grouping
+# 3. by-signature feedback grouping
 # ---------------------------------------------------------------------------
 
-def _ledger_with_horizons(rows):
+def _ledger(rows):
     """Build a ledger DataFrame compatible with tracking._read."""
     return pd.DataFrame(rows, columns=tracking._LEDGER_COLUMNS)
 
@@ -123,132 +123,57 @@ def _row(**kw):
     """Build a ledger row with sensible defaults so tests stay terse."""
     today = pd.Timestamp.today().normalize()
     base = {
-        "run_id": "20260420_claude_d2_u100",
-        "signature": "claude_d2_u100",
+        "run_id": "20260420_claude",
+        "signature": "claude",
         "as_of": today - pd.Timedelta(days=10),
         "target_date": today - pd.Timedelta(days=8),
-        "exit_offset_days": 2,
         "mode": "claude",
         "symbol": "AAA",
         "rank": 1,
-        "pred_mean": 0.002,
         "news_score": 0,
-        "adjusted": 0.002,
         "entry_price": 10.0,
         "actual_exit": 10.5,
         "realized_return": 0.05,
+        "pred_days": 3.0,
+        "pred_profit": 0.03,
         "evaluated": True,
     }
     base.update(kw)
     return base
 
 
-def test_by_horizon_separates_t2_and_t18(monkeypatch, tmp_path):
-    """recent_performance.by_horizon has one entry per horizon used."""
-    df = _ledger_with_horizons([
-        _row(symbol="AAA", realized_return=0.05),
-        _row(symbol="BBB", rank=2, pred_mean=0.001, adjusted=0.001,
-             entry_price=20.0, actual_exit=19.0, realized_return=-0.05),
-        _row(run_id="20260415_claude_d18_u200", signature="claude_d18_u200",
-             exit_offset_days=18, symbol="CCC", pred_mean=0.05, news_score=1,
-             adjusted=0.0525, entry_price=30.0, actual_exit=33.0,
-             realized_return=0.10),
-        _row(run_id="20260415_claude_d18_u200", signature="claude_d18_u200",
-             exit_offset_days=18, symbol="DDD", rank=2, pred_mean=0.04,
-             adjusted=0.04, entry_price=40.0, actual_exit=42.0,
-             realized_return=0.05),
-        _row(run_id="20260415_claude_d18_u200", signature="claude_d18_u200",
-             exit_offset_days=18, symbol="EEE", rank=3, pred_mean=0.03,
-             news_score=-1, adjusted=0.0285, entry_price=50.0,
-             actual_exit=48.0, realized_return=-0.04),
-    ])
-    monkeypatch.setattr(tracking, "_read", lambda: df)
-
-    perf = tracking.recent_performance(window_days=90, mode="claude")
-    assert "by_horizon" in perf
-    assert set(perf["by_horizon"].keys()) == {2, 18}
-    assert perf["by_horizon"][2]["n"] == 2
-    assert perf["by_horizon"][2]["hit_rate"] == 0.5
-    assert perf["by_horizon"][18]["n"] == 3
-    assert abs(perf["by_horizon"][18]["hit_rate"] - 2/3) < 1e-9
-
-
 def test_by_run_signature_separates_param_combos(monkeypatch):
     """Different parameter combos get distinct rows in by_run_signature."""
-    df = _ledger_with_horizons([
-        _row(signature="claude_d2_u100", symbol="AAA", realized_return=0.05),
-        _row(signature="claude_d2_u100", symbol="BBB", rank=2,
-             realized_return=-0.05),
-        _row(signature="claude_d18_u200_HOSE", exit_offset_days=18,
-             symbol="CCC", pred_mean=0.05, adjusted=0.05,
-             realized_return=0.10),
-        _row(signature="claude_d18_u200_HOSE", exit_offset_days=18,
-             symbol="DDD", rank=2, pred_mean=0.04, adjusted=0.04,
-             realized_return=0.06),
+    df = _ledger([
+        _row(signature="claude", symbol="AAA", realized_return=0.05),
+        _row(signature="claude", symbol="BBB", rank=2, realized_return=-0.05),
+        _row(signature="claude_HOSE", symbol="CCC", realized_return=0.10),
+        _row(signature="claude_HOSE", symbol="DDD", rank=2, realized_return=0.06),
     ])
     monkeypatch.setattr(tracking, "_read", lambda: df)
 
     perf = tracking.recent_performance(window_days=90, mode="claude")
-    assert "by_run_signature" in perf
     sigs = perf["by_run_signature"]
-    assert "claude_d2_u100" in sigs
-    assert "claude_d18_u200_HOSE" in sigs
-    assert sigs["claude_d2_u100"]["n"] == 2
-    assert sigs["claude_d2_u100"]["hit_rate"] == 0.5
-    assert sigs["claude_d18_u200_HOSE"]["n"] == 2
-    assert sigs["claude_d18_u200_HOSE"]["hit_rate"] == 1.0
+    assert sigs["claude"]["n"] == 2
+    assert sigs["claude"]["hit_rate"] == 0.5
+    assert sigs["claude_HOSE"]["n"] == 2
+    assert sigs["claude_HOSE"]["hit_rate"] == 1.0
 
 
 def test_feedback_block_marks_current_signature(monkeypatch):
     """The by_run_signature table marks the row whose signature matches."""
-    df = _ledger_with_horizons([
-        _row(signature="claude_d2_u100", symbol="AAA", realized_return=0.05),
-        _row(signature="claude_d18_u200", exit_offset_days=18, symbol="BBB",
-             pred_mean=0.05, adjusted=0.05, realized_return=0.10),
+    df = _ledger([
+        _row(signature="claude", symbol="AAA", realized_return=0.05),
+        _row(signature="claude_HOSE", symbol="BBB", realized_return=0.10),
     ])
     monkeypatch.setattr(tracking, "_read", lambda: df)
 
     block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=18,
-                                    current_signature="claude_d18_u200")
-    assert "claude_d18_u200" in block
-    # Find the signature row that has THIS RUN
-    sig_lines = [ln for ln in block.splitlines() if ln.startswith("| `claude_d")]
+                                    current_signature="claude_HOSE")
+    sig_lines = [ln for ln in block.splitlines() if ln.startswith("| `claude")]
     matching = [ln for ln in sig_lines if "THIS RUN" in ln]
     assert len(matching) == 1
-    assert "claude_d18_u200" in matching[0]
-
-
-def test_feedback_block_marks_current_horizon(monkeypatch):
-    """The by-horizon table highlights the row matching `current_horizon`."""
-    df = _ledger_with_horizons([
-        _row(symbol="AAA", realized_return=0.005),
-        _row(signature="claude_d18_u200", exit_offset_days=18, symbol="BBB",
-             pred_mean=0.05, adjusted=0.05, realized_return=0.10),
-    ])
-    monkeypatch.setattr(tracking, "_read", lambda: df)
-
-    block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=18)
-    assert "T+18" in block
-    assert "**THIS RUN**" in block
-    t18_line = [ln for ln in block.splitlines() if ln.startswith("| T+18 ")][0]
-    t2_line = [ln for ln in block.splitlines() if ln.startswith("| T+2 ")][0]
-    assert "THIS RUN" in t18_line
-    assert "THIS RUN" not in t2_line
-
-
-def test_feedback_block_with_unseen_horizon(monkeypatch):
-    """If today's horizon has no past data, render an explicit empty row."""
-    df = _ledger_with_horizons([
-        _row(symbol="AAA", realized_return=0.005),
-    ])
-    monkeypatch.setattr(tracking, "_read", lambda: df)
-
-    block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=18)
-    assert "no prior history" in block
-    assert "T+18" in block
+    assert "claude_HOSE" in matching[0]
 
 
 # ---------------------------------------------------------------------------
@@ -256,54 +181,47 @@ def test_feedback_block_with_unseen_horizon(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_record_uses_run_signature_for_default_run_id(monkeypatch, tmp_path):
-    """When run_id is not passed, it's built from mode/horizon/hose_only."""
+    """When run_id is not passed, it's built from mode/hose_only."""
     monkeypatch.setattr(tracking, "ledger_path", lambda: tmp_path / "predictions.parquet")
     picks = pd.DataFrame([{
-        "symbol": "AAA", "pred_mean": 0.01, "rank": 1,
-        "close": 10.0, "actionable": False,
+        "symbol": "AAA", "rank": 1, "close": 10.0,
+        "pred_days": 3.0, "pred_profit": 0.03,
     }])
     tracking.record(picks, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=18, hose_only=True)
+                    hose_only=True)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
-    assert df.iloc[0]["run_id"] == "20260505_base_d18_HOSE"
+    assert df.iloc[0]["run_id"] == "20260505_base_HOSE"
 
 
 def test_record_distinct_runs_coexist(monkeypatch, tmp_path):
-    """Same day, different params → both rows preserved."""
+    """Same day, different params -> both rows preserved."""
     monkeypatch.setattr(tracking, "ledger_path", lambda: tmp_path / "predictions.parquet")
-    picks_a = pd.DataFrame([{
-        "symbol": "AAA", "pred_mean": 0.01, "rank": 1,
-        "close": 10.0, "actionable": False,
+    picks = pd.DataFrame([{
+        "symbol": "AAA", "rank": 1, "close": 10.0,
+        "pred_days": 3.0, "pred_profit": 0.03,
     }])
-    picks_b = pd.DataFrame([{
-        "symbol": "AAA", "pred_mean": 0.05, "rank": 1,
-        "close": 10.0, "actionable": True,
-    }])
-    tracking.record(picks_a, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2)
-    tracking.record(picks_b, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=18)
+    tracking.record(picks, mode="base", as_of=pd.Timestamp("2026-05-05"))
+    tracking.record(picks, mode="base", as_of=pd.Timestamp("2026-05-05"),
+                    hose_only=True)
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert len(df) == 2
-    assert set(df["run_id"]) == {"20260505_base_d2", "20260505_base_d18"}
+    assert set(df["run_id"]) == {"20260505_base", "20260505_base_HOSE"}
 
 
 def test_record_same_run_id_replaces(monkeypatch, tmp_path):
-    """Same params re-run → row is replaced (idempotent within the day)."""
+    """Same params re-run -> row is replaced (idempotent within the day)."""
     monkeypatch.setattr(tracking, "ledger_path", lambda: tmp_path / "predictions.parquet")
     picks_a = pd.DataFrame([{
-        "symbol": "AAA", "pred_mean": 0.01, "rank": 1,
-        "close": 10.0, "actionable": False,
+        "symbol": "AAA", "rank": 1, "close": 10.0,
+        "pred_days": 3.0, "pred_profit": 0.03,
     }])
     picks_b = pd.DataFrame([{
-        "symbol": "AAA", "pred_mean": 0.05, "rank": 1,
-        "close": 10.0, "actionable": True,
+        "symbol": "AAA", "rank": 1, "close": 10.0,
+        "pred_days": 5.0, "pred_profit": 0.05,
     }])
-    tracking.record(picks_a, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2)
-    tracking.record(picks_b, mode="base", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=2)  # same params
+    tracking.record(picks_a, mode="base", as_of=pd.Timestamp("2026-05-05"))
+    tracking.record(picks_b, mode="base", as_of=pd.Timestamp("2026-05-05"))
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert len(df) == 1
-    # Latest pred_mean wins.
-    assert abs(float(df.iloc[0]["pred_mean"]) - 0.05) < 1e-9
+    # Latest estimate wins.
+    assert abs(float(df.iloc[0]["pred_profit"]) - 0.05) < 1e-9

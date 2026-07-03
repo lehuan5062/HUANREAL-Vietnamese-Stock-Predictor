@@ -260,8 +260,7 @@ def test_feedback_block_renders_slippage_section(monkeypatch):
     ], columns=tracking._LEDGER_COLUMNS)
     monkeypatch.setattr(tracking, "_read", lambda: df)
 
-    block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=2)
+    block = tracking.feedback_block(window_days=90, mode="claude")
     assert "Entry-execution sanity check" in block
     assert "mean entry_slippage" in block
     # 1 of 2 unreachable = 50%
@@ -284,6 +283,5 @@ def test_feedback_block_omits_slippage_when_no_data(monkeypatch):
     }], columns=tracking._LEDGER_COLUMNS)
     monkeypatch.setattr(tracking, "_read", lambda: df)
 
-    block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=2)
+    block = tracking.feedback_block(window_days=90, mode="claude")
     assert "Entry-execution sanity check" not in block

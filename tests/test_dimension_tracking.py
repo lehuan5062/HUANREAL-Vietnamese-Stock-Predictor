@@ -145,8 +145,7 @@ def test_record_stores_dimensions_cited(monkeypatch, tmp_path):
         "close": 10.0, "actionable": True, "news_score": 1, "adjusted": 0.0525,
         "dimensions_cited": "insider-action,sector-flow",
     }])
-    tracking.record(picks, mode="claude", as_of=pd.Timestamp("2026-05-05"),
-                    exit_offset_days=11)
+    tracking.record(picks, mode="claude", as_of=pd.Timestamp("2026-05-05"))
     df = pd.read_parquet(tmp_path / "predictions.parquet")
     assert df.iloc[0]["dimensions_cited"] == "insider-action,sector-flow"
 
@@ -278,8 +277,7 @@ def test_feedback_block_renders_dimension_table(monkeypatch):
     ], columns=tracking._LEDGER_COLUMNS)
     monkeypatch.setattr(tracking, "_read", lambda: df)
 
-    block = tracking.feedback_block(window_days=90, mode="claude",
-                                    current_horizon=2)
+    block = tracking.feedback_block(window_days=90, mode="claude")
     assert "By dimension category cited" in block
     assert "`insider-action`" in block
     assert "`sector-flow`" in block

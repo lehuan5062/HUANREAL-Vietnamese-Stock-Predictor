@@ -19,7 +19,6 @@ from ..tracking import effective_today_for_trading, run_signature
 
 
 def run(on: str | None = None,
-        exit_offset_days: int | None = None,
         n_picks: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
@@ -34,14 +33,12 @@ def run(on: str | None = None,
     """
     if llm_only:
         universe, plan_path = emit_llm_plan(on=on,
-                                            exit_offset_days=exit_offset_days,
                                             n_picks=n_picks,
                                             symbols=symbols, hose_only=hose_only,
                                             include_etfs=include_etfs,
                                             exclude=exclude)
         return universe, plan_path, "interactive-llm"
     candidates, plan_path = emit_plan(on=on,
-                                      exit_offset_days=exit_offset_days,
                                       n_picks=n_picks,
                                       symbols=symbols, hose_only=hose_only,
                                       include_etfs=include_etfs,
@@ -50,7 +47,6 @@ def run(on: str | None = None,
 
 
 def emit_llm_plan(on: str | None = None,
-                  exit_offset_days: int | None = None,
                   n_picks: int | None = None,
                   symbols: list[str] | None = None,
                   hose_only: bool = False,
@@ -64,28 +60,22 @@ def emit_llm_plan(on: str | None = None,
 
     full_cfg = load_config()
     requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
-    universe = eligible_universe(on=on, exit_offset_days=exit_offset_days,
-                                 symbols=symbols)
+    universe = eligible_universe(on=on, symbols=symbols)
     if on is not None:
         on_date = dt.date.fromisoformat(on)
     else:
         on_date = effective_today_for_trading().date()
-    eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
-        full_cfg.target["exit_offset_days"]
-    )
     excl_list = sorted({s.upper() for s in (exclude or [])})
-    sig = run_signature(mode="claude_llm", exit_offset_days=eff_horizon,
-                        hose_only=hose_only,
+    sig = run_signature(mode="claude_llm", hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
     plan_path = write_llm_plan(universe, on=on_date, run_signature=sig,
-                               current_horizon=eff_horizon, n_picks=requested_n)
+                               n_picks=requested_n)
     sidecar = plan_path.with_suffix(".candidates.parquet")
     universe.to_parquet(sidecar, index=False)
     meta_path = plan_path.with_suffix(".meta.json")
     meta_path.write_text(
         json.dumps({
             "method": "llm_only",
-            "exit_offset_days": eff_horizon,
             "n_picks": requested_n,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
@@ -98,7 +88,6 @@ def emit_llm_plan(on: str | None = None,
 
 
 def emit_plan(on: str | None = None,
-              exit_offset_days: int | None = None,
               n_picks: int | None = None,
               symbols: list[str] | None = None,
               hose_only: bool = False,
@@ -107,25 +96,19 @@ def emit_plan(on: str | None = None,
               union_missed: bool = False) -> tuple[pd.DataFrame, Path]:
     full_cfg = load_config()
     requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
-    candidates = rank_today(n_picks=requested_n, on=on,
-                            exit_offset_days=exit_offset_days, symbols=symbols)
+    candidates = rank_today(n_picks=requested_n, on=on, symbols=symbols)
     ab_verdict = None
     if on is not None:
         on_date = dt.date.fromisoformat(on)
     else:
         on_date = effective_today_for_trading().date()
 
-    eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
-        full_cfg.target["exit_offset_days"]
-    )
     excl_list = sorted({s.upper() for s in (exclude or [])})
-    sig = run_signature(mode="claude", exit_offset_days=eff_horizon,
-                        hose_only=hose_only,
+    sig = run_signature(mode="claude", hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
 
     plan_path = write_plan(candidates, on=on_date,
                            run_signature=sig,
-                           current_horizon=eff_horizon,
                            current_signature=sig,
                            ab_verdict=ab_verdict)
     # Sidecar parquet so `finalize` can recover pricing (entry / target / stop)
@@ -137,7 +120,6 @@ def emit_plan(on: str | None = None,
     meta_path = plan_path.with_suffix(".meta.json")
     meta_path.write_text(
         json.dumps({
-            "exit_offset_days": eff_horizon,
             "n_picks": requested_n,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
@@ -200,16 +182,11 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             meta = {}
-    exit_off = meta.get("exit_offset_days")
     eff_hose = bool(meta.get("hose_only", False))
-    # Legacy meta files (pre-ETF) lack `include_etfs`; default to True so
-    # the recovered signature matches what the original emit_plan produced.
     eff_etfs = bool(meta.get("include_etfs", True))
-    # Legacy meta files (pre-exclude) lack `exclude`; default to [].
     eff_excl = list(meta.get("exclude") or [])
     sig = meta.get("run_signature") or run_signature(
         mode="claude",
-        exit_offset_days=int(exit_off or 2),
         hose_only=eff_hose,
         include_etfs=eff_etfs,
         exclude=eff_excl,
@@ -229,7 +206,6 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     payload = {
         "as_of": today,
         "mode": "claude",
-        "exit_offset_days": exit_off,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
@@ -237,7 +213,7 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         "selection": "top_n",
         "requested_picks": requested_n,
         "n_picks": int(len(merged)),
-        "n_below_breakeven": n_below,
+        "n_below_recovery_bar": n_below,
         "plan_file": str(plan_path),
         "weight": weight,
         "picks": json.loads(merged.to_json(orient="records")),
@@ -245,56 +221,60 @@ def finalize(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude", as_of=today_ts,
-           exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out
 
 
 def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
-    """Finalize an LLM-only plan: rank the LLM's chosen picks by its own
-    ``conviction`` (no ML multiplier) and use the LLM-supplied entry / target /
-    stop prices. Writes a ``picks_claude_llm_*`` JSON and records under
-    ``mode='claude_llm'``."""
-    from ..news.claude_llm_runner import DROP_SENTINEL, parse_llm_plan
-    from ..pricing import economics_from_llm_prices
+    """Finalize an LLM-only plan: the LLM predicted N (``pred_days``) and P
+    (``pred_profit``) per pick; compute ``score = P / N``, rank by it, and price
+    through the SAME recovery pricing the base/hybrid modes use (buy at close,
+    target = close × (1 + P), no stop). Writes a ``picks_claude_llm_*`` JSON in
+    the same format and records under ``mode='claude_llm'``."""
+    from ..news.claude_llm_runner import parse_llm_plan
+    from ..pricing import add_recovery_price_suggestions
 
     plan_path = Path(plan_path)
     scored = parse_llm_plan(plan_path)
     if scored.empty:
         raise RuntimeError(f"no picks parsed from {plan_path} — fill the Results table")
 
-    dropped = scored[scored["conviction"] == DROP_SENTINEL]
+    dropped = scored[scored["dropped"]]
     if not dropped.empty:
         print(f"[claude-llm] DROP: excluding {len(dropped)} ticker(s): "
               f"{', '.join(dropped['symbol'].tolist())}")
-    scored = scored[scored["conviction"] != DROP_SENTINEL].copy()
+    scored = scored[~scored["dropped"]].drop(columns=["dropped"])
     if scored.empty:
         raise RuntimeError("all picks dropped")
 
-    # Every LLM pick must carry a profit target — the buy price is the close and
-    # there is no stop, so target_vnd is the only price the LLM must supply.
-    bad = scored[scored["target_vnd"].isna()]
+    # Every pick must carry a valid N and P — they drive the score, the target
+    # price, and the ledger's per-pick target_date.
+    bad = scored[scored["pred_days"].isna() | (scored["pred_days"] < 1)
+                 | scored["pred_profit"].isna() | (scored["pred_profit"] <= 0)]
     if not bad.empty:
-        print(f"[claude-llm] WARNING: dropping {len(bad)} pick(s) missing "
-              f"target_vnd: {', '.join(bad['symbol'].tolist())}")
-    scored = scored[scored["target_vnd"].notna()].copy()
+        print(f"[claude-llm] WARNING: dropping {len(bad)} pick(s) with a missing/"
+              f"invalid N_days or P: {', '.join(bad['symbol'].tolist())}")
+    scored = scored.drop(bad.index)
     if scored.empty:
-        raise RuntimeError("no picks with a target_vnd")
+        raise RuntimeError("no picks with a valid N_days and P")
 
-    # Recover reference columns (close / organ_name / instrument_type / adv) from
-    # the universe sidecar — the buy price and economics need the close.
+    # Recover reference columns from the universe sidecar — the buy price and
+    # economics need the close.
     sidecar = plan_path.with_suffix(".candidates.parquet")
     if sidecar.exists():
         universe = pd.read_parquet(sidecar)
-        ref_cols = [c for c in ["symbol", "close", "rsi_14", "mom_20",
-                                "adv_vnd_20", "organ_name", "instrument_type"]
+        ref_cols = [c for c in ["symbol", "close", "rsi_14", "mom_5", "mom_20",
+                                "high_prox_20", "adv_vnd_20", "organ_name",
+                                "instrument_type"]
                     if c in universe.columns]
         merged = scored.merge(universe[ref_cols], on="symbol", how="left")
     else:
         merged = scored
 
-    merged = economics_from_llm_prices(merged)
-    merged = merged.sort_values("conviction", ascending=False).reset_index(drop=True)
+    # Same pricing path as base/hybrid. No pred_recovery_prob column here — the
+    # LLM's selection vetting stands in for it, so score reduces to P/N.
+    merged = add_recovery_price_suggestions(merged)
+    merged = merged.sort_values("score", ascending=False).reset_index(drop=True)
     merged["rank"] = merged.index + 1
 
     # Recover run params / signature from the meta sidecar.
@@ -305,12 +285,11 @@ def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             meta = {}
-    exit_off = meta.get("exit_offset_days")
     eff_hose = bool(meta.get("hose_only", False))
     eff_etfs = bool(meta.get("include_etfs", True))
     eff_excl = list(meta.get("exclude") or [])
     sig = meta.get("run_signature") or run_signature(
-        mode="claude_llm", exit_offset_days=int(exit_off or 2),
+        mode="claude_llm",
         hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
 
     requested_n = meta.get("n_picks")
@@ -326,7 +305,6 @@ def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         "as_of": today,
         "mode": "claude_llm",
         "method": "llm_only",
-        "exit_offset_days": exit_off,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
@@ -334,13 +312,12 @@ def finalize_llm(plan_path: str | Path) -> tuple[pd.DataFrame, Path]:
         "selection": "llm_pick",
         "requested_picks": requested_n,
         "n_picks": int(len(merged)),
-        "n_below_breakeven": n_below,
+        "n_below_recovery_bar": n_below,
         "plan_file": str(plan_path),
         "picks": json.loads(merged.to_json(orient="records")),
     }
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="claude_llm", as_of=today_ts,
-           exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out

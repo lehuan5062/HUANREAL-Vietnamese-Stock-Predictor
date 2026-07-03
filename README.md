@@ -53,10 +53,12 @@ nudges the P/N ranking.
 | method | who selects | who prices | report files |
 | ------ | ----------- | ---------- | ------------ |
 | **hybrid** (default) | the model ranks the downtrend universe by P/N and returns the top N; Claude vets those N on news and re-ranks by `adjusted = score × (1 + news_weight × news_score)` | buy at close, target from the model's P | `claude_news_plan_*` → `picks_claude_*` |
-| **LLM-only** (`--llm-only`) | **Claude** picks the N names from the *whole* downtrend universe on its own research, ranked by its own `conviction` | buy at close, **Claude sets a `target_vnd`**; no stop | `claude_llm_plan_*` → `picks_claude_llm_*` |
+| **LLM-only** (`--llm-only`) | **Claude** picks the names from the *whole* downtrend universe and **predicts N (days to bounce) and P (profit) itself**; finalize ranks by `score = P / N` | buy at close, target = `close × (1 + P)`; no stop | `claude_llm_plan_*` → `picks_claude_llm_*` |
 
-Both methods buy at the close and hold until the target — the only difference is
-how names are chosen and re-ranked.
+Both methods use the same objective (profit per day held), the same trade shape
+(buy at close, hold until target), and the same report format — the only
+difference is whether N and P come from the statistical estimator or from
+Claude's research.
 
 ### C. CLI (advanced)
 
@@ -177,6 +179,17 @@ liquidity caps, explicit buy+sell fees), see the portfolio simulators in
 [`scripts/`](scripts/): `rebound_portfolio_sim.py` (fixed rolling book) and
 `rebound_final_sim.py` (buy-daily / reinvest / T+2-min-hold / sell-at-first-profit,
 with unsold positions counted as losses so the win rate is honest).
+`rebound_final_sim.py` models the actual **execution**: the order is a pre-open
+limit at the signal close placed the next morning ("lệnh trước giờ") — it does
+NOT fill when the stock gaps up and never dips back (~19% of signals), fills at
+the open when it opens at/below the limit, else at the limit. It prints the
+realistic run alongside a **lookahead baseline** (unconditional fill at the
+signal close) and FOMO (chase the next open). The signal-close baseline is
+**not achievable** — the signal is computed from the day's close, which is only
+known after the market closes, so you can never trade at the very close you
+predicted on; it exists only to show how much the execution constraint costs.
+Missed fills on the real limit skew toward the best rebounds, so the realistic
+IRR is the true ceiling. The sell is still modeled at the recovery day's close.
 
 ## Universe coverage, cache, and `--warm-only`
 
@@ -217,7 +230,7 @@ locked in) T+0 = the next trading day. Handled at CLI entry via
 ## Same-day re-runs: distinct params → distinct files
 
 Every artifact is suffixed with a **run signature** capturing the pick-affecting
-parameters (`mode_d{horizon}[_HOSE][_noETF][_x<TICKERS>]`), and that signature is
+parameters (`mode[_HOSE][_noETF][_x<TICKERS>]`), and that signature is
 the ledger `run_id` base. Re-running the same parameters overrides (idempotent);
 different parameters never clobber each other.
 
@@ -331,8 +344,9 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
   providers' server limit; `data.bypass_vnai_quota: true` calls the underlying
   endpoint directly, leaving only our own `data.api_per_min` throttle. A genuine
   429 still triggers a pause; failed ticker fetches never abort the run.
-- Backtests carry mild **label lookahead** and assume fills at the close (no
-  slippage), so live results run lower than backtested ones.
+- Backtests carry mild **label lookahead**; the walk-forward backtest assumes
+  fills at the close, and even the realistic simulator models the sell at the
+  recovery day's close — so live results run somewhat lower than simulated.
 - With no stop and no cap, a rare broken name that slips past the healthy filter
   is held indefinitely — the strategy wins often and fast, but warehouses an
   underwater tail of unsold names. Monitor and prune those manually.

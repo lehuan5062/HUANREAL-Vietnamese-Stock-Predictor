@@ -12,17 +12,12 @@ from .sources import global_urls, vn_urls
 
 
 def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
-                 exit_offset_days: int | None = None,
                  ab_verdict: str | None = None) -> str:
     on = on or dt.date.today()
     cfg = load_config().modes["gemini"]
     weight = cfg["news_weight"]
-    horizon = int(exit_offset_days) if exit_offset_days is not None else int(
-        load_config().target["exit_offset_days"]
-    )
-    # Rebound uses a flexible exit (hold until the target) — no fixed sell day,
-    # so no sell-day/reminder computation here (see the flexible-exit note at
-    # the end of the prompt). ``horizon`` is kept only for the VN-Index window.
+    # Rebound uses a flexible exit (hold until the target) — no fixed sell day
+    # and no horizon parameter (see the flexible-exit note at the end).
 
     from .company_info import enrich
     candidates = enrich(candidates)
@@ -143,8 +138,8 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
     parts.append("")
     parts.append(
         f"**VN-Index trend call — do this ONCE, before scoring any ticker.** "
-        f"Research where the VN-Index is likely headed over the next ~{horizon} "
-        f"trading day(s) (the holding window). Look at: the index's recent trend "
+        "Research where the VN-Index is likely headed over the expected holding "
+        "window (a few days to a couple of weeks). Look at: the index's recent trend "
         f"and momentum (last few sessions + last few weeks), where it sits vs its "
         f"50/200-day moving averages and recent support/resistance, market breadth "
         f"(are most stocks rising or is the index propped up by a few large caps — "
@@ -152,7 +147,7 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
         f"scheduled macro events (SBV rates, FX, FTSE/MSCI review, big earnings). "
         f"Use cafef.vn, vietstock.vn, fialda/fireant, tradingview VNINDEX, plus the "
         f"VN-Index news search above. **State an explicit directional view in "
-        f"`global_summary`: UP / SIDEWAYS / DOWN for the next {horizon} session(s), "
+        f"`global_summary`: UP / SIDEWAYS / DOWN for the holding window, "
         f"with a confidence (low/med/high) and one line of reasoning.** Then let it "
         f"tilt EVERY ticker: in a likely-DOWN tape be more conservative (favour "
         f"defensive / counter-trend names, lower `news_score` for high-beta names "
@@ -249,11 +244,9 @@ def build_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
 
 
 def write_prompt(candidates: pd.DataFrame, on: dt.date | None = None,
-                 exit_offset_days: int | None = None,
                  ab_verdict: str | None = None) -> Path:
     on = on or dt.date.today()
-    text = build_prompt(candidates, on=on, exit_offset_days=exit_offset_days,
-                        ab_verdict=ab_verdict)
+    text = build_prompt(candidates, on=on, ab_verdict=ab_verdict)
     path = reports_dir() / f"gemini_prompt_{on.isoformat()}.txt"
     path.write_text(text, encoding="utf-8")
     return path

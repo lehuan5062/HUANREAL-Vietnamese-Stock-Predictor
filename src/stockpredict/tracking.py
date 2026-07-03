@@ -31,7 +31,7 @@ def ledger_path() -> Path:
 
 
 _LEDGER_COLUMNS = [
-    "run_id", "signature", "as_of", "target_date", "exit_offset_days",
+    "run_id", "signature", "as_of", "target_date",
     "mode", "symbol", "rank",
     "pred_mean", "news_score", "adjusted", "entry_price",
     "actual_exit", "realized_return", "evaluated",
@@ -121,9 +121,6 @@ def _read() -> pd.DataFrame:
     if not p.exists():
         return pd.DataFrame(columns=_LEDGER_COLUMNS)
     df = pd.read_parquet(p)
-    # Backfill exit_offset_days for old ledger rows (pre-T+N support).
-    if "exit_offset_days" not in df.columns:
-        df["exit_offset_days"] = 2
     # Backfill signature for old ledger rows: derive from run_id by
     # stripping the YYYYMMDD_ date prefix (or full run_id if no underscore).
     if "signature" not in df.columns:
@@ -398,28 +395,25 @@ def _next_trading_offset(start_date: pd.Timestamp, offset: int) -> pd.Timestamp:
     return (cal[-1] + pd.tseries.offsets.BDay(extra)).normalize()
 
 
-def run_signature(mode: str, exit_offset_days: int,
+def run_signature(mode: str,
                   hose_only: bool = False,
                   include_etfs: bool = True,
-                  exclude: Iterable[str] | None = None,
-                  variant: str = "standard") -> str:
+                  exclude: Iterable[str] | None = None) -> str:
     """Stable signature for a parameter set: distinct combinations get
     distinct signatures so saved artifacts don't override each other,
     while a re-run of the same parameters does override (idempotent).
     Used as both the filename suffix and the ledger ``run_id`` base.
 
-    ``include_etfs`` defaults to True (the new default behavior, ETFs mixed
-    in). Only when it's False do we tag the signature with ``noETF`` — that
-    way prior stock-only artifacts (written before this flag existed) keep
-    their original filenames as a stocks-only run, and new mixed-universe
-    runs get the same signature they would have had if ETFs had always been
-    mixed in.
+    (The old T+2 pipeline embedded a ``d{horizon}`` token here; the rebound
+    exit is flexible, so the horizon token is gone — old ``_d2`` artifacts
+    simply never collide with new ones.)
 
-    ``exclude`` is the per-session blacklist of tickers. When non-empty, the
-    signature is suffixed with ``x{TICKERS}`` (sorted, dash-joined) so an
-    excluded-rerun produces a distinct picks file from the same-day full run.
+    ``include_etfs`` defaults to True (ETFs mixed in). Only when it's False
+    is the signature tagged ``noETF``. ``exclude`` is the per-session ticker
+    blacklist; when non-empty the signature gets an ``x{TICKERS}`` suffix
+    (sorted, dash-joined) so an excluded rerun doesn't clobber the full run.
     """
-    parts = [mode, f"d{int(exit_offset_days)}"]
+    parts = [mode]
     if hose_only:
         parts.append("HOSE")
     if not include_etfs:
@@ -428,36 +422,28 @@ def run_signature(mode: str, exit_offset_days: int,
         excl_sorted = sorted({str(s).upper() for s in exclude})
         if excl_sorted:
             parts.append("x" + "-".join(excl_sorted))
-    # The missed-winners retrain variant tags the signature so its picks file
-    # and ledger run_id stay distinguishable from the standard model's.
-    if variant and str(variant) != "standard":
-        parts.append(str(variant))
     return "_".join(parts)
 
 
 def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
            run_id: str | None = None,
-           exit_offset_days: int | None = None,
            hose_only: bool = False,
            include_etfs: bool = True,
            exclude: Iterable[str] | None = None) -> int:
     """Append one row per pick to the ledger. Returns number of rows added.
 
-    `picks` is the dataframe returned by mode runs; must have at minimum:
-    columns symbol, pred_mean. Optional: news_score, adjusted, close, rank.
-    The default ``run_id`` includes mode/horizon/hose-only so a same-day
-    rerun with different parameters does not clobber prior rows.
+    `picks` is the dataframe returned by mode runs; must have at minimum a
+    ``symbol`` column, plus the rebound estimate columns
+    (``pred_days`` / ``pred_profit``). The default ``run_id`` includes
+    mode/hose-only/exclude so a same-day rerun with different parameters does
+    not clobber prior rows.
     """
     if picks is None or len(picks) == 0:
         return 0
-    cfg = load_config()
-    exit_off = int(exit_offset_days) if exit_offset_days is not None else int(cfg.target["exit_offset_days"])
 
     as_of = (pd.to_datetime(as_of) if as_of is not None
              else effective_today_for_trading())
-    # Legacy fixed-horizon target (rebound picks override this per-row below).
-    target = _next_trading_offset(as_of, exit_off)
-    sig = run_signature(mode=mode, exit_offset_days=exit_off,
+    sig = run_signature(mode=mode,
                         hose_only=hose_only,
                         include_etfs=include_etfs,
                         exclude=exclude)
@@ -487,10 +473,10 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
             limit_price = close_for_limit * (1.0 + min(pred_low_val, 0.0))
         else:
             limit_price = np.nan
-        # Rebound picks carry a per-row predicted hold (N). The pick's
-        # target_date is as_of + round(N) trading days (the predicted sell day),
-        # and its exit_offset_days is that same per-row N — so the scalar horizon
-        # only applies to legacy picks.
+        # Each pick carries a predicted hold (N = pred_days). Its target_date is
+        # as_of + round(N) trading days — the PREDICTED sell day, informational
+        # only (the evaluator settles on the first actual recovery). Falls back
+        # to 1 trading day if N is somehow missing.
         pred_days_val = (float(r["pred_days"])
                          if "pred_days" in r and pd.notna(r["pred_days"])
                          else np.nan)
@@ -500,18 +486,14 @@ def record(picks: pd.DataFrame, mode: str, as_of: str | dt.date | None = None,
         pred_prob_val = (float(r["pred_recovery_prob"])
                          if "pred_recovery_prob" in r and pd.notna(r["pred_recovery_prob"])
                          else np.nan)
-        if not np.isnan(pred_days_val):
-            row_off = max(int(round(pred_days_val)), 1)
-            row_target = _next_trading_offset(as_of, row_off)
-        else:
-            row_off = exit_off
-            row_target = target
+        row_off = (max(int(round(pred_days_val)), 1)
+                   if not np.isnan(pred_days_val) else 1)
+        row_target = _next_trading_offset(as_of, row_off)
         rows.append({
             "run_id": rid,
             "signature": sig,
             "as_of": as_of.normalize(),
             "target_date": row_target,
-            "exit_offset_days": row_off,
             "mode": mode,
             "symbol": sym,
             "rank": int(r.get("rank", i + 1)),
@@ -710,9 +692,8 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
 def recent_performance(window_days: int = 90,
                        mode: str | None = None) -> dict:
     """Summary stats over the last ``window_days`` of evaluated rows.
-    The output now includes a ``by_horizon`` dict — apples-to-apples
-    grouping by ``exit_offset_days`` so an LLM can see T+2 hit-rate
-    separately from T+18 hit-rate."""
+    Grouped views: by run signature (exact parameter match), by news_score,
+    and by cited research dimension."""
     df = _read()
     if df.empty:
         return {"n": 0, "note": "no predictions recorded yet"}
@@ -739,7 +720,6 @@ def recent_performance(window_days: int = 90,
         "best_pick": _format_pick(df.loc[rets.idxmax()]),
         "worst_pick": _format_pick(df.loc[rets.idxmin()]),
         "by_news_score": _by_news_score(df),
-        "by_horizon": _by_horizon(df),
         "by_run_signature": _by_run_signature(df),
         "recent_5": _recent_picks_sample(df, n=5),
         "entry_slippage": _entry_slippage_stats(df),
@@ -870,10 +850,10 @@ def _entry_slippage_stats(df: pd.DataFrame) -> dict | None:
 
 
 def _by_run_signature(df: pd.DataFrame) -> dict:
-    """Group evaluated picks by full run signature (mode + horizon + hose
-    flag). Lets the LLM see, for example, that its `claude_d2` runs hit 60%
-    but `claude_d18` runs hit 40% — finer-grained than horizon alone, since
-    hose-only / exclude filters change the population."""
+    """Group evaluated picks by full run signature (mode + hose flag +
+    exclude). Lets the LLM see, for example, that its `claude` runs hit 60%
+    but `claude_HOSE` runs hit 40% — hose-only / exclude filters change the
+    population."""
     if "signature" not in df.columns:
         return {}
     out: dict = {}
@@ -889,30 +869,19 @@ def _by_run_signature(df: pd.DataFrame) -> dict:
     return out
 
 
-def _by_horizon(df: pd.DataFrame) -> dict:
-    """Group evaluated picks by ``exit_offset_days`` so the report
-    differentiates T+2 history from longer-hold history."""
-    if "exit_offset_days" not in df.columns:
-        return {}
-    out: dict = {}
-    for n_days, g in df.groupby("exit_offset_days"):
-        out[int(n_days)] = {
-            "n": int(len(g)),
-            "hit_rate": float((g["realized_return"] > 0).mean()),
-            "mean_return": float(g["realized_return"].mean()),
-            "median_return": float(g["realized_return"].median()),
-        }
-    return out
-
-
 def _format_pick(row: pd.Series) -> dict:
-    return {
+    out = {
         "symbol": str(row["symbol"]),
         "as_of": str(pd.Timestamp(row["as_of"]).date()),
-        "pred_mean": float(row["pred_mean"]),
-        "news_score": int(row["news_score"]),
+        "news_score": int(row.get("news_score", 0) or 0),
         "realized_return": float(row["realized_return"]),
     }
+    # Rebound estimate fields (absent on very old legacy rows).
+    for k in ("pred_days", "pred_profit"):
+        v = row.get(k)
+        if v is not None and pd.notna(v):
+            out[k] = float(v)
+    return out
 
 
 def _by_news_score(df: pd.DataFrame) -> dict:
@@ -932,17 +901,13 @@ def _recent_picks_sample(df: pd.DataFrame, n: int = 5) -> list[dict]:
 
 
 def feedback_block(window_days: int = 90, mode: str | None = None,
-                   current_horizon: int | None = None,
                    current_signature: str | None = None) -> str:
     """Markdown block summarising recent performance, designed for inclusion
     in LLM prompts so Claude can self-correct.
 
-    If ``current_horizon`` (the T+N being predicted right now) is provided,
-    its line in the by-horizon table is highlighted — those rows are the
-    apples-to-apples comparison and the LLM should weight them most.
-    If ``current_signature`` (full param set, e.g. ``claude_d18_HOSE``)
-    is provided, an additional by-signature table highlights the EXACT
-    parameter combination history — the most apples-to-apples view."""
+    If ``current_signature`` (full param set, e.g. ``claude_HOSE``) is
+    provided, the by-signature table highlights the EXACT parameter
+    combination history — the most apples-to-apples view."""
     perf = recent_performance(window_days=window_days, mode=mode)
     if perf.get("n", 0) == 0:
         return f"## Past performance feedback\n\n_{perf.get('note', 'no data')}_\n"
@@ -951,8 +916,8 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
         f"## Past performance feedback (last {window_days} days)",
         "",
         f"- **n picks evaluated**: {perf['n']}",
-        f"- **hit rate (all horizons pooled)**: {perf['hit_rate']:.1%}",
-        f"- **mean return (all horizons pooled)**: {perf['mean_return']:+.4f}",
+        f"- **hit rate**: {perf['hit_rate']:.1%}",
+        f"- **mean return**: {perf['mean_return']:+.4f}",
         f"- **median return**: {perf['median_return']:+.4f}",
         "",
     ]
@@ -962,8 +927,8 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
         lines += [
             "### By full run signature (most apples-to-apples)",
             "",
-            "Each row is a distinct parameter combination (mode + horizon",
-            "+ hose-only). Re-runs of the same combo update the same row in the",
+            "Each row is a distinct parameter combination (mode + hose-only",
+            "+ exclude). Re-runs of the same combo update the same row in the",
             "ledger. **THIS RUN** marks the exact parameters of today's prediction.",
             "",
             "| signature | n | hit_rate | mean_return | median_return | match? |",
@@ -982,27 +947,6 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
             )
         lines.append("")
 
-    by_h = perf.get("by_horizon") or {}
-    if by_h:
-        lines += [
-            "### By horizon (broader cross-run comparison)",
-            "",
-            "| horizon | n | hit_rate | mean_return | median_return | match? |",
-            "| --- | --- | --- | --- | --- | --- |",
-        ]
-        for h in sorted(by_h.keys()):
-            s = by_h[h]
-            match = "← **THIS RUN**" if (current_horizon is not None and int(h) == int(current_horizon)) else ""
-            lines.append(
-                f"| T+{h} | {s['n']} | {s['hit_rate']:.1%} | "
-                f"{s['mean_return']:+.4f} | {s['median_return']:+.4f} | {match} |"
-            )
-        if current_horizon is not None and int(current_horizon) not in by_h:
-            lines.append(
-                f"| T+{int(current_horizon)} | 0 | _no prior history_ | - | - | ← **THIS RUN** |"
-            )
-        lines.append("")
-
     lines += [
         "### By prior news_score",
         "",
@@ -1013,11 +957,13 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
         lines.append(f"| {s:+d} | {stats['n']} | {stats['hit_rate']:.1%} | {stats['mean_return']:+.4f} |")
 
     lines += ["", "### Most recent evaluated picks", ""]
-    lines.append("| as_of | symbol | pred_mean | news_score | realized |")
-    lines.append("| --- | --- | --- | --- | --- |")
+    lines.append("| as_of | symbol | pred N | pred P | news_score | realized |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
     for p in perf["recent_5"]:
+        n_s = f"{p['pred_days']:.0f}d" if "pred_days" in p else "-"
+        p_s = f"{p['pred_profit']:+.3f}" if "pred_profit" in p else "-"
         lines.append(
-            f"| {p['as_of']} | {p['symbol']} | {p['pred_mean']:+.4f} | "
+            f"| {p['as_of']} | {p['symbol']} | {n_s} | {p_s} | "
             f"{p['news_score']:+d} | {p['realized_return']:+.4f} |"
         )
 
@@ -1124,10 +1070,9 @@ def feedback_block(window_days: int = 90, mode: str | None = None,
     lines += [
         "",
         "Use this to calibrate: weight the **THIS RUN** signature row most",
-        "heavily (exact parameter match), then the **THIS RUN** horizon row",
-        "(broader comparison). If a particular news_score has been consistently",
-        "wrong on this signature, weight it less. If recent picks at this",
-        "signature have been losing, be more conservative in scoring today.",
+        "heavily (exact parameter match). If a particular news_score has been",
+        "consistently wrong on this signature, weight it less. If recent picks",
+        "at this signature have been losing, be more conservative today.",
         "",
     ]
     return "\n".join(lines)

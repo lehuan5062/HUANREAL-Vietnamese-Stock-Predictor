@@ -51,9 +51,12 @@ SLOTS = 3
 def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
     """Return (per_day, paths):
       per_day[date] = list of candidate dicts (score-ranked) with
-        {symbol, close, max_units, exit_date, exit_price, exit_reason}
-      paths[symbol] = (index_np, close_np) forward price path.
-    Mirrors the walk-forward training/scoring loop."""
+        {symbol, close, max_units, next_open, next_low,
+         exit_date, exit_price, exit_reason}
+      paths[symbol] = (index_np, open_np, low_np, close_np) forward price path.
+    ``next_open`` / ``next_low`` are the NEXT trading day's bar (None when the
+    signal day is the last bar) — used by execution models that place the buy
+    order the following morning. Mirrors the walk-forward training/scoring loop."""
     cfg = load_config()
     bt = cfg.backtest
     start = pd.to_datetime(start)
@@ -69,10 +72,14 @@ def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
     paths = {}
     for sym, g in panel.groupby("symbol"):
         gi = g.sort_index()
-        paths[str(sym)] = (gi.index.to_numpy(), gi["close"].astype(float).to_numpy())
+        paths[str(sym)] = (gi.index.to_numpy(),
+                           gi["open"].astype(float).to_numpy(),
+                           gi["low"].astype(float).to_numpy(),
+                           gi["close"].astype(float).to_numpy())
 
     def _exit_for(symbol, date, entry):
-        idx_arr, close_arr = paths.get(symbol, (None, None))
+        idx_arr, _open_arr, _low_arr, close_arr = paths.get(
+            symbol, (None, None, None, None))
         if idx_arr is None or entry <= 0:
             return (None, None, "open")
         fut = np.where(idx_arr > np.datetime64(pd.Timestamp(date)))[0]
@@ -83,6 +90,17 @@ def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
         if ex is None:
             return (pd.Timestamp(idx_arr[fut[-1]]), float(fc[-1]), "open")
         return (pd.Timestamp(idx_arr[fut[ex["k"] - 1]]), float(ex["exit_close"]), ex["reason"])
+
+    def _next_bar(symbol, date):
+        idx_arr, open_arr, low_arr, _close_arr = paths.get(
+            symbol, (None, None, None, None))
+        if idx_arr is None:
+            return (None, None)
+        fut = np.where(idx_arr > np.datetime64(pd.Timestamp(date)))[0]
+        if fut.size == 0:
+            return (None, None)
+        j = int(fut[0])
+        return (float(open_arr[j]), float(low_arr[j]))
 
     anchors = []
     a = start
@@ -125,7 +143,9 @@ def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
                 mu = r.get("suggested_max_units")
                 mu = int(mu) if pd.notna(mu) else None
                 ed, ep, er = _exit_for(symbol, date, entry)
+                nxt_open, nxt_low = _next_bar(symbol, date)
                 cands.append({"symbol": symbol, "close": entry, "max_units": mu,
+                              "next_open": nxt_open, "next_low": nxt_low,
                               "exit_date": ed, "exit_price": ep, "exit_reason": er})
             per_day[pd.Timestamp(date)] = cands
     return per_day, paths

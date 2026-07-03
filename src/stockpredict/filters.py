@@ -162,11 +162,3 @@ def corporate_action_mask(df: pd.DataFrame) -> pd.Series:
     return ~artifact.fillna(False)
 
 
-def band_break_flags(df: pd.DataFrame) -> pd.Series:
-    """Per-row boolean: True where THAT bar's own 1-day move broke the price band
-    — i.e. a corporate action happened on that bar. Used to detect contamination
-    in a forward (target) window, where a single break makes the realized
-    forward return a fake move. Frames lacking ``ret_1d`` are treated as clean."""
-    if "ret_1d" not in df.columns or "symbol" not in df.columns:
-        return pd.Series(False, index=df.index)
-    return (df["ret_1d"].abs() > _row_band_threshold(df)).fillna(False)

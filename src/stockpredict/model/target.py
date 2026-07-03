@@ -163,12 +163,10 @@ def _label_horizon() -> int:
     return int(recovery.get("label_max_horizon", _DEFAULT_LABEL_HORIZON))
 
 
-def attach_target(df: pd.DataFrame, entry: str | None = None,
-                  exit_offset_days: int | None = None) -> pd.DataFrame:
+def attach_target(df: pd.DataFrame) -> pd.DataFrame:
     """Attach the rebound recovery targets (N / P / recovered) to a per-symbol
     OHLCV frame. ``thr`` is the shared profit_threshold (round-trip cost +
-    margin), so "profitable" means the same thing the pricing charges. ``entry``
-    / ``exit_offset_days`` are accepted for call-site compatibility and unused."""
+    margin), so "profitable" means the same thing the pricing charges."""
     out = df.copy()
     rec = recovery_episode(df, thr=profit_threshold(),
                            max_horizon=_label_horizon())

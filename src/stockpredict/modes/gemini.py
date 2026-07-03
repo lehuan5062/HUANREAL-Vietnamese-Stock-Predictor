@@ -26,7 +26,6 @@ from ..tracking import effective_today_for_trading, run_signature
 
 
 def run(on: str | None = None,
-        exit_offset_days: int | None = None,
         n_picks: int | None = None,
         symbols: list[str] | None = None,
         hose_only: bool = False,
@@ -35,7 +34,6 @@ def run(on: str | None = None,
         union_missed: bool = False) -> tuple[pd.DataFrame, Path, str]:
     """Always emits a prompt file; returns (candidates, prompt_path, 'prompt-only')."""
     candidates, prompt_path = emit_prompt(on=on,
-                                          exit_offset_days=exit_offset_days,
                                           n_picks=n_picks,
                                           symbols=symbols, hose_only=hose_only,
                                           include_etfs=include_etfs,
@@ -44,7 +42,6 @@ def run(on: str | None = None,
 
 
 def emit_prompt(on: str | None = None,
-                exit_offset_days: int | None = None,
                 n_picks: int | None = None,
                 symbols: list[str] | None = None,
                 hose_only: bool = False,
@@ -53,26 +50,20 @@ def emit_prompt(on: str | None = None,
                 union_missed: bool = False) -> tuple[pd.DataFrame, Path]:
     full_cfg = load_config()
     requested_n = int(n_picks) if n_picks else int(full_cfg.pricing.get("default_picks", 5))
-    candidates = rank_today(n_picks=requested_n, on=on,
-                            exit_offset_days=exit_offset_days, symbols=symbols)
+    candidates = rank_today(n_picks=requested_n, on=on, symbols=symbols)
     ab_verdict = None
     if on:
         on_date = dt.date.fromisoformat(on)
     else:
         on_date = effective_today_for_trading().date()
 
-    eff_horizon = int(exit_offset_days) if exit_offset_days is not None else int(
-        full_cfg.target["exit_offset_days"]
-    )
     excl_list = sorted({s.upper() for s in (exclude or [])})
-    sig = run_signature(mode="gemini", exit_offset_days=eff_horizon,
-                        hose_only=hose_only,
+    sig = run_signature(mode="gemini", hose_only=hose_only,
                         include_etfs=include_etfs, exclude=excl_list)
 
     # write_prompt currently uses the date in the filename; we suffix with sig
     # and the actionable tickers so a directory listing surfaces them at a glance.
-    path = write_prompt(candidates, on=on_date, exit_offset_days=eff_horizon,
-                        ab_verdict=ab_verdict)
+    path = write_prompt(candidates, on=on_date, ab_verdict=ab_verdict)
     full_suffix = f"_{sig}{picks_suffix(candidates)}"
     sig_path = path.with_name(path.stem + full_suffix + path.suffix)
     if sig_path != path:
@@ -84,7 +75,6 @@ def emit_prompt(on: str | None = None,
     meta_path = path.with_suffix(".meta.json")
     meta_path.write_text(
         json.dumps({
-            "exit_offset_days": eff_horizon,
             "n_picks": requested_n,
             "hose_only": hose_only,
             "include_etfs": include_etfs,
@@ -145,17 +135,15 @@ def finalize(prompt_path: str | Path,
     # News re-orders the SAME N candidates emitted upstream; never adds/drops.
     merged = merged.sort_values("adjusted", ascending=False).reset_index(drop=True)
 
-    # Recover horizon / requested pick count from the sidecar metadata.
-    exit_off = None
+    # Recover the requested pick count from the sidecar metadata.
     requested_n = None
     meta_path = prompt_path.with_suffix(".meta.json")
     if meta_path.exists():
         try:
             _m = json.loads(meta_path.read_text(encoding="utf-8"))
-            exit_off = _m.get("exit_offset_days")
             requested_n = _m.get("n_picks")
         except Exception:
-            exit_off = None
+            requested_n = None
 
     # Pull hose_only / include_etfs / exclude / signature from sidecar meta if present.
     eff_hose = False
@@ -177,7 +165,6 @@ def finalize(prompt_path: str | Path,
             pass
     if sig is None:
         sig = run_signature(mode="gemini",
-                            exit_offset_days=int(exit_off or 2),
                             hose_only=eff_hose,
                             include_etfs=eff_etfs,
                             exclude=eff_excl)
@@ -195,7 +182,6 @@ def finalize(prompt_path: str | Path,
     payload = {
         "as_of": today,
         "mode": "gemini",
-        "exit_offset_days": exit_off,
         "hose_only": eff_hose,
         "include_etfs": eff_etfs,
         "exclude": eff_excl,
@@ -203,7 +189,7 @@ def finalize(prompt_path: str | Path,
         "selection": "top_n",
         "requested_picks": requested_n,
         "n_picks": int(len(merged)),
-        "n_below_breakeven": n_below,
+        "n_below_recovery_bar": n_below,
         "prompt_file": str(prompt_path),
         "response_file": str(response_path),
         "global_summary": response.get("global_summary", ""),
@@ -213,6 +199,5 @@ def finalize(prompt_path: str | Path,
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     from ..tracking import record
     record(merged, mode="gemini", as_of=today_ts,
-           exit_offset_days=exit_off,
            hose_only=eff_hose, include_etfs=eff_etfs, exclude=eff_excl)
     return merged, out

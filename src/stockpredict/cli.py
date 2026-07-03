@@ -108,8 +108,11 @@ def _format_picks_explained(picks) -> str:
         if is_rebound:
             line = (f"  Signal: score={r.get('score'):.4f}  "
                     f"N≈{r.get('pred_days', float('nan')):.0f}d  "
-                    f"P≈{r.get('pred_profit', float('nan')):+.3f}  "
-                    f"recovery_prob={r.get('pred_recovery_prob', float('nan')):.0%}")
+                    f"P≈{r.get('pred_profit', float('nan')):+.3f}")
+            prob = r.get("pred_recovery_prob")
+            # LLM-only picks carry no statistical recovery probability — omit.
+            if prob is not None and pd.notna(prob):
+                line += f"  recovery_prob={prob:.0%}"
             if pd.notna(ns):
                 line += f"  news={int(ns):+d}"
             if adj is not None and pd.notna(adj):
@@ -190,8 +193,7 @@ def _print_pick_warnings(picks, requested_n: int) -> None:
                    f"shown to honor --picks; treat them with extra caution.")
 
 
-def _print_sell_reminder(picks, *, as_of=None, exit_offset_days=None,
-                         mode_label="") -> None:
+def _print_sell_reminder(picks, *, mode_label="") -> None:
     """Surface the flexible-exit plan for the returned picks. The rebound trade
     holds until the profit target (no fixed sell day), so this shows the target
     + expected hold per pick and leaves the sell timing to the user."""
@@ -391,9 +393,7 @@ def claude_finalize_cmd(plan_path: str) -> None:
     try:
         payload = json.loads(Path(out).read_text(encoding="utf-8"))
         _print_pick_warnings(picks, payload.get("requested_picks") or len(picks))
-        _print_sell_reminder(picks, as_of=payload.get("as_of"),
-                             exit_offset_days=payload.get("exit_offset_days"),
-                             mode_label="claude")
+        _print_sell_reminder(picks, mode_label="claude")
     except Exception:
         pass
 
@@ -416,9 +416,7 @@ def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
     try:
         payload = json.loads(Path(out).read_text(encoding="utf-8"))
         _print_pick_warnings(picks, payload.get("requested_picks") or len(picks))
-        _print_sell_reminder(picks, as_of=payload.get("as_of"),
-                             exit_offset_days=payload.get("exit_offset_days"),
-                             mode_label="gemini")
+        _print_sell_reminder(picks, mode_label="gemini")
     except Exception:
         pass
 
@@ -501,8 +499,6 @@ def run_cmd(mode: str, n_picks: int | None,
     if llm_only and mode != "claude":
         click.echo("ERROR: --llm-only is only valid with --mode claude.", err=True)
         sys.exit(2)
-    # exit_offset_days is only a signature/label horizon now (rebound exits flexibly).
-    days = int(load_config().target["exit_offset_days"])
     requested_n = int(n_picks) if n_picks else int(
         load_config().pricing.get("default_picks", 5))
     # Normalize --exclude: split each value on commas so BAT-style single
@@ -685,8 +681,7 @@ def run_cmd(mode: str, n_picks: int | None,
         click.echo("")
     elif not skip_train:
         click.echo("training rebound recovery head...")
-        panel = build_panel(symbols=syms, require_target=False,
-                            exit_offset_days=days)
+        panel = build_panel(symbols=syms, require_target=False)
         if panel.empty:
             click.echo("no training rows. aborting.", err=True)
             sys.exit(1)
@@ -699,7 +694,7 @@ def run_cmd(mode: str, n_picks: int | None,
     click.echo(f"predicting (mode={mode})...")
     if mode == "base":
         from .modes import base
-        picks, out = base.run(exit_offset_days=days, n_picks=requested_n,
+        picks, out = base.run(n_picks=requested_n,
                               symbols=pred_syms, hose_only=hose_only,
                               include_etfs=include_etfs,
                               exclude=exclude_list)
@@ -709,7 +704,7 @@ def run_cmd(mode: str, n_picks: int | None,
         click.echo(f"saved -> {out}")
     elif mode == "claude":
         from .modes import claude
-        result, out, tag = claude.run(exit_offset_days=days, n_picks=requested_n,
+        result, out, tag = claude.run(n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,
@@ -739,7 +734,7 @@ def run_cmd(mode: str, n_picks: int | None,
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
     elif mode == "gemini":
         from .modes import gemini
-        result, out, tag = gemini.run(exit_offset_days=days, n_picks=requested_n,
+        result, out, tag = gemini.run(n_picks=requested_n,
                                        symbols=pred_syms,
                                        hose_only=hose_only,
                                        include_etfs=include_etfs,

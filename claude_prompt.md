@@ -112,11 +112,14 @@ When everything is in, summarise the chosen parameters back and start the run.
 writes `reports\claude_llm_plan_<YYYY-MM-DD>_…md` (plus a `.candidates.parquet`
 sidecar) listing the **whole eligible downtrend universe UNRANKED** with an empty
 `## Results` table for you to fill. Do the global/macro + VN-Index checks once,
-research the universe, then **select exactly `<PICKS>` names, rank by a numeric
-`conviction`, and set a profit `target_vnd` for each**. You **buy at today's
-close** (do not set an entry) and there is **no stop** — the trade holds until it
-hits your target. Then jump to finalize; `claude-finalize` auto-detects the
-LLM-only plan. The rest of this section is the hybrid path.
+research the universe, then **select exactly `<PICKS>` names and, for each,
+predict `N_days` (expected trading days to bounce back to profit) and `P` (the
+expected profit as a decimal fraction, e.g. `0.05`)**. Finalize computes
+`score = P / N` and ranks by it — the same objective as the hybrid mode. You
+**buy at today's close** (no entry price), the target is `close × (1 + P)`, and
+there is **no stop** — the trade holds until the target. Then jump to finalize;
+`claude-finalize` auto-detects the LLM-only plan. The rest of this section is
+the hybrid path.
 
 The CLI writes a markdown plan at `reports\claude_news_plan_<YYYY-MM-DD>_<sig>.md`
 plus a candidates parquet sidecar. The console lists the N candidates (top N by

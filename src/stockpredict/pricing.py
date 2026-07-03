@@ -119,7 +119,10 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     close_v = (close_k * 1000.0).round(0)
     target_v = (close_v * (1.0 + pred_profit.clip(lower=0.0))).round(0)
     hold_days = pred_days.round(0)
-    score = (pred_profit / pred_days.clip(lower=1.0)) * pred_prob
+    # LLM-only picks carry no statistical recovery probability (the LLM's
+    # DROP/selection vetting IS its probability judgement) — treat a missing
+    # prob as 1.0 so score reduces to plain P/N and the prob gate is skipped.
+    score = (pred_profit / pred_days.clip(lower=1.0)) * pred_prob.fillna(1.0)
 
     gross_reward = target_v - close_v
     _, _, fees_total, _ = _broker_costs(close_v, target_v, broker)
@@ -127,7 +130,7 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     breakeven_pct = (fees_total / close_v).round(4)
 
     below_bar = (
-        (pred_prob < min_recovery_prob)
+        (pred_prob.fillna(1.0) < min_recovery_prob)
         | (net_reward <= 0)
         | (pred_profit <= thr)
     ).fillna(True)
@@ -149,41 +152,6 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     out["breakeven_pct"] = breakeven_pct
     out["below_recovery_bar"] = below_bar
     out["suggested_max_units"] = pd.array(max_units, dtype="Int64")
-    return out
-
-
-def economics_from_llm_prices(df: pd.DataFrame) -> pd.DataFrame:
-    """Per-share economics for the LLM-only Claude mode. Like the rest of the
-    rebound pipeline, the buy price is today's **close** (``close_vnd`` — the LLM
-    does NOT set an entry) and there is **no stop-loss**; the LLM supplies only a
-    profit ``target_vnd`` (VND per share). Applies the ACBS fee model so the picks
-    JSON carries the same fee / net-P&L / breakeven fields as base/claude/gemini.
-
-    Requires ``close`` (thousand VND) and ``target_vnd``. ``below_recovery_bar``
-    flags a pick whose target doesn't clear fees (non-positive net reward)."""
-    if df is None or len(df) == 0:
-        return df
-
-    cfg = load_config()
-    broker = dict(cfg.broker) if hasattr(cfg, "broker") else {}
-
-    out = df.copy()
-    close_v = (out["close"].astype(float) * 1000.0).round(0)
-    target_v = out["target_vnd"].astype("float64").round(0)
-
-    gross_reward = target_v - close_v
-    _, _, fees_total, _ = _broker_costs(close_v, target_v, broker)
-    net_reward = gross_reward - fees_total
-    breakeven_pct = (fees_total / close_v).round(4)
-    below_bar = (net_reward <= 0).fillna(True)
-
-    out["close_vnd"] = close_v.astype("Int64")
-    out["target_vnd"] = target_v.astype("Int64")
-    out["gross_reward_vnd"] = gross_reward.round(0).astype("Int64")
-    out["fees_round_trip_vnd"] = fees_total.round(0).astype("Int64")
-    out["net_reward_vnd"] = net_reward.round(0).astype("Int64")
-    out["breakeven_pct"] = breakeven_pct
-    out["below_recovery_bar"] = below_bar
     return out
 
 

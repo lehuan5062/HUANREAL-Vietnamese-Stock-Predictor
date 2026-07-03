@@ -1,11 +1,15 @@
 """Build a markdown plan for the LLM-ONLY Claude mode.
 
-Unlike the hybrid plan (``claude_runner.write_plan``), there is NO model ranking
-here: the candidates are the WHOLE mechanically-filtered downtrend universe
+Unlike the hybrid plan (``claude_runner.write_plan``), there is NO statistical
+model here: the candidates are the WHOLE mechanically-filtered downtrend universe
 (uncapped), and the in-session Claude does the whole job — select which names to
-buy, rank them by its own conviction, and set a profit ``target_vnd`` per pick.
-As in the rest of the rebound pipeline, you BUY AT TODAY'S CLOSE and there is NO
-stop-loss (hold until the target).
+buy and, for each, predict **N** (trading days to bounce back to profit) and
+**P** (the profit at that bounce, as a return fraction). Finalize then computes
+``score = P / N`` and ranks by it — the SAME objective the base/hybrid modes use
+(theirs is P/N × recovery_prob; the LLM's selection vetting stands in for the
+probability). As in the rest of the rebound pipeline, you BUY AT TODAY'S CLOSE,
+the target is ``close × (1 + P)``, and there is NO stop-loss (hold until the
+target).
 
 Workflow:
   1. ``predict.eligible_universe`` produces the filtered universe (no scoring)
@@ -30,7 +34,6 @@ import pandas as pd
 
 from ..config import reports_dir
 from .claude_runner import (
-    DROP_SENTINEL,
     _extract_dimension_tags,
     _extract_findings_list,
     _extract_step,
@@ -42,11 +45,10 @@ from .sources import global_urls, vn_urls
 
 def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
                    run_signature: str | None = None,
-                   current_horizon: int | None = None,
                    n_picks: int = 5) -> Path:
     """Emit the LLM-only markdown plan. ``universe`` is the full eligible
-    cross-section (any of [symbol, close, rsi_14, mom_20, instrument_type]);
-    NO ``pred_mean`` / pricing columns are required. ``n_picks`` is how many
+    downtrend cross-section (any of [symbol, close, rsi_14, mom_20,
+    instrument_type]); no pricing columns are required. ``n_picks`` is how many
     names the LLM should ultimately surface."""
     on = on or dt.date.today()
     out_dir = reports_dir()
@@ -58,8 +60,7 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
     from .company_info import enrich
     universe = enrich(universe)
 
-    horizon_txt = (f"~{int(current_horizon)} trading day(s)"
-                   if current_horizon is not None else "the holding window")
+    horizon_txt = "the expected holding window (a few days to a couple of weeks)"
 
     lines = [
         f"# Claude LLM-only pick plan — {on.isoformat()}",
@@ -74,12 +75,15 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         f"1. **Select** the best **{int(n_picks)}** name(s) to rebound from the",
         "   universe table, using your own research — fundamentals, news, sector,",
         "   macro, technicals. You may research as many candidates as you need.",
-        "2. **Rank** your chosen names by a numeric **conviction** score (higher =",
-        "   stronger). The final picks JSON is ordered by this score.",
-        "3. **Set a profit `target_vnd`** per pick (VND PER SHARE) — the price you'd",
-        "   sell at. You BUY AT TODAY'S CLOSE (the `close` column, ×1000 for VND) —",
-        "   do NOT set an entry. There is NO stop-loss: the trade holds until it",
-        "   reaches your target.",
+        "2. **Predict N and P** for each chosen name, from your research:",
+        "   `N_days` = expected TRADING days until it bounces back to a profitable",
+        "   point; `P` = the expected profit at that point, as a decimal return",
+        "   fraction (e.g. `0.05` = +5%; `5%` also accepted). P must clear the",
+        "   round-trip fee bar (~0.95%) or the pick is flagged weak.",
+        "3. Finalize computes `score = P / N` (profit per day held) and **ranks",
+        "   your picks by it** — same objective as the base/hybrid modes. You BUY",
+        "   AT TODAY'S CLOSE (the `close` column, ×1000 for VND); the sell target",
+        "   is `close × (1 + P)`. No entry price, no stop — hold until the target.",
         "4. For each chosen name, write a `### TICKER — Company` section (template",
         "   below) documenting the business, the dimensions you researched, and",
         "   your findings — then fill the results table at the bottom.",
@@ -130,8 +134,24 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         "",
         "For EACH name you choose, add a section in this exact format (the",
         "finalize parser keys on the `### TICKER` heading and the `**Step N —`",
-        "labels). Seed URLs per ticker are listed — use WebFetch / WebSearch,",
-        "cross-check at least 2 sources, and tag each finding with `[dimension]`.",
+        "labels). Use WebFetch / WebSearch, cross-check at least 2 sources, and",
+        "tag each finding with `[dimension]`.",
+        "",
+        "Seed sources you can reuse per ticker (replace TICKER):",
+        "",
+    ]
+    # Show the seed-URL shape once using a placeholder ticker. NOTE: this list
+    # must sit ABOVE the section template — the LLM appends its `### TICKER`
+    # sections after the template, and the section splitter accumulates until
+    # the next `## ` heading, so any stray bullets between the sections and
+    # `## Results` would leak into the last ticker's findings.
+    for name, url in vn_urls("TICKER").items():
+        lines.append(f"- [{name}]({url})")
+
+    lines += [
+        "",
+        "Section template — append your filled sections directly below it,",
+        "immediately before `## Results`:",
         "",
         "```",
         "### TICKER  —  Company name",
@@ -140,7 +160,7 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         "- ",
         "",
         "**Step 2 — Research dimensions**: the 3-7 drivers you judged matter for",
-        "THIS ticker on a T+2 horizon.",
+        "THIS ticker's rebound.",
         "- ",
         "",
         "**Step 4 — Findings** (one bullet per dimension, tagged `[dimension-name]`,",
@@ -148,24 +168,16 @@ def write_llm_plan(universe: pd.DataFrame, on: dt.date | None = None,
         "- ",
         "```",
         "",
-        "Seed sources you can reuse per ticker (replace TICKER):",
-        "",
-    ]
-    # Show the seed-URL shape once using a placeholder ticker.
-    for name, url in vn_urls("TICKER").items():
-        lines.append(f"- [{name}]({url})")
-
-    lines += [
-        "",
         "## Results — fill this with your chosen picks",
         "",
-        "One row per pick, ordered however you like (the finalize step re-sorts by",
-        "`conviction`, highest first). `conviction` is any positive number on a",
-        "consistent scale; `target_vnd` is the sell price in VND per share (you",
-        "buy at the close; no stop). Write `DROP` in `conviction` to exclude a",
-        "row you listed.",
+        "One row per pick, ordered however you like (the finalize step computes",
+        "`score = P / N` and re-sorts, highest first). `N_days` = expected trading",
+        "days to the bounce (>= 1); `P` = expected profit as a decimal fraction",
+        "(`0.05` = +5%; a `5%` cell is also accepted). You buy at the close; the",
+        "target is `close × (1 + P)`; no stop. Write `DROP` in `N_days` to",
+        "exclude a row you listed.",
         "",
-        "| rank | symbol | conviction | target_vnd |",
+        "| rank | symbol | N_days | P |",
         "| --- | --- | --- | --- |",
     ]
     for i in range(int(n_picks)):
@@ -185,10 +197,27 @@ _SYM_RE = re.compile(r"^[A-Z0-9]{2,8}$")
 _NUM_RE = re.compile(r"^[+\-]?\d+(?:\.\d+)?$")
 
 
+def _parse_profit_cell(cell: str) -> float:
+    """Parse the P cell into a decimal return fraction. Accepts ``0.05`` or
+    ``5%`` (percent form divided by 100). Blank / unparseable → NaN."""
+    s = (cell or "").strip().replace(",", "")
+    if not s or s == "-":
+        return float("nan")
+    pct = s.endswith("%")
+    if pct:
+        s = s[:-1].strip()
+    try:
+        v = float(s)
+    except ValueError:
+        return float("nan")
+    return v / 100.0 if pct else v
+
+
 def _parse_result_row(line: str):
-    """Parse one results-table row: ``| rank | symbol | conviction | target_vnd |``.
-    Returns (symbol, conviction|DROP_SENTINEL, target) or None for non-data rows
-    (header / separator / blank cells)."""
+    """Parse one results-table row: ``| rank | symbol | N_days | P |``.
+    Returns (symbol, dropped, pred_days, pred_profit) or None for non-data rows
+    (header / separator / blank cells). ``DROP`` in the N_days cell marks the
+    row excluded."""
     stripped = line.strip()
     if not stripped.startswith("|"):
         return None
@@ -198,22 +227,21 @@ def _parse_result_row(line: str):
     sym = cells[1].upper()
     if not _SYM_RE.match(sym):
         return None
-    conv_str = cells[2].upper()
-    if conv_str == "DROP":
-        conviction = float(DROP_SENTINEL)
-    elif _NUM_RE.match(conv_str):
-        conviction = float(conv_str)
-    else:
+    n_str = cells[2].upper()
+    if n_str == "DROP":
+        return sym, True, float("nan"), float("nan")
+    if not _NUM_RE.match(n_str):
         return None
-    target = _parse_price_cell(cells[3])
-    return sym, conviction, target
+    pred_days = float(n_str)
+    pred_profit = _parse_profit_cell(cells[3])
+    return sym, False, pred_days, pred_profit
 
 
 def parse_llm_plan(path: str | Path) -> pd.DataFrame:
-    """Read the filled LLM-only plan and return DataFrame[symbol, conviction,
-    target_vnd, business, dimensions, key_news, dimensions_cited]. Entry is the
-    close (set at finalize) and there is no stop. ``conviction == DROP_SENTINEL``
-    marks a dropped row."""
+    """Read the filled LLM-only plan and return DataFrame[symbol, dropped,
+    pred_days, pred_profit, business, dimensions, key_news, dimensions_cited].
+    Entry is the close and the target is ``close × (1 + pred_profit)``, both set
+    at finalize; there is no stop. ``dropped=True`` marks a DROP row."""
     text = Path(path).read_text(encoding="utf-8")
     sections = _split_per_ticker_sections(text)
     rows = []
@@ -228,7 +256,7 @@ def parse_llm_plan(path: str | Path) -> pd.DataFrame:
         parsed = _parse_result_row(line)
         if not parsed:
             continue
-        sym, conviction, target = parsed
+        sym, dropped, pred_days, pred_profit = parsed
         if sym in seen:
             continue
         seen.add(sym)
@@ -236,8 +264,9 @@ def parse_llm_plan(path: str | Path) -> pd.DataFrame:
         findings = _extract_findings_list(sec)
         rows.append({
             "symbol": sym,
-            "conviction": conviction,
-            "target_vnd": target,
+            "dropped": dropped,
+            "pred_days": pred_days,
+            "pred_profit": pred_profit,
             "business": _extract_step(sec, "Business"),
             "dimensions": _extract_step(sec, "Research dimensions")
                           or _extract_step(sec, "Key drivers"),

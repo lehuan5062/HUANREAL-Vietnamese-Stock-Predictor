@@ -40,12 +40,6 @@ features:
   volume_zscore_window: 20
   realized_vol_window: 20
 
-target:
-  # Nominal horizon used ONLY as a label in run signatures / ledger rows and
-  # report filenames (e.g. the `d2` token). The rebound strategy exits flexibly
-  # (hold until the profit target), so this does not drive any exit.
-  exit_offset_days: 2
-
 strategy:
   # The rebound / mean-reversion strategy: filter to downtrend names, predict
   # days-to-recovery (N) and the profit at recovery (P), rank by P/N × recovery

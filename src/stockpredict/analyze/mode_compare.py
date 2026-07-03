@@ -9,8 +9,8 @@ breakdown is shown only as context.
 
 Comparability key: two runs are comparable when they share the same
 ``param_key`` — the run signature with its leading mode token stripped
-(so ``base_d2``, ``claude_d2`` and ``claude_llm_d2`` all map to ``d2``,
-but ``claude_d2_HOSE`` does NOT match ``base_d2``). A ``(as_of, param_key)``
+(so ``base``, ``claude`` and ``claude_llm`` all map to the empty key,
+but ``claude_HOSE`` does NOT match ``base``). A ``(as_of, param_key)``
 cell with two or more distinct modes is a *comparable cell*; everything
 pools over those cells only.
 
@@ -40,10 +40,14 @@ def _label(mode: str) -> str:
 
 
 def _param_key(signature: str, mode: str) -> str:
-    """Run signature with its leading ``{mode}_`` token stripped, so the same
-    parameters under different modes share a key. Falls back to the raw
-    signature when it doesn't start with the mode prefix."""
+    """Run signature with its leading mode token stripped, so the same
+    parameters under different modes share a key. A default-params run has
+    signature == mode exactly (e.g. ``base`` / ``claude``), which maps to the
+    empty key. Falls back to the raw signature when it doesn't start with the
+    mode prefix."""
     sig = str(signature)
+    if sig == str(mode):
+        return ""
     prefix = f"{mode}_"
     return sig[len(prefix):] if sig.startswith(prefix) else sig
 

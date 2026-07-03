@@ -22,15 +22,14 @@ from .sources import global_urls, vn_urls
 
 def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
                run_signature: str | None = None,
-               current_horizon: int | None = None,
                current_signature: str | None = None,
                ab_verdict: str | None = None) -> Path:
     """Emit the markdown plan file. `candidates` must include columns
     [symbol, score, pred_days, pred_profit, pred_recovery_prob, close, rsi_14,
     mom_5, mom_20, high_prox_20].
     `run_signature` is appended to the filename so distinct same-day
-    runs (different horizon / hose-only) don't override each
-    other — pass it from the mode caller for full uniqueness."""
+    runs (hose-only / exclude) don't override each other — pass it from the
+    mode caller for full uniqueness."""
     on = on or dt.date.today()
     cfg = load_config().modes["claude"]
     out_dir = reports_dir()
@@ -43,7 +42,6 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
     from .company_info import enrich
     candidates = enrich(candidates)
 
-    from ..tracking import _next_trading_offset
     from .research_dimensions import ETF_GUIDANCE_MD, REFERENCE_MD
 
     # ETF rows need a different research rubric. Only inject the ETF guidance
@@ -53,32 +51,6 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "instrument_type" in candidates.columns
         and (candidates["instrument_type"].astype(str).str.upper() == "ETF").any()
     )
-
-    # Sell-day reminder: when current_horizon is known, quote a concrete
-    # target sell day so the in-session Claude can offer to schedule a
-    # reminder once the picks are finalized. The reminder fires on the
-    # sell day itself at 11:30 ICT — late morning, just before the noon
-    # lunch break (and, for T+2, 30 min before settlement at noon).
-    if current_horizon is not None:
-        n = int(current_horizon)
-        target_date = _next_trading_offset(pd.Timestamp(on), n).date()
-        reminder_date = target_date
-        if n == 2:
-            sell_window = ("13:00–14:30 ICT (afternoon session, "
-                           "after T+2 settlement at noon)")
-            reminder_note = "30 min before T+2 settlement at noon"
-        else:
-            sell_window = "09:00–14:30 ICT (any time during the trading day)"
-            reminder_note = "late morning of sell day, before lunch break"
-        suggested_time = "11:30 ICT"
-        target_iso = target_date.isoformat()
-        reminder_iso = reminder_date.isoformat()
-    else:
-        target_iso = "(unknown — fall back to picks_*.json target_date)"
-        reminder_iso = "(unknown — same as sell day)"
-        sell_window = "afternoon session ICT"
-        suggested_time = "11:30 ICT"
-        reminder_note = "late morning of sell day"
 
     has_union = "missed_only" in candidates.columns
     lines = [
@@ -188,9 +160,9 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         "today is geopolitically quiet, say so and move on.",
         "",
         "**VN-Index trend call — do this ONCE, before scoring any ticker.** "
-        f"Research where the VN-Index is likely headed over the next "
-        f"{('~' + str(int(current_horizon)) + ' trading day(s)') if current_horizon else 'holding window'} "
-        "(the holding window). Look at: the index's recent trend and momentum "
+        "Research where the VN-Index is likely headed over the expected holding "
+        "window (a few days to a couple of weeks — see each pick's `N≈…d`). "
+        "Look at: the index's recent trend and momentum "
         "(last few sessions + last few weeks), where it sits vs its 50/200-day "
         "moving averages and recent support/resistance, market breadth (are most "
         "stocks rising, or is the index propped up by a few large caps — 'xanh vỏ "
@@ -368,8 +340,14 @@ def _split_per_ticker_sections(text: str) -> dict[str, str]:
             current_lines = []
             continue
         if current_sym is not None:
-            # Stop accumulating once we hit the global "## Scores" footer
-            if line.strip().startswith("## Scores"):
+            # Stop accumulating at ANY level-2 heading — the per-ticker sections
+            # only ever contain `###` headings and `**Step N**` labels, so a
+            # `## ` line marks a global footer. The hybrid plan ends the ticker
+            # block with `## Scores`; the LLM-only plan with `## Results` (and
+            # may have other `## ` sections after the last ticker). Matching
+            # only "## Scores" here let an LLM-only ticker section swallow the
+            # seed-source list and the whole Results table into its findings.
+            if line.strip().startswith("## "):
                 sections[current_sym] = "\n".join(current_lines)
                 current_sym = None
                 current_lines = []
