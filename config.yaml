@@ -69,9 +69,9 @@ strategy:
     # is below this. The estimate is dominated by the ticker's OWN historical
     # downtrend-recovery rate (chronic decliners ~0, reliable bouncers ~1), so
     # this screens out falling knives that would otherwise be held forever under
-    # the no-stop / no-cap flexible exit. 0 disables. ~0.85 keeps roughly the
-    # top three-quarters of tickers by reliability.
-    min_recovery_prob: 0.85
+    # the no-stop / no-cap flexible exit. 0 disables. ~0.90 keeps only the most
+    # reliable bouncers, reducing knife incidence at cost of lower pick count.
+    min_recovery_prob: 0.90
     # A candidate uses its OWN recovery history once it has at least this many
     # downtrend rows; thinner tickers fall back to the RSI x drawdown bucket,
     # then to the pooled all-downtrend estimate.
