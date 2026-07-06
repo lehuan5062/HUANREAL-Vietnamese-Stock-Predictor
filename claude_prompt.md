@@ -138,6 +138,8 @@ Step 2 / Step 4 fields and a `## Scores` table at the bottom.
 
 ### 3. Research each ticker — vet the bounce, business-aware
 
+**IMPORTANT: Auto-rerun on DROP.** If you discover a candidate is un-tradeable (fraud, delisting, halted trading, insolvency), assign `news_score = DROP` in the scores table and mark it in the findings as `[DROPPED: reason — source/date]`. **Then automatically trigger a new CLI re-run with `--exclude [all dropped tickers]`** to get the next-ranked candidate to replace it. Example: if user originally ran `--picks 3 --exclude VGS,DPG,TIG` and you DROP QCG, re-run with `--picks 3 --exclude VGS,DPG,TIG,QCG --warm-only yes [...]`. The plan markdown will regenerate at the same path with new candidates. Fetch and continue research until you have N candidates with `news_score ≠ DROP`.
+
 **First, once up front — major-conflict / geopolitical check.** Scan for major
 global conflicts or shocks breaking today (wars, ceasefires, sanctions/tariffs,
 oil-supply / shipping disruptions, sharp oil / gold / USD-VND moves). A
@@ -204,14 +206,18 @@ Use `Edit` to replace placeholders in the plan:
 
 ### 5. Finalize
 
+Once you have N candidates with `news_score ≠ DROP` (no un-tradeable picks remaining), run:
+
 ```
 .venv\Scripts\python.exe -m stockpredict.cli claude-finalize \
     "reports\claude_news_plan_<DATE>_<sig>.md"
 ```
 
-This applies the DROP override, re-ranks by `adjusted = score * (1 + news_weight *
+This applies any DROP overrides (safety filter for any remaining DROPs), re-ranks by `adjusted = score * (1 + news_weight *
 news_score)`, keeps the top N, writes `reports\picks_claude_<DATE>_<sig>.json`,
 and updates the ledger (so `dimensions_cited` hit-rate can be tracked later).
+
+**Expected output:** exactly N picks, all with `news_score ≠ DROP`. If all picks were marked DROP, no JSON is generated — check the plan markdown for dropped candidates and re-run with a larger exclusion list.
 
 ### 6. Report to the user
 
