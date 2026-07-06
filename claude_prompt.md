@@ -140,7 +140,39 @@ Step 2 / Step 4 fields and a `## Scores` table at the bottom.
 
 **IMPORTANT: Auto-rerun on DROP.** If you discover a candidate is un-tradeable (fraud, delisting, halted trading, insolvency), assign `news_score = DROP` in the scores table and mark it in the findings as `[DROPPED: reason — source/date]`. **Then automatically trigger a new CLI re-run with `--exclude [all dropped tickers]`** to get the next-ranked candidate to replace it. Example: if user originally ran `--picks 3 --exclude VGS,DPG,TIG` and you DROP QCG, re-run with `--picks 3 --exclude VGS,DPG,TIG,QCG --warm-only yes [...]`. The plan markdown will regenerate at the same path with new candidates. Fetch and continue research until you have N candidates with `news_score ≠ DROP`.
 
-**Step 0 — Mandatory fraud/violation screen (run for EVERY candidate, before deriving research dimensions).** Do not rely on stumbling onto this while researching earnings — run a dedicated search pass first, for every ticker, every run. Search mixing Vietnamese + English: `<TICKER> xử phạt` (sanctioned), `<company> vi phạm` (violation), `<company> gian lận` (fraud), `<company> khởi tố` (prosecuted), `<company> thao túng chứng khoán` (market manipulation), `<company> ý kiến ngoại trừ kiểm toán` (qualified/adverse audit opinion), `<company> hủy niêm yết` (delisting), `<company> đình chỉ giao dịch` (trading halt). This is a gate, not a scoring dimension: if it turns up a confirmed finding, apply the Hard DROP triggers below before doing any further research on that ticker.
+---
+
+## ⚠️ CRITICAL: Step 0 MUST run FIRST, before any other research
+
+**Step 0 — Fraud/violation screen (MANDATORY, complete before Step 1).** This is
+a hard gate, not a scoring dimension, and not something to fold into the
+general research dimensions. For EVERY ticker, before writing Step 1
+(Business), reproduce and fill in this exact checklist in the findings —
+log each query's result inline, even "none found":
+
+```
+**Step 0 — Fraud/violation screen**
+  - `<TICKER> xử phạt` (sanctioned) → [finding or "none found"]
+  - `<company> vi phạm` (violation) → [finding or "none found"]
+  - `<company> gian lận` (fraud) → [finding or "none found"]
+  - `<company> khởi tố` (prosecuted) → [finding or "none found"]
+  - `<company> thao túng chứng khoán` (manipulation) → [finding or "none found"]
+  - `<company> ý kiến ngoại trừ kiểm toán` (qualified/adverse audit) → [finding or "none found"]
+  - `<company> hủy niêm yết` (delisting) → [finding or "none found"]
+  - `<company> đình chỉ giao dịch` (trading halt) → [finding or "none found"]
+  - `<company> phát hành cổ phiếu` / `tăng vốn điều lệ` (share issuance / dilution) → [finding or "none found"]
+**Step 0 verdict: PASS / DROP**
+```
+
+**Hard-block sequencing:** Do NOT write Step 1 (Business) for a ticker until
+its Step 0 block shows verdict = **PASS**. If any query above returns a
+confirmed finding matching a Hard DROP trigger (see below), the verdict is
+**DROP** — stop immediately, skip Step 1/2/3/4 for that ticker, and go
+straight to the Scores table with `news_score = DROP`. Cross-check any hit
+across at least 2 sources before finalizing the verdict, but do not skip
+logging a query just because an early source looks clean — a fraud/tax
+penalty or a large dilution announcement can be reported by only one or two
+outlets days apart, so run every query above, every ticker, every time.
 
 **First, once up front — major-conflict / geopolitical check.** Scan for major
 global conflicts or shocks breaking today (wars, ceasefires, sanctions/tariffs,
@@ -148,6 +180,21 @@ oil-supply / shipping disruptions, sharp oil / gold / USD-VND moves). A
 market-wide catalyst can move the whole VN-Index and specific sectors regardless
 of any one company. Record it in the global-context section and carry it into
 every ticker's `news_score`. If quiet, note that and move on.
+
+**Chart sanity-check (mandatory, before scoring — do this for every
+candidate).** The model's `rsi`/`mom20`/`below20dHigh` figures shown in the
+plan were computed at prediction time and can be stale by the time you
+research. Pull the ticker's recent price history
+(`cache\ohlcv\<SYM>.parquet`, last ~15-20 sessions) and look at whether the
+dip looks like a **pause** (flattening, mixed up/down days, no volume spike
+on down days) or an **accelerating breakdown** (consecutive lower highs and
+lower lows, a volume spike on a down day — i.e. distribution). This is not a
+second scoring dimension (you still don't score on RSI/momentum directly) —
+it's a check on whether the news case you're building still matches the
+tape. If the chart shows a volume-confirmed accelerating breakdown that
+contradicts a bullish news read (e.g. a backward-looking earnings beat), cap
+`news_score` at `0` and say so explicitly in the findings — don't score `+1`
+on fundamentals alone while the tape is still breaking down.
 
 **Then, for each candidate:**
 
@@ -278,10 +325,14 @@ user accepts (not Windows `schtasks` / cron unless they ask).
 
 ## What NOT to do
 
+- **Don't skip Step 0.** Run the mandatory fraud/violation screen FIRST for every ticker, before deriving any research dimensions. This is a hard gate that catches falling knives the statistical filter misses.
 - Don't lock yourself to a fixed list of dimensions; derive per-ticker.
 - Don't accept findings from a single source.
 - Don't fabricate news. If nothing material, score `0` honestly.
 - Don't score on technicals (RSI, momentum, drawdown) — those are the model's input.
+- Don't score `+1` on a fundamentals/news catalyst alone without checking the
+  chart — a real earnings beat can still be riding a volume-confirmed
+  breakdown; check the tape before calling a dip "healthy."
 - Don't hesitate to `DROP` a broken company — catching the falling knife the
   statistical filter missed is the whole point of your pass.
 - Don't downgrade a confirmed regulatory/legal finding (fine, sanction, qualified
