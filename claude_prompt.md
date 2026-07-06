@@ -140,6 +140,8 @@ Step 2 / Step 4 fields and a `## Scores` table at the bottom.
 
 **IMPORTANT: Auto-rerun on DROP.** If you discover a candidate is un-tradeable (fraud, delisting, halted trading, insolvency), assign `news_score = DROP` in the scores table and mark it in the findings as `[DROPPED: reason — source/date]`. **Then automatically trigger a new CLI re-run with `--exclude [all dropped tickers]`** to get the next-ranked candidate to replace it. Example: if user originally ran `--picks 3 --exclude VGS,DPG,TIG` and you DROP QCG, re-run with `--picks 3 --exclude VGS,DPG,TIG,QCG --warm-only yes [...]`. The plan markdown will regenerate at the same path with new candidates. Fetch and continue research until you have N candidates with `news_score ≠ DROP`.
 
+**Step 0 — Mandatory fraud/violation screen (run for EVERY candidate, before deriving research dimensions).** Do not rely on stumbling onto this while researching earnings — run a dedicated search pass first, for every ticker, every run. Search mixing Vietnamese + English: `<TICKER> xử phạt` (sanctioned), `<company> vi phạm` (violation), `<company> gian lận` (fraud), `<company> khởi tố` (prosecuted), `<company> thao túng chứng khoán` (market manipulation), `<company> ý kiến ngoại trừ kiểm toán` (qualified/adverse audit opinion), `<company> hủy niêm yết` (delisting), `<company> đình chỉ giao dịch` (trading halt). This is a gate, not a scoring dimension: if it turns up a confirmed finding, apply the Hard DROP triggers below before doing any further research on that ticker.
+
 **First, once up front — major-conflict / geopolitical check.** Scan for major
 global conflicts or shocks breaking today (wars, ceasefires, sanctions/tariffs,
 oil-supply / shipping disruptions, sharp oil / gold / USD-VND moves). A
@@ -166,7 +168,13 @@ every ticker's `news_score`. If quiet, note that and move on.
   phiếu`, `<company> lợi nhuận quý`, `cổ tức`, `phát hành cổ phiếu`, `huỷ niêm
   yết`, `nghị định / thông tư`. Seed sources: baomoi, cafef, vietstock, vneconomy,
   ndh, theinvestor, fireant; macro via Reuters/Bloomberg/FT; policy via
-  chinhphu.vn / sbv.gov.vn. Cross-check across ≥2 sources before scoring.
+  chinhphu.vn / sbv.gov.vn. **For the fraud/violation screen specifically**, also
+  check primary regulatory sources, not just news aggregators: the exchange's own
+  disclosure feed (hnx.vn or hsx.vn "công bố thông tin" / CBTT page for the
+  ticker), the State Securities Commission sanctions list (ssc.gov.vn, "xử phạt
+  vi phạm hành chính"), and the company's own investor-relations page. News
+  aggregators often report a sanction late or not at all. Cross-check across ≥2
+  sources before scoring.
 - **Headless web access ONLY. Never launch a GUI browser.** All research goes
   through `WebSearch` / `WebFetch` or headless HTTP. Never run `Start-Process`,
   `start`, `explorer`, `Invoke-Item`, `os.startfile`, `webbrowser.open`,
@@ -176,10 +184,28 @@ every ticker's `news_score`. If quiet, note that and move on.
   - `+1` news supports the bounce — a real recovery catalyst, OR simply a sound
     company in a temporary / technical dip.
   - `0` nothing material — the statistical rebound case stands on its own.
-  - `-1` news works AGAINST the bounce — deteriorating fundamentals, dilution,
-    sector headwind, governance concern (the dip may be justified).
-  - `DROP` for delisting / suspension / bankruptcy / fraud — this is exactly the
-    falling knife the statistical filter can miss; it overrides the score entirely.
+  - `-1` news works AGAINST the bounce — deteriorating fundamentals, generic
+    dilution, sector headwind, or an UNCONFIRMED/soft governance concern
+    (analyst skepticism, a late disclosure with no penalty, rumor without an
+    official finding). The dip may be justified but nothing is confirmed.
+  - `DROP` — **any CONFIRMED regulatory/legal finding**, not just a risk factor.
+    This overrides the score entirely no matter how good the P/N score looks —
+    it's exactly the falling knife the statistical filter misses. Hard DROP
+    triggers (a state body, exchange, auditor, or court has already ACTED —
+    not "could" or "might"):
+      - Tax authority / SSC fine or sanction for false declaration, fraud, or
+        market manipulation — DROP regardless of the fine's size; the finding
+        itself is disqualifying, not the amount
+      - Qualified, adverse, or disclaimer-of-opinion audit report; auditor
+        resignation
+      - Delisting notice, trading suspension/halt, forced liquidation of a
+        major shareholder's pledged stake
+      - Bankruptcy / insolvency filing, confirmed debt default
+      - Criminal investigation or prosecution of the company or executives for
+        financial crimes
+  - **When in doubt between -1 and DROP, ask:** "has an official body already
+    made a finding, or is this still just a concern/risk?" Finding → DROP.
+    Risk/concern → -1.
 - **Do NOT** score on price/technicals (RSI, momentum, drawdown) — those already
   drove the model's selection. Score on business + sector + macro + policy news.
 
@@ -258,6 +284,10 @@ user accepts (not Windows `schtasks` / cron unless they ask).
 - Don't score on technicals (RSI, momentum, drawdown) — those are the model's input.
 - Don't hesitate to `DROP` a broken company — catching the falling knife the
   statistical filter missed is the whole point of your pass.
+- Don't downgrade a confirmed regulatory/legal finding (fine, sanction, qualified
+  audit opinion, prosecution) to `-1` just because the company otherwise looks
+  fundamentally fine — `DROP` is triggered by the finding itself, not a holistic
+  judgment call.
 
 ## Caveats to mention to the user
 
