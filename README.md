@@ -238,8 +238,9 @@ different parameters never clobber each other.
 
 Day-to-day runs don't see past performance — each scores on today's evidence. To
 act on history, paste [`self_correct_prompt.md`](self_correct_prompt.md) into
-Claude Code with a resolved picks report. It diagnoses three things and proposes
-one approval-gated edit per finding:
+Claude Code with a picks report (it first runs `evaluate` to refresh outcomes, then
+works even before picks fully resolve). It diagnoses four things and proposes one
+approval-gated edit per finding:
 
 1. **Recovery-filter calibration** — did picks actually bounce at the predicted
    `recovery_prob`? If not, tighten `min_recovery_prob` or the downtrend gate.
@@ -247,6 +248,9 @@ one approval-gated edit per finding:
    `p_quantile` (empirical, mostly self-correcting — high bar to touch).
 3. **Falling-knife check** — unrecovered / long-open picks; chart-check them and,
    for claude/gemini, tighten the DROP guidance in `claude_prompt.md`.
+4. **Pred_days calibration (checkpoint misses)** — picks that reached their
+   predicted `pred_days` without hitting target; same `state_buckets` / `p_quantile`
+   lever as #2, but caught earlier — before final resolution.
 
 Every diff is shown and applied only after per-file approval.
 
