@@ -328,6 +328,31 @@ def compare_modes_cmd(window: int, as_of: str | None, modes: str | None) -> None
     click.echo(f"\nreport -> {out}")
 
 
+@cli.command("compare-picks")
+@click.option("--date", "as_of", required=True, help="YYYY-MM-DD: compare picks reports for this day")
+def compare_picks_cmd(as_of: str) -> None:
+    """Compare the actual picks selected by different modes on the same day
+    (ignores resolution status). Reads picks JSON files directly."""
+    from .analyze import mode_compare
+
+    result = mode_compare.compare_picks_same_day(as_of)
+    md = mode_compare.format_picks_comparison(result)
+    click.echo(md)
+
+
+@cli.command("compare-picks-accountability")
+@click.option("--date", "as_of", required=True, help="YYYY-MM-DD: mode accountability for this day")
+def compare_picks_accountability_cmd(as_of: str) -> None:
+    """Show mode accountability: for each resolved pick, which modes selected it
+    and which avoided it. Reveals whether errors are shared (all modes) or
+    mode-specific (only LLM or only base)."""
+    from .analyze import mode_compare
+
+    result = mode_compare.mode_accountability(as_of)
+    md = mode_compare.format_mode_accountability(result)
+    click.echo(md)
+
+
 # ---------------------------- predict --------------------------------------
 
 

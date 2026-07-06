@@ -297,3 +297,300 @@ def format_report(result: dict) -> str:
                  "— this tells you which to *prefer*. Pooled edges from few days "
                  "are noisy; re-check as more picks evaluate.")
     return "\n".join(lines)
+
+
+def compare_picks_same_day(as_of: str | dt.date) -> dict:
+    """Compare the actual picks selected by different modes on the same day,
+    before any have resolved. Reads picks JSON files directly.
+
+    Returns a dict with ``as_of``, ``modes`` (dict mode→picks list), ``overlap``
+    (symbols picked by 2+ modes), and ``mode_rationales`` (LLM reasoning for each pick).
+    """
+    from pathlib import Path
+    import json
+
+    as_of_str = str(as_of)
+    if hasattr(as_of, "date"):
+        as_of_str = as_of.date().isoformat()
+
+    reports_dir = Path("reports")
+    pattern = f"picks*_{as_of_str}_*.json"
+    picks_files = sorted(reports_dir.glob(pattern))
+
+    if not picks_files:
+        return {"as_of": as_of_str, "note": f"no picks reports found for {as_of_str}"}
+
+    modes_data = {}
+    all_symbols = {}  # symbol → set of modes that picked it
+
+    for fpath in picks_files:
+        with open(fpath, encoding='utf-8') as f:
+            report = json.load(f)
+
+        mode = report.get("mode", "unknown")
+        picks = report.get("picks", [])
+
+        mode_picks = []
+        for pick in picks:
+            sym = pick.get("symbol")
+            if sym:
+                mode_picks.append({
+                    "symbol": sym,
+                    "score": pick.get("score"),
+                    "pred_profit": pick.get("pred_profit"),
+                    "pred_recovery_prob": pick.get("pred_recovery_prob"),
+                    "rationale": pick.get("rationale"),  # LLM modes only
+                    "dimensions_cited": pick.get("dimensions_cited"),  # LLM modes only
+                })
+                if sym not in all_symbols:
+                    all_symbols[sym] = set()
+                all_symbols[sym].add(mode)
+
+        modes_data[mode] = mode_picks
+
+    # Overlap: symbols picked by 2+ modes
+    overlap = {sym: sorted(list(modes)) for sym, modes in all_symbols.items() if len(modes) >= 2}
+
+    # Mode rationales: for each mode, show LLM reasoning if present
+    mode_rationales = {}
+    for mode, picks in modes_data.items():
+        rationales = {}
+        for pick in picks:
+            if pick.get("rationale") or pick.get("dimensions_cited"):
+                rationales[pick["symbol"]] = {
+                    "rationale": pick.get("rationale"),
+                    "dimensions_cited": pick.get("dimensions_cited"),
+                }
+        if rationales:
+            mode_rationales[mode] = rationales
+
+    return {
+        "as_of": as_of_str,
+        "modes": modes_data,
+        "overlap": overlap,
+        "mode_rationales": mode_rationales,
+    }
+
+
+def format_picks_comparison(result: dict) -> str:
+    """Render compare_picks_same_day() dict as a markdown report."""
+    lines = [f"# Same-day picks comparison — {result.get('as_of')}", ""]
+
+    if result.get("note"):
+        lines.append(f"_{result['note']}._")
+        return "\n".join(lines)
+
+    modes = result.get("modes", {})
+    if not modes:
+        lines.append("No modes found.")
+        return "\n".join(lines)
+
+    # Per-mode picks
+    lines.append("## Picks by mode")
+    lines.append("")
+    for mode in sorted(modes.keys()):
+        picks = modes[mode]
+        lines.append(f"### {_label(mode)}")
+        lines.append("")
+        if not picks:
+            lines.append("*(no picks)*")
+        else:
+            for pick in picks:
+                sym = pick["symbol"]
+                score = pick.get("score")
+                prob = pick.get("pred_recovery_prob")
+                profit = pick.get("pred_profit")
+                score_str = f"{score:.4f}" if score is not None else "n/a"
+                prob_str = f"{prob:.2%}" if prob is not None else "n/a"
+                profit_str = f"{profit:.2%}" if profit is not None else "n/a"
+                lines.append(f"- **{sym}**: score={score_str}, "
+                           f"recovery_prob={prob_str}, profit={profit_str}")
+        lines.append("")
+
+    # Overlap
+    overlap = result.get("overlap", {})
+    if overlap:
+        lines.append("## Overlap (picked by 2+ modes)")
+        lines.append("")
+        for sym in sorted(overlap.keys()):
+            mode_list = ", ".join(overlap[sym])
+            lines.append(f"- **{sym}**: {mode_list}")
+        lines.append("")
+
+    # LLM rationales
+    rationales = result.get("mode_rationales", {})
+    if rationales:
+        lines.append("## LLM rationales (claude/gemini/claude_llm only)")
+        lines.append("")
+        for mode in sorted(rationales.keys()):
+            if mode in ("base",):
+                continue  # base doesn't have rationales
+            lines.append(f"### {_label(mode)}")
+            lines.append("")
+            for sym, details in rationales[mode].items():
+                lines.append(f"**{sym}:**")
+                dims = details.get("dimensions_cited")
+                if dims:
+                    # Handle both comma-separated string and list
+                    if isinstance(dims, str):
+                        dims_str = dims
+                    else:
+                        dims_str = ", ".join(dims)
+                    lines.append(f"  Dimensions: {dims_str}")
+                if details.get("rationale"):
+                    lines.append(f"  Rationale: {details['rationale']}")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
+def mode_accountability(as_of: str | dt.date) -> dict:
+    """For each resolved pick on the day, show which modes selected it and which avoided it.
+    Reveals mode divergence: were the errors shared (all modes picked the knife) or
+    mode-specific (only LLM picked it, or only base picked it)?
+
+    Returns a dict with ``as_of``, ``picks_by_outcome`` (symbol → modes/avoided),
+    and a summary table for diagnosis.
+    """
+    as_of_str = str(as_of)
+    if hasattr(as_of, "date"):
+        as_of_str = as_of.date().isoformat()
+
+    # Read ledger to find which modes picked each ticker on this day
+    df = _read()
+    if df.empty:
+        return {"as_of": as_of_str, "note": "ledger is empty"}
+
+    df["as_of"] = pd.to_datetime(df["as_of"])
+    day = pd.Timestamp(as_of_str)
+    day_df = df[df["as_of"] == day].copy()
+
+    if day_df.empty:
+        return {"as_of": as_of_str, "note": f"no picks found on {as_of_str}"}
+
+    # Build map: symbol → set of modes that picked it (from ledger)
+    all_modes = {}  # symbol → set of modes
+    for _, row in day_df.iterrows():
+        sym = row["symbol"]
+        mode = row.get("mode", "unknown")
+        if sym not in all_modes:
+            all_modes[sym] = set()
+        all_modes[sym].add(mode)
+
+    # Filter to only evaluated picks for accountability
+    evaluated_df = day_df[day_df["evaluated"].fillna(False)]
+
+    if evaluated_df.empty:
+        return {"as_of": as_of_str, "note": f"no evaluated picks on {as_of_str}"}
+
+    # Build accountability table: for each resolved pick, show modes and outcome
+    picks_by_outcome = {}
+    for _, row in evaluated_df.iterrows():
+        sym = row["symbol"]
+        outcome = row.get("realized_return", 0)
+        recovered = row.get("recovered_flag", False)
+
+        picked_by = sorted(list(all_modes.get(sym, set())))
+        all_possible_modes = {"base", "claude", "claude_llm", "gemini"}
+        avoided_by = sorted(list(all_possible_modes - all_modes.get(sym, set())))
+
+        picks_by_outcome[sym] = {
+            "outcome": outcome,
+            "recovered": recovered,
+            "picked_by": picked_by,
+            "avoided_by": avoided_by,
+        }
+
+    return {
+        "as_of": as_of_str,
+        "picks_by_outcome": picks_by_outcome,
+    }
+
+
+def format_mode_accountability(result: dict) -> str:
+    """Render mode_accountability() dict as markdown. Shows which modes picked/avoided
+    each resolved ticker, to help diagnose whether errors were shared or mode-specific."""
+    lines = [f"# Mode accountability — {result.get('as_of')}", ""]
+
+    if result.get("note"):
+        lines.append(f"_{result['note']}._")
+        return "\n".join(lines)
+
+    picks = result.get("picks_by_outcome", {})
+    if not picks:
+        lines.append("No resolved picks.")
+        return "\n".join(lines)
+
+    # Group by outcome: winners (recovered) and losers (fell/underwater)
+    winners = {s: p for s, p in picks.items() if p["recovered"]}
+    losers = {s: p for s, p in picks.items() if not p["recovered"]}
+
+    if winners:
+        lines.append("## Winners (recovered)")
+        lines.append("")
+        lines.append("| Symbol | Outcome | Picked by | Avoided by |")
+        lines.append("|--------|---------|-----------|------------|")
+        for sym in sorted(winners.keys()):
+            p = winners[sym]
+            outcome_str = f"+{p['outcome']:.2%}" if p['outcome'] > 0 else f"{p['outcome']:.2%}"
+            picked = ", ".join(p["picked_by"]) if p["picked_by"] else "*(none)*"
+            avoided = ", ".join(p["avoided_by"]) if p["avoided_by"] else "*(none)*"
+            lines.append(f"| {sym} | {outcome_str} | {picked} | {avoided} |")
+        lines.append("")
+
+    if losers:
+        lines.append("## Losers (fell/no recovery)")
+        lines.append("")
+        lines.append("| Symbol | Outcome | Picked by | Avoided by |")
+        lines.append("|--------|---------|-----------|------------|")
+        for sym in sorted(losers.keys()):
+            p = losers[sym]
+            outcome_str = f"{p['outcome']:.2%}"
+            picked = ", ".join(p["picked_by"]) if p["picked_by"] else "*(none)*"
+            avoided = ", ".join(p["avoided_by"]) if p["avoided_by"] else "*(none)*"
+            lines.append(f"| {sym} | {outcome_str} | {picked} | {avoided} |")
+        lines.append("")
+
+    # Diagnostic summary
+    lines.append("## Diagnostic summary")
+    lines.append("")
+    all_picked = set()
+    all_avoided = set()
+    for p in picks.values():
+        all_picked.update(p["picked_by"])
+        all_avoided.update(p["avoided_by"])
+
+    lines.append(f"**Modes involved:** {', '.join(sorted(all_picked)) if all_picked else '(none)'}")
+    lines.append("")
+
+    # Analyze loss patterns
+    loss_patterns = {}
+    for sym, p in losers.items():
+        key = tuple(sorted(p["picked_by"]))
+        if key not in loss_patterns:
+            loss_patterns[key] = []
+        loss_patterns[key].append((sym, p["outcome"]))
+
+    if loss_patterns:
+        lines.append("**Loss patterns:**")
+        lines.append("")
+        for modes, syms in sorted(loss_patterns.items()):
+            if not modes:
+                diagnosis = "No modes picked this (data error?)"
+            elif set(modes) == {"base", "claude", "claude_llm", "gemini"} or \
+                 set(modes) == {"base", "claude", "claude_llm"}:
+                diagnosis = "All modes agreed → **shared ML model issue** (recovery-prob, P/N, filters)"
+            elif all(m in ("claude", "claude_llm", "gemini") for m in modes):
+                diagnosis = "Only LLM modes → **LLM vetting issue** (tighten claude_prompt.md)"
+            elif set(modes) == {"base"}:
+                diagnosis = "Only base → **base's distinctive picks are weak** (filters too loose)"
+            else:
+                diagnosis = "Mixed modes → mode-divergence signal"
+
+            symbols_str = ", ".join([s for s, _ in syms])
+            lines.append(f"- {diagnosis}")
+            lines.append(f"  Picked by: {', '.join(modes)}")
+            lines.append(f"  Symbols: {symbols_str}")
+        lines.append("")
+
+    return "\n".join(lines)
