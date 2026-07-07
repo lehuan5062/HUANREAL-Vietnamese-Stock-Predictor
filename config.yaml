@@ -56,7 +56,7 @@ strategy:
     # "Profitable point" = first future day whose close beats entry by
     # (round-trip cost + profit_margin). See pricing.profit_threshold().
     profit_margin: 0.005     # extra return above fees to call a day "profitable"
-    p_quantile: 0.5          # per-bucket P summary (0.5 = median recovered profit)
+    p_quantile: 0.65         # per-bucket P summary (0.65 = 65th percentile — slower, more realistic bounces)
     # Cap (trading days) on the historical recovery-labeling scan. NOT a trading
     # policy cap (the strategy holds until recovery) — it only bounds labeling so
     # it stays O(H) per symbol. Rows not recovered within it are right-censored.
@@ -71,7 +71,7 @@ strategy:
     # this screens out falling knives that would otherwise be held forever under
     # the no-stop / no-cap flexible exit. 0 disables. ~0.90 keeps only the most
     # reliable bouncers, reducing knife incidence at cost of lower pick count.
-    min_recovery_prob: 0.90
+    min_recovery_prob: 0.95
     # A candidate uses its OWN recovery history once it has at least this many
     # downtrend rows; thinner tickers fall back to the RSI x drawdown bucket,
     # then to the pooled all-downtrend estimate.
