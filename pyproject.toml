@@ -24,7 +24,7 @@ classifiers = [
     "Intended Audience :: Financial and Insurance Industry",
 ]
 dependencies = [
-    "vnstock>=4.0.2",
+    "vnstock>=4.0.4",
     "pandas>=2.2",
     "numpy>=1.26",
     "pyarrow>=15",
