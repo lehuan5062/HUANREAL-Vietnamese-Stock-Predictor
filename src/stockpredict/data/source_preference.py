@@ -93,3 +93,58 @@ def get_source_order(all_sources: Optional[list[str]] = None) -> list[str]:
 def reset_preferences() -> None:
     """Clear all source preference history."""
     _preference_file().unlink(missing_ok=True)
+
+
+def distribute_symbols_by_preference(symbols: list[str],
+                                      sources: list[str] | None = None) -> dict[str, list[str]]:
+    """Distribute symbols across sources weighted by historical success rates.
+
+    Returns a dict mapping each source to its assigned symbol list.
+    Sources with higher win-rates get more symbols. If no preference history exists,
+    distributes evenly.
+
+    Args:
+        symbols: List of ticker symbols to distribute
+        sources: List of sources (default: [VCI, KBS, MSN, TCBS])
+
+    Returns:
+        Dict mapping source name to list of assigned symbols
+    """
+    if sources is None:
+        sources = ["VCI", "KBS", "MSN", "TCBS"]
+
+    if not symbols:
+        return {src: [] for src in sources}
+
+    prefs = _load_preferences()
+
+    # Calculate weight for each source based on win-rate
+    def get_weight(src: str) -> float:
+        stats = prefs.get(src.upper(), {"success": 0, "failure": 0})
+        s = stats.get("success", 0)
+        f = stats.get("failure", 0)
+        if s + f == 0:
+            return 1.0  # neutral weight if no history
+        return s / (s + f)  # win-rate as weight
+
+    weights = {src: get_weight(src) for src in sources}
+    total_weight = sum(weights.values())
+
+    # Normalize weights and calculate target counts per source
+    distribution = {}
+    remaining_symbols = list(symbols)
+    random.shuffle(remaining_symbols)  # Randomize within each bucket to avoid bias
+
+    for i, src in enumerate(sources):
+        # Calculate target count for this source
+        if i == len(sources) - 1:
+            # Last source gets all remaining symbols (handles rounding)
+            target_count = len(remaining_symbols)
+        else:
+            # Proportional to normalized weight
+            target_count = int(len(symbols) * weights[src] / total_weight)
+
+        distribution[src] = remaining_symbols[:target_count]
+        remaining_symbols = remaining_symbols[target_count:]
+
+    return distribution

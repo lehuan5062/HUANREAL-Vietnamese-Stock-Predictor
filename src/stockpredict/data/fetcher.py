@@ -5,6 +5,7 @@ import collections
 import datetime as dt
 import logging
 import os
+import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -322,6 +323,67 @@ def audit_cache(symbols: Iterable[str],
     return warm, stale, cold
 
 
+def _fetch_symbols_for_source(source: str,
+                               assigned_queue: queue.Queue,
+                               shared_failures: queue.Queue,
+                               full: bool,
+                               cfg: dict,
+                               results: dict,
+                               lock: threading.Lock) -> None:
+    """Worker function: fetch symbols for a single source with retry + redistribution.
+
+    Processes symbols from assigned_queue. On failure, retries after 1 second.
+    If retry fails, moves symbol to shared_failures queue for load-balancing.
+    When assigned_queue is exhausted, pulls from shared_failures to stay active.
+
+    Args:
+        source: The source (VCI, KBS, MSN, TCBS) this worker handles
+        assigned_queue: Queue of initially assigned symbols for this source
+        shared_failures: Shared queue for failed symbols from all sources
+        full: Whether to do a full refetch
+        cfg: Config dict (unused but kept for consistency)
+        results: Shared dict to accumulate results (symbol -> delta or error)
+        lock: Lock for thread-safe result accumulation
+    """
+    from . import source_preference
+
+    while True:
+        # Try to get from assigned queue first (non-blocking)
+        try:
+            symbol = assigned_queue.get_nowait()
+        except queue.Empty:
+            # Try shared failures queue (for load-balancing)
+            try:
+                symbol = shared_failures.get_nowait()
+            except queue.Empty:
+                # Both queues empty — we're done
+                break
+
+        retry_count = 0
+        max_retries = 1
+        last_error = None
+
+        while retry_count <= max_retries:
+            try:
+                # Attempt fetch with only this source
+                delta = update_symbol(symbol, full=full, source_order=[source])
+                with lock:
+                    results[symbol] = delta
+                break  # Success, move to next symbol
+            except Exception as e:
+                last_error = e
+                retry_count += 1
+                if retry_count <= max_retries:
+                    # Sleep 1 second before retrying
+                    time.sleep(1.0)
+
+        if retry_count > max_retries:
+            # Final failure — track it and mark as failed (don't redistribute)
+            source_preference.track_source_failure(source)
+            with lock:
+                results[symbol] = f"ERR: {type(last_error).__name__}: {str(last_error)[:160]}"
+
+
 def update_symbol(symbol: str, full: bool = False,
                   source_order: list[str] | None = None) -> int:
     """Incremental update: fetch from cache_max_date+1 (or full history). Returns row delta.
@@ -377,17 +439,19 @@ def update_many(symbols: Iterable[str], full: bool = False,
                 source_order: list[str] | None = None) -> dict[str, int | str]:
     """Bulk-update OHLCV for many symbols. Returns delta or error per symbol.
 
-    Single-worker strategy: fetches symbols sequentially with a sticky source.
-    Determines source order once (from preference history or random), then cycles
-    through sources on failure. This avoids concurrent bursts that trigger 429s.
+    4-worker strategy: distributes symbols across 4 sources (VCI, KBS, MSN, TCBS)
+    based on historical success rates. Each worker fetches from its source only,
+    retrying failed symbols once after 1 second. Failed symbols are redistributed
+    to other workers for load-balancing.
 
     Internals:
       * If ``full=False`` (default), audits the cache and only fetches
         **stale** and **cold** tickers — warm ones get a zero-delta result
         without touching the network.
-      * Single worker: no ThreadPoolExecutor. Sequential loop respects rate
-        limiter's per-source pacing (1 req/sec).
-      * source_order: if None, loads/generates from preference file.
+      * 4-worker ThreadPoolExecutor: one worker per source, each respects the
+        per-source rate limiter (1 req/sec).
+      * Symbols are initially distributed by preference (higher win-rate sources
+        get more symbols). Failed symbols are redistributed among active workers.
 
     Fast path: if every selected symbol is already cached through the
     latest expected bar (e.g. running on a Saturday with cache through
@@ -400,9 +464,7 @@ def update_many(symbols: Iterable[str], full: bool = False,
     if not syms:
         return {}
 
-    # Generate/load source order once, reuse for all symbols
-    if source_order is None:
-        source_order = source_preference.get_source_order()
+    sources = ["VCI", "KBS", "MSN", "TCBS"]
 
     if full:
         # User asked for an unconditional re-fetch — every symbol gets a job.
@@ -415,11 +477,44 @@ def update_many(symbols: Iterable[str], full: bool = False,
         if not to_fetch:
             return results  # everything's current, no work to do
 
-    # Single-worker sequential loop (no ThreadPoolExecutor)
-    for sym in tqdm(to_fetch, desc="update", ncols=80):
-        try:
-            delta = update_symbol(sym, full=full, source_order=source_order)
-            results[sym] = delta
-        except Exception as e:
-            results[sym] = f"ERR: {type(e).__name__}: {str(e)[:160]}"
+    # Distribute symbols across 4 sources by win-rate
+    distribution = source_preference.distribute_symbols_by_preference(to_fetch, sources)
+
+    # Shared infrastructure for workers
+    lock = threading.Lock()
+    shared_failures: queue.Queue = queue.Queue()
+
+    # Create per-source assignment queues
+    assignment_queues = {}
+    for src in sources:
+        q: queue.Queue = queue.Queue()
+        for sym in distribution[src]:
+            q.put(sym)
+        assignment_queues[src] = q
+
+    # Launch 4 workers via ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {}
+        for src in sources:
+            future = executor.submit(
+                _fetch_symbols_for_source,
+                source=src,
+                assigned_queue=assignment_queues[src],
+                shared_failures=shared_failures,
+                full=full,
+                cfg=cfg,
+                results=results,
+                lock=lock
+            )
+            futures[src] = future
+
+        # Wait for all workers to complete
+        for src, future in futures.items():
+            try:
+                future.result()
+            except Exception as e:
+                logging.getLogger("stockpredict.fetcher").error(
+                    "Worker for source %s failed: %s", src, e
+                )
+
     return results
