@@ -508,7 +508,20 @@ def update_many(symbols: Iterable[str], full: bool = False,
             )
             futures[src] = future
 
-        # Wait for all workers to complete
+        # Wait for all workers to complete with progress bar
+        with tqdm(total=len(to_fetch), desc="update", ncols=80) as pbar:
+            last_count = 0
+            while len(results) < len(to_fetch):
+                current_count = len(results)
+                if current_count > last_count:
+                    pbar.update(current_count - last_count)
+                    last_count = current_count
+                time.sleep(0.1)  # Check progress every 100ms
+            # Final update for any remaining
+            if last_count < len(to_fetch):
+                pbar.update(len(to_fetch) - last_count)
+
+        # Check for worker exceptions
         for src, future in futures.items():
             try:
                 future.result()
