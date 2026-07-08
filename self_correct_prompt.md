@@ -317,6 +317,45 @@ Write the diagnosis + proposals to
 `reports\self_correction_<YYYY-MM-DD>_<sig>.md` (use the report's `as_of` /
 `run_signature`). Keep it lean: findings + proposed edits + applied tracking.
 
+### Step 6a — Check config-tuner search history (if available)
+
+`scripts/rebound_config_tuner.py` (run manually via `run_config_tuner.bat`)
+accumulates portfolio-level backtests over randomized
+`(train_window_years, oos_window_months, step_months, min_recovery_prob,
+p_quantile, profit_margin)` combinations. This is the ONLY evidence source
+that speaks to the backtest-window knobs at all (Step 5's per-pick diagnosis
+can't see them), and it's corroborating/conflicting evidence for
+`min_recovery_prob` / `p_quantile` / `profit_margin`.
+
+```
+.venv\Scripts\python.exe -c "import pandas as pd, json
+from pathlib import Path
+p = Path(r'reports\tuning\rebound_include_held_search.jsonl')
+if not p.exists():
+    print('No config-tuner history yet - skip this step.')
+else:
+    rows = [json.loads(l) for l in p.read_text(encoding='utf-8').splitlines() if l.strip()]
+    df = pd.json_normalize(rows, sep='.')
+    df = df.sort_values('result.annualized_IRR', ascending=False)
+    cols = ['config.train_window_years','config.oos_window_months','config.step_months',
+            'config.min_recovery_prob','config.p_quantile','config.profit_margin',
+            'result.annualized_IRR','result.book_max_drawdown','result.win_rate','result.total_trades']
+    print(f'{len(df)} trial(s) recorded.')
+    print(df[cols].head(10).to_string(index=False))
+"
+```
+
+- **Skip gracefully** if the file doesn't exist or has fewer than 5 rows —
+  say so in the report; too thin to act on.
+- **Each combination was tested exactly once** on one fixed historical window
+  (2024-01-02..present). A lone top scorer can be a lucky fit to that specific
+  window, not a robust improvement — prefer a combination where **several of
+  the top results cluster around similar values**, not a single outlier.
+- **Advisory only, same as the rest of this prompt** — don't copy the #1
+  trial's config verbatim into `config.yaml`; cross-check it against Step 5's
+  per-pick diagnosis (if Step 5 found an unrelated problem, e.g. falling
+  knives, tuner evidence about backtest windows doesn't override that).
+
 **Edit-target priority:**
 1. **`config.yaml`** — the primary lever:
    - `strategy.recovery.min_recovery_prob` (current 0.85) — the healthy filter.
@@ -324,7 +363,13 @@ Write the diagnosis + proposals to
    - `strategy.downtrend.*` — `mom20_max`, `high_prox_max`, `rsi_floor` (0=off),
      `rsi_ceil` — widen or tighten the candidate pool.
    - `strategy.recovery.state_buckets` / `p_quantile` / `min_ticker_obs` /
-     `min_bucket_obs` — the empirical estimator shape (Focus 2 and Focus 4; high bar).
+     `min_bucket_obs` / `profit_margin` — the empirical estimator shape
+     (Focus 2 and Focus 4; high bar). Cross-check `p_quantile` and
+     `profit_margin` proposals against Step 6a if search history exists.
+   - `backtest.train_window_years` / `oos_window_months` / `step_months` —
+     the walk-forward mechanics. Only Step 6a's search history can motivate
+     these; propose an edit here ONLY if it has ≥5 trials clustering around
+     a value that beats the current config's neighborhood.
    - `strategy.recovery.stop_loss_pct` (0 = off, the default) — the only exit
      override left. **Note the backtest finding: a price stop HURTS this
      mean-reversion strategy (it sells right before the bounce); off is
@@ -367,7 +412,9 @@ If a `config.yaml` knob that feeds the model was changed
 time and need no retrain.) Remind the user: one report ≠ a backtest — re-run
 self-correction on another report after more picks resolve before treating any
 change as confirmed. For a portfolio-level sanity check, they can re-run
-`scripts/rebound_portfolio_sim.py`.
+`scripts/rebound_portfolio_sim.py`. If a backtest-window or recovery-model
+knob was changed, also suggest running `run_config_tuner.bat` a few more
+times to keep building search evidence for Step 6a in future passes.
 
 ## What NOT to do
 
