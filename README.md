@@ -201,6 +201,34 @@ giờ") — it does NOT fill when the stock gaps up and never dips back, fills a
 the open when it opens at/below the limit, else at the limit. This is the
 **only** execution model they run (no lookahead/FOMO comparison built in).
 
+### Config tuning: brute-force search + analysis
+
+`run_config_tuner.bat` runs `scripts/rebound_config_tuner.py`: one shot per
+double-click, it picks a random combination of the walk-forward windows
+(`backtest.train_window_years` / `oos_window_months` / `step_months`) and
+recovery-model knobs (`strategy.recovery.min_recovery_prob` / `p_quantile` /
+`profit_margin`), temporarily writes it to `config.yaml`, rebuilds and runs
+`rebound_sim_include_held`, appends the `(config, result)` pair to
+`reports/tuning/rebound_include_held_search.jsonl` (gitignored), then
+**always restores the real `config.yaml`** — verified to hold even under a
+mid-run interrupt. Broker fees and the liquidity cap are deliberately
+excluded from the search: they're real fixed costs, not a strategy choice.
+Re-run it as many times as you want to accumulate trials.
+
+`run_config_suggest.bat` runs `scripts/rebound_config_suggest.py`: reads
+that accumulated JSONL and does a per-knob marginal analysis — since the
+tuner samples all 6 knobs independently and jointly on every trial, grouping
+(categorical knobs) or correlating (continuous knobs) one at a time against
+`annualized_IRR` is a legitimate signal, not just eyeballing the single best
+row. Prints a suggested config + caveats (single fixed backtest window,
+correlational not causal, small sample sizes) to the terminal. Purely
+read-only — no files written, `config.yaml` untouched. Needs at least 5
+trials to say anything.
+
+`self_correct_prompt.md` runs this suggest script as part of its own
+self-correction pass (Step 6a) as one input into its `config.yaml` edit
+proposals.
+
 ## Universe coverage, cache, and `--warm-only`
 
 Every run covers the **entire universe** (all of HOSE + HNX + UPCOM, ~1,760
