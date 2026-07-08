@@ -181,8 +181,14 @@ def _quote_history(symbol: str, src: str, start: str, end: str,
     (``q.provider``) and invoke its raw ``history.__wrapped__`` — skipping both
     the "API" and per-source quota layers. The body underneath is a plain
     ``requests`` call (``send_request`` -> ``send_request_direct``), so no
-    quota counter is ever touched. Falls back to the normal decorated call if
-    the internals shift in a future vnstock release."""
+    quota counter is ever touched.
+
+    On bypass failure, we RAISE instead of falling back to q.history() — the
+    metered path uses @optimize_execution (shared, thread-global loop counter).
+    With multiple workers, this triggers false "rate limit" errors and cascades
+    into wasteful backoff/retry logic. Instead, let fetch_history() catch this
+    as a normal per-source error and try the next source, without re-entering
+    the shared vnai loop-detector."""
     from vnstock import Quote
 
     q = Quote(symbol=symbol, source=src)
@@ -192,11 +198,12 @@ def _quote_history(symbol: str, src: str, start: str, end: str,
             raw = provider.history.__wrapped__
             return raw(provider, start=start, end=end, interval=interval)
         except (AttributeError, TypeError):
-            # vnstock internals changed — fall back to the metered path.
-            logging.getLogger("stockpredict.rate").warning(
-                "vnai bypass unavailable (vnstock internals changed); "
-                "falling back to metered Quote.history for %s/%s", src, symbol
+            # vnstock internals changed — raise to let fetch_history try next source
+            raise RuntimeError(
+                f"vnai bypass unavailable for {src}/{symbol} (vnstock internals changed); "
+                "will retry next source"
             )
+    # bypass_quota=False: fall back to metered path (not the default)
     return q.history(start=start, end=end, interval=interval)
 
 
@@ -464,16 +471,22 @@ def update_many(symbols: Iterable[str], full: bool = False,
     if not syms:
         return {}
 
-    sources = ["VCI", "KBS", "MSN", "TCBS"]
+    sources = ["VCI", "KBS"]
 
     if full:
         # User asked for an unconditional re-fetch — every symbol gets a job.
         to_fetch = syms
         results: dict[str, int | str] = {}
+        warm_count = 0
     else:
         warm, stale, cold = audit_cache(syms)
         results = {s: 0 for s in warm}
         to_fetch = stale + cold
+        # ``results`` is pre-seeded with the warm symbols so the return value
+        # reports a zero-delta for them. Those pre-seeded entries must NOT be
+        # counted as fetch progress below, or the bar leaps to warm/total on
+        # the first tick.
+        warm_count = len(warm)
         if not to_fetch:
             return results  # everything's current, no work to do
 
@@ -492,8 +505,10 @@ def update_many(symbols: Iterable[str], full: bool = False,
             q.put(sym)
         assignment_queues[src] = q
 
-    # Launch 4 workers via ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # Launch one worker per source via ThreadPoolExecutor.
+    # With only 2 viable sources (VCI, KBS), this prevents concurrent burst
+    # from hitting vnai's loop-detector threshold.
+    with ThreadPoolExecutor(max_workers=len(sources)) as executor:
         futures = {}
         for src in sources:
             future = executor.submit(
@@ -508,18 +523,23 @@ def update_many(symbols: Iterable[str], full: bool = False,
             )
             futures[src] = future
 
-        # Wait for all workers to complete with progress bar
+        # Wait for all workers to complete with progress bar. Progress is the
+        # number of *fetched* symbols (total results minus the pre-seeded warm
+        # ones), and we loop until the workers actually finish — not until a
+        # results-count threshold is crossed, which previously let the bar hit
+        # 100% while the executor was still churning through the tail.
         with tqdm(total=len(to_fetch), desc="update", ncols=80) as pbar:
             last_count = 0
-            while len(results) < len(to_fetch):
-                current_count = len(results)
+            while not all(f.done() for f in futures.values()):
+                current_count = len(results) - warm_count
                 if current_count > last_count:
                     pbar.update(current_count - last_count)
                     last_count = current_count
                 time.sleep(0.1)  # Check progress every 100ms
-            # Final update for any remaining
-            if last_count < len(to_fetch):
-                pbar.update(len(to_fetch) - last_count)
+            # Final flush once all workers have returned.
+            current_count = len(results) - warm_count
+            if current_count > last_count:
+                pbar.update(current_count - last_count)
 
         # Check for worker exceptions
         for src, future in futures.items():

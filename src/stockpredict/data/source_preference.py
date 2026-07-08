@@ -62,10 +62,10 @@ def get_source_order(all_sources: Optional[list[str]] = None) -> list[str]:
     """Return sources ordered by win-rate (success / (success + failure)).
 
     Ties broken randomly. If a source has no history, treat as neutral (0.5).
-    If all_sources is None, returns [VCI, KBS, MSN, TCBS] by default.
+    If all_sources is None, returns [VCI, KBS] by default (most reliable VN stock sources).
     """
     if all_sources is None:
-        all_sources = ["VCI", "KBS", "MSN", "TCBS"]
+        all_sources = ["VCI", "KBS"]
 
     prefs = _load_preferences()
 

@@ -630,7 +630,7 @@ def run_cmd(mode: str, n_picks: int | None,
         err = 0
     else:
         source_order = get_source_order()
-        click.echo(f"updating data (single worker, source order: {', '.join(source_order)})...")
+        click.echo(f"updating data ({len(source_order)} workers, one per source: {', '.join(source_order)})...")
         # warm_mode == "yes" → update_many internally audits and only
         # fetches stale + cold (lazy).
         # warm_mode == "no" → full=True forces re-fetch of every symbol.
