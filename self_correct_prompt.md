@@ -77,12 +77,33 @@ for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
         if pd.isna(r['pred_days']): continue
         checkpoint_date = _next_trading_offset(pd.Timestamp(r['as_of']), max(int(round(r['pred_days'])), 1))
         if today >= checkpoint_date: checkpoint += 1
-    print(os.path.basename(p), 'as_of=' + d['as_of'], 'mode=' + str(d.get('mode')), 'recovered=' + str(rec) + '/' + str(n), 'open=' + str(openn), 'checkpoint=' + str(checkpoint))"
+    # Sellability: T+2 settlement means shares bought at as_of's close can't be
+    # sold before as_of + 2 trading days. A 'recovered' exit dated earlier than
+    # that floor is not actually executable — resolve_exit() has no min-hold
+    # gate, so this can happen even on clean data (unlike the dedup bug this
+    # check was added for, which produced same-day/T+1 phantom exits).
+    unsellable = 0
+    recovered_rows = sub[sub['recovered_flag'].fillna(False)]
+    for _, r in recovered_rows.iterrows():
+        sellable_floor = _next_trading_offset(pd.Timestamp(r['as_of']), 2)
+        if pd.Timestamp(r['actual_exit_date']) < sellable_floor: unsellable += 1
+    print(os.path.basename(p), 'as_of=' + d['as_of'], 'mode=' + str(d.get('mode')), 'recovered=' + str(rec) + '/' + str(n), 'open=' + str(openn), 'checkpoint=' + str(checkpoint), 'unsellable=' + str(unsellable))"
 ```
 
+**If `unsellable > 0`**: at least one "recovered" pick exited before T+2 (the
+earliest a VN purchase can actually be sold). This is not real evidence of a
+bounce the user could have captured — exclude those specific picks from Step 3's
+resolved-pick evidence (treat them as still-open in practice) even though the
+ledger marks them `evaluated=True`. If it recurs across several reports, that's
+a mode-independent finding: `resolve_exit()` in `src/stockpredict/model/target.py`
+has no minimum-hold gate, unlike `scripts/rebound_final_sim.py`'s backtest which
+enforces T+2. Note it in the report as a possible source-code fix candidate
+(Step 6, edit-target priority 3) rather than a config edit — don't propose it
+silently, flag it and let the user decide whether to add the gate.
+
 Classify each report:
-- **Some/all `recovered` (evaluated=True)** → **ready to diagnose** (the more
-  resolved, the stronger the read).
+- **Some/all `recovered` (evaluated=True), and `unsellable == 0` for those** →
+  **ready to diagnose** (the more genuinely resolved, the stronger the read).
 - **`checkpoint > 0`** (some open picks have passed their `pred_days` date without
   recovering) → **checkpoint ready** — an intermediate diagnostic signal even though
   no pick has fully resolved. The model predicted a bounce by now and it hasn't

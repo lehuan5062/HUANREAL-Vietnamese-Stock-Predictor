@@ -46,6 +46,12 @@ def write_ohlcv(symbol: str, df: pd.DataFrame) -> None:
         if "date" in out.columns:
             out["date"] = pd.to_datetime(out["date"])
             out = out.set_index("date")
+    # Normalize to calendar date: some fetches stamp midnight, others stamp
+    # a mid-morning ICT time for the same trading day. Keeping both as
+    # distinct index values lets a same-day bar satisfy `index > as_of`
+    # (as_of normalized to midnight) in tracking.py's exit scan, producing
+    # phantom same-day "recoveries" that are impossible to actually trade.
+    out.index = out.index.normalize()
     out = out.sort_index()
     out = out[~out.index.duplicated(keep="last")]
     target = ohlcv_path(symbol)
