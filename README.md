@@ -176,20 +176,30 @@ are mildly optimistic.
 
 For a **realistic** money-weighted picture (real cash account, 100-share lots,
 liquidity caps, explicit buy+sell fees), see the portfolio simulators in
-[`scripts/`](scripts/): `rebound_portfolio_sim.py` (fixed rolling book) and
-`rebound_final_sim.py` (buy-daily / reinvest / T+2-min-hold / sell-at-first-profit,
-with unsold positions counted as losses so the win rate is honest).
-`rebound_final_sim.py` models the actual **execution**: the order is a pre-open
-limit at the signal close placed the next morning ("lệnh trước giờ") — it does
-NOT fill when the stock gaps up and never dips back (~19% of signals), fills at
-the open when it opens at/below the limit, else at the limit. It prints the
-realistic run alongside a **lookahead baseline** (unconditional fill at the
-signal close) and FOMO (chase the next open). The signal-close baseline is
-**not achievable** — the signal is computed from the day's close, which is only
-known after the market closes, so you can never trade at the very close you
-predicted on; it exists only to show how much the execution constraint costs.
-Missed fills on the real limit skew toward the best rebounds, so the realistic
-IRR is the true ceiling. The sell is still modeled at the recovery day's close.
+[`scripts/`](scripts/):
+
+- `rebound_portfolio_sim.py` — fixed rolling book (SEED_DAYS/SLOTS model).
+- `rebound_sim_include_held.py` — buy-daily / reinvest / T+2-min-hold /
+  sell-at-first-profit; buys the day's #1 pick **even if already held**
+  (can pyramid into a position). Unsold positions are counted as losses so
+  the win rate is honest.
+- `rebound_sim_exclude_held.py` — same rules, but the daily buy target is the
+  best-ranked pick **not already held** (currently-owned tickers are removed
+  from the candidate pool before ranking). Still buys every day unless every
+  candidate that day is already owned.
+- `rebound_sim_predicted_exit.py` — same buy side as `include_held`, but
+  exits on the model's *predicted* exit day/price instead of
+  sell-at-first-profit; a diagnostic for whether the model's day/price
+  predictions are any good on their own.
+- `compare_include_vs_exclude_held.py` — runs `include_held` and
+  `exclude_held` against the same data and writes a side-by-side comparison
+  to `reports/sim_outputs/` (gitignored).
+
+All three `rebound_sim_*` scripts model the actual **execution**: the order
+is a pre-open limit at the signal close placed the next morning ("lệnh trước
+giờ") — it does NOT fill when the stock gaps up and never dips back, fills at
+the open when it opens at/below the limit, else at the limit. This is the
+**only** execution model they run (no lookahead/FOMO comparison built in).
 
 ## Universe coverage, cache, and `--warm-only`
 
