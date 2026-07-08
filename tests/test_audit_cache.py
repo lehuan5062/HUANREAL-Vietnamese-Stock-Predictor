@@ -75,7 +75,7 @@ def test_update_many_only_spawns_threads_for_non_warm(monkeypatch):
     monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: cache.get(s, pd.DataFrame()))
 
     update_called: list[str] = []
-    def fake_update(s, full=False):
+    def fake_update(s, full=False, source_order=None):
         update_called.append(s)
         return 1
     monkeypatch.setattr(fetcher, "update_symbol", fake_update)
@@ -103,7 +103,7 @@ def test_update_many_full_flag_processes_everyone(monkeypatch):
     monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: cache.get(s, pd.DataFrame()))
 
     update_called: list[str] = []
-    def fake_update(s, full=False):
+    def fake_update(s, full=False, source_order=None):
         update_called.append(s)
         assert full is True
         return 0
@@ -111,3 +111,49 @@ def test_update_many_full_flag_processes_everyone(monkeypatch):
 
     fetcher.update_many(["A", "B"], full=True)
     assert sorted(update_called) == ["A", "B"]
+
+
+def test_shared_queue_falls_over_when_one_source_fails(monkeypatch):
+    """With no pre-distribution, if one source always fails every symbol is
+    still fetched via the other source (self-balancing shared queue)."""
+    import threading
+    monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: pd.DataFrame())
+    fetcher._LIMITERS.clear()
+
+    served_by = {}
+    served_lock = threading.Lock()
+
+    def fake_update(s, full=False, source_order=None):
+        src = (source_order or [None])[0]
+        if src == "VCI":
+            raise RuntimeError("simulated VCI outage")
+        with served_lock:
+            served_by[s] = src
+        return 1
+
+    monkeypatch.setattr(fetcher, "update_symbol", fake_update)
+
+    syms = [f"S{i}" for i in range(6)]
+    results = fetcher.update_many(syms, full=True)
+
+    assert all(results[s] == 1 for s in syms), f"all should succeed: {results}"
+    # Every symbol was ultimately served by the healthy source (KBS), never VCI.
+    assert set(served_by) == set(syms)
+    assert all(src == "KBS" for src in served_by.values()), served_by
+    fetcher._LIMITERS.clear()
+
+
+def test_shared_queue_marks_error_when_all_sources_fail(monkeypatch):
+    """A symbol every source fails is recorded as an ERR, and the batch
+    terminates (no infinite requeue loop)."""
+    monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: pd.DataFrame())
+    fetcher._LIMITERS.clear()
+
+    def fake_update(s, full=False, source_order=None):
+        raise RuntimeError("total outage")
+
+    monkeypatch.setattr(fetcher, "update_symbol", fake_update)
+
+    results = fetcher.update_many(["X", "Y"], full=True)
+    assert all(str(results[s]).startswith("ERR:") for s in ["X", "Y"]), results
+    fetcher._LIMITERS.clear()

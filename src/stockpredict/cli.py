@@ -223,7 +223,6 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
     """Refresh the OHLCV parquet cache from vnstock."""
     from .data.fetcher import update_many
     from .data.intro import introduce
-    from .data.source_preference import get_source_order
     from .data.universe import filter_exchanges, load_universe
 
     introduce()
@@ -247,9 +246,8 @@ def update_data(symbols: tuple[str, ...], full: bool, limit: int | None) -> None
                 seen.add(s.upper())
     if limit:
         syms = syms[:limit]
-    source_order = get_source_order()
     click.echo(f"Updating {len(syms)} symbols (full={full})...")
-    results = update_many(syms, full=full, source_order=source_order)
+    results = update_many(syms, full=full)
     ok = sum(1 for v in results.values() if isinstance(v, int))
     err = len(results) - ok
     click.echo(f"done. ok={ok} err={err}")
@@ -566,8 +564,7 @@ def run_cmd(mode: str, n_picks: int | None,
 
     # Quiet vnstock's noisy ERROR-level logger before bulk fetching — its
     # transient errors are already handled by our fallback + rate limiter.
-    from .data.fetcher import audit_cache, quiet_vnstock_logger
-    from .data.source_preference import get_source_order
+    from .data.fetcher import audit_cache, quiet_vnstock_logger, _VALID_SOURCES
     quiet_vnstock_logger()
     from .tracking import latest_expected_bar_date
     _expected_pre = latest_expected_bar_date()
@@ -629,12 +626,12 @@ def run_cmd(mode: str, n_picks: int | None,
         ok = len(results)
         err = 0
     else:
-        source_order = get_source_order()
-        click.echo(f"updating data ({len(source_order)} workers, one per source: {', '.join(source_order)})...")
+        click.echo(f"updating data ({len(_VALID_SOURCES)} workers, shared queue "
+                   f"across sources: {', '.join(_VALID_SOURCES)})...")
         # warm_mode == "yes" → update_many internally audits and only
         # fetches stale + cold (lazy).
         # warm_mode == "no" → full=True forces re-fetch of every symbol.
-        results = update_many(syms, full=(warm_mode == "no"), source_order=source_order)
+        results = update_many(syms, full=(warm_mode == "no"))
         ok = sum(1 for v in results.values() if isinstance(v, int))
         err = len(results) - ok
         # Re-audit AFTER the fetch so the user can see what actually persisted
@@ -799,7 +796,6 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
     explicit in the CLI surface.
     """
     from .data.fetcher import update_many
-    from .data.source_preference import get_source_order
     from .tracking import _read, evaluate_pending
 
     if refresh_data:
@@ -809,8 +805,7 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
             if pending_syms:
                 click.echo(f"refreshing data for {len(pending_syms)} symbols "
                            f"with un-stamped T+0 fills...")
-                source_order = get_source_order()
-                update_many(pending_syms, full=False, source_order=source_order)
+                update_many(pending_syms, full=False)
 
     updated = evaluate_pending()
     click.echo(f"newly stamped: {len(updated)}")
@@ -829,7 +824,6 @@ def evaluate_fills_cmd(refresh_data: bool) -> None:
 def evaluate_cmd(refresh_data: bool) -> None:
     """Score past predictions whose T+2 has now passed."""
     from .data.fetcher import update_many
-    from .data.source_preference import get_source_order
     from .tracking import _read, evaluate_pending, recent_performance
 
     if refresh_data:
@@ -838,8 +832,7 @@ def evaluate_cmd(refresh_data: bool) -> None:
             pending_syms = sorted(df[~df["evaluated"]]["symbol"].unique().tolist())
             if pending_syms:
                 click.echo(f"refreshing data for {len(pending_syms)} symbols...")
-                source_order = get_source_order()
-                update_many(pending_syms, full=False, source_order=source_order)
+                update_many(pending_syms, full=False)
 
     updated = evaluate_pending()
     click.echo(f"newly evaluated (T+0 limit-fill or T+N realized): {len(updated)}")

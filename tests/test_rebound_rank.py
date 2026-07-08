@@ -50,11 +50,11 @@ def _stub_predict(model, monkeypatch, mapping):
 def test_rebound_rank_scores_by_profit_per_day(monkeypatch):
     panel = _panel(["FAST", "MID", "SLOW"])
     model = _model(panel)
-    # All clear the recovery gate (prob 0.9); ordering is pure P/N:
-    # FAST 0.06/3=0.020, MID 0.03/3=0.010, SLOW 0.06/12=0.005.
+    # All clear the recovery gate (config min_recovery_prob=0.95); ordering
+    # is pure P/N: FAST 0.06/3=0.020, MID 0.03/3=0.010, SLOW 0.06/12=0.005.
     _stub_predict(model, monkeypatch, {
-        "FAST": (0.9, 3.0, 0.06), "MID": (0.9, 3.0, 0.03),
-        "SLOW": (0.9, 12.0, 0.06)})
+        "FAST": (0.96, 3.0, 0.06), "MID": (0.96, 3.0, 0.03),
+        "SLOW": (0.96, 12.0, 0.06)})
     monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
 
     out = predict_mod.rank_today(recovery_model=model, n_picks=3, panel=panel)

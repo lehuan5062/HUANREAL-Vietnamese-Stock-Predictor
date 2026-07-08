@@ -64,6 +64,13 @@ def write_ohlcv(symbol: str, df: pd.DataFrame) -> None:
 def merge_ohlcv(symbol: str, new: pd.DataFrame) -> pd.DataFrame:
     """Append new rows into the cached parquet, dedupe on date, return merged frame."""
     existing = read_ohlcv(symbol)
+    if new.empty:
+        # Nothing to add (e.g. a thin ticker with no matched trades in the
+        # fetched window) — skip the write and the concat entirely. concat
+        # with an empty/all-NA frame is a no-op here but triggers pandas'
+        # FutureWarning on every call, which spams the console across a
+        # large batch with many quiet tickers.
+        return existing
     if existing.empty:
         merged = new
     else:

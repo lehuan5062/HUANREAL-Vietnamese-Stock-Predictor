@@ -191,11 +191,16 @@ liquidity caps, explicit buy+sell fees), see the portfolio simulators in
   exits on the model's *predicted* exit day/price instead of
   sell-at-first-profit; a diagnostic for whether the model's day/price
   predictions are any good on their own.
+- `rebound_sim_hold_pred_days.py` — same buy side as `include_held`, but the
+  earliest sellable day is `max(T+2, pred_days)` from entry instead of a
+  flat T+2 — a minimum-hold gate (not a forced exit day) so an early
+  profitable close doesn't get taken before the model's own days-to-recovery
+  estimate has had time to play out.
 - `compare_include_vs_exclude_held.py` — runs `include_held` and
   `exclude_held` against the same data and writes a side-by-side comparison
   to `reports/sim_outputs/` (gitignored).
 
-All three `rebound_sim_*` scripts model the actual **execution**: the order
+All `rebound_sim_*` scripts model the actual **execution**: the order
 is a pre-open limit at the signal close placed the next morning ("lệnh trước
 giờ") — it does NOT fill when the stock gaps up and never dips back, fills at
 the open when it opens at/below the limit, else at the limit. This is the

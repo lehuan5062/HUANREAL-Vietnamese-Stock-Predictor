@@ -144,9 +144,12 @@ def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
                 mu = int(mu) if pd.notna(mu) else None
                 ed, ep, er = _exit_for(symbol, date, entry)
                 nxt_open, nxt_low = _next_bar(symbol, date)
+                pred_days = r.get("pred_days")
+                pred_days = float(pred_days) if pd.notna(pred_days) else None
                 cands.append({"symbol": symbol, "close": entry, "max_units": mu,
                               "next_open": nxt_open, "next_low": nxt_low,
-                              "exit_date": ed, "exit_price": ep, "exit_reason": er})
+                              "exit_date": ed, "exit_price": ep, "exit_reason": er,
+                              "pred_days": pred_days})
             per_day[pd.Timestamp(date)] = cands
     return per_day, paths
 

@@ -153,7 +153,7 @@ def test_update_symbol_caps_end_date_at_expected_bar(monkeypatch, fake_calendar)
     monkeypatch.setattr(fetcher, "set_watermark", lambda s, d: None)
 
     captured: dict = {}
-    def fake_fetch(symbol, start, end=None, source=None):
+    def fake_fetch(symbol, start, end=None, source_order=None):
         captured["start"] = start
         captured["end"] = end
         return pd.DataFrame({
@@ -189,7 +189,7 @@ def test_update_symbol_fetches_when_cache_stale(monkeypatch, fake_calendar):
     monkeypatch.setattr(fetcher, "set_watermark", lambda s, d: None)
 
     fetch_called = {"count": 0}
-    def fake_fetch(symbol, start, end=None, source=None):
+    def fake_fetch(symbol, start, end=None, source_order=None):
         fetch_called["count"] += 1
         return pd.DataFrame({
             "open": [10.2], "high": [10.6], "low": [10.1],
