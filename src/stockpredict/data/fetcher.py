@@ -331,40 +331,58 @@ def audit_cache(symbols: Iterable[str],
 
 
 def _fetch_symbols_for_source(source: str,
-                               assigned_queue: queue.Queue,
-                               shared_failures: queue.Queue,
+                               assignment_queues: dict[str, "queue.Queue"],
+                               tried: dict[str, set],
+                               tried_lock: threading.Lock,
                                full: bool,
                                cfg: dict,
                                results: dict,
-                               lock: threading.Lock) -> None:
-    """Worker function: fetch symbols for a single source with retry + redistribution.
+                               lock: threading.Lock,
+                               total_to_fetch: int) -> None:
+    """Worker function: fetch symbols for a single source, with cross-source fallback.
 
-    Processes symbols from assigned_queue. On failure, retries after 1 second.
-    If retry fails, moves symbol to shared_failures queue for load-balancing.
-    When assigned_queue is exhausted, pulls from shared_failures to stay active.
+    Processes symbols from this source's own queue. On failure (after 1
+    retry), if some other source hasn't been tried yet for this symbol, hands
+    it off directly onto that source's queue — so a real provider-side outage
+    or 429 on one source (e.g. VCI) doesn't permanently fail a symbol when
+    another source (e.g. KBS) could still serve it. Only marks a symbol as a
+    final failure once every source has been tried.
+
+    Terminates only once ``len(results)`` reaches ``total_to_fetch`` (all
+    symbols accounted for, one way or another) rather than when this worker's
+    own queue is momentarily empty — otherwise a worker could exit right
+    before another worker hands it a symbol, silently dropping it.
 
     Args:
-        source: The source (VCI, KBS, MSN, TCBS) this worker handles
-        assigned_queue: Queue of initially assigned symbols for this source
-        shared_failures: Shared queue for failed symbols from all sources
+        source: The source (VCI, KBS, ...) this worker handles
+        assignment_queues: All sources' queues, keyed by source name — used
+            both to pull this worker's own work and to hand off symbols this
+            source couldn't fetch to an untried source's queue
+        tried: Shared symbol -> set-of-sources-attempted map, so a symbol is
+            never handed to the same source twice
+        tried_lock: Lock guarding ``tried``
         full: Whether to do a full refetch
         cfg: Config dict (unused but kept for consistency)
         results: Shared dict to accumulate results (symbol -> delta or error)
         lock: Lock for thread-safe result accumulation
+        total_to_fetch: Final size ``results`` will reach once every symbol
+            (warm + fetched) is accounted for; used to detect true completion
+            instead of a transiently-empty queue
     """
     from . import source_preference
 
+    own_queue = assignment_queues[source]
     while True:
-        # Try to get from assigned queue first (non-blocking)
+        with lock:
+            if len(results) >= total_to_fetch:
+                return
         try:
-            symbol = assigned_queue.get_nowait()
+            symbol = own_queue.get(timeout=0.2)
         except queue.Empty:
-            # Try shared failures queue (for load-balancing)
-            try:
-                symbol = shared_failures.get_nowait()
-            except queue.Empty:
-                # Both queues empty — we're done
-                break
+            continue
+
+        with tried_lock:
+            tried.setdefault(symbol, set()).add(source)
 
         retry_count = 0
         max_retries = 1
@@ -385,10 +403,17 @@ def _fetch_symbols_for_source(source: str,
                     time.sleep(1.0)
 
         if retry_count > max_retries:
-            # Final failure — track it and mark as failed (don't redistribute)
             source_preference.track_source_failure(source)
-            with lock:
-                results[symbol] = f"ERR: {type(last_error).__name__}: {str(last_error)[:160]}"
+            with tried_lock:
+                untried = [s for s in assignment_queues if s not in tried[symbol]]
+            if untried:
+                # Another source hasn't had a shot at this symbol yet — hand
+                # it off instead of failing permanently on a single source's
+                # outage/429.
+                assignment_queues[untried[0]].put(symbol)
+            else:
+                with lock:
+                    results[symbol] = f"ERR: {type(last_error).__name__}: {str(last_error)[:160]}"
 
 
 def update_symbol(symbol: str, full: bool = False,
@@ -495,7 +520,8 @@ def update_many(symbols: Iterable[str], full: bool = False,
 
     # Shared infrastructure for workers
     lock = threading.Lock()
-    shared_failures: queue.Queue = queue.Queue()
+    tried: dict[str, set] = {}
+    tried_lock = threading.Lock()
 
     # Create per-source assignment queues
     assignment_queues = {}
@@ -507,19 +533,24 @@ def update_many(symbols: Iterable[str], full: bool = False,
 
     # Launch one worker per source via ThreadPoolExecutor.
     # With only 2 viable sources (VCI, KBS), this prevents concurrent burst
-    # from hitting vnai's loop-detector threshold.
+    # from hitting vnai's loop-detector threshold. A symbol that fails on its
+    # assigned source is handed off to an untried source's queue rather than
+    # failing permanently (see _fetch_symbols_for_source).
+    total_to_fetch = warm_count + len(to_fetch)
     with ThreadPoolExecutor(max_workers=len(sources)) as executor:
         futures = {}
         for src in sources:
             future = executor.submit(
                 _fetch_symbols_for_source,
                 source=src,
-                assigned_queue=assignment_queues[src],
-                shared_failures=shared_failures,
+                assignment_queues=assignment_queues,
+                tried=tried,
+                tried_lock=tried_lock,
                 full=full,
                 cfg=cfg,
                 results=results,
-                lock=lock
+                lock=lock,
+                total_to_fetch=total_to_fetch
             )
             futures[src] = future
 
