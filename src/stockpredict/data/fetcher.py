@@ -14,7 +14,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from ..config import load_config
-from .cache import get_watermark, merge_ohlcv, read_ohlcv, set_watermark
+from .cache import SuspectedCorporateActionArtifact, get_watermark, merge_ohlcv, read_ohlcv, set_watermark
 
 
 def _today_str() -> str:
@@ -141,16 +141,17 @@ _LIMITERS: dict[str, _RateLimiter] = {}
 _LIMITERS_LOCK = threading.Lock()
 
 # The vnstock sources that still serve VN stock OHLCV in the installed
-# version. TCBS was removed from the Quote module entirely. MSN was
-# temporarily dropped based on one bad transient test (0/3); a later retest
-# this session showed it working cleanly (3/3) — back in for now so its real
-# reliability can be observed across manual runs. Order is KBS, MSN, VCI per
-# user preference: the shared-queue worker pool is symmetric (FIFO, no
-# priority), so this order only controls (a) fetch_history's default
-# fallback-chain order on direct calls without an explicit source_order, and
-# (b) display order in the status bar / logs — NOT which worker gets to a
-# symbol first in update_many. Keep in sync with update_many().
-_VALID_SOURCES = ("KBS", "MSN", "VCI")
+# version. TCBS was removed from the Quote module entirely. MSN was removed
+# 2026-07-09: confirmed 3-for-3 on real corruption incidents this session
+# (ABB, USC, EMS) — MSN silently returns fabricated/wrong-instrument prices
+# for dates VCI and KBS both agree have no real data, with no error to
+# signal the row is bad. KBS/VCI never showed this failure mode. The
+# shared-queue worker pool is symmetric (FIFO, no priority), so this order
+# only controls (a) fetch_history's default fallback-chain order on direct
+# calls without an explicit source_order, and (b) display order in the
+# status bar / logs — NOT which worker gets to a symbol first in
+# update_many. Keep in sync with update_many().
+_VALID_SOURCES = ("KBS", "VCI")
 
 # When a source is backing off from a 429 by more than this many seconds, a
 # worker reroutes its queued symbols to a healthy source instead of blocking.
@@ -342,8 +343,8 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
         symbol: Ticker symbol
         start: Start date (YYYY-MM-DD)
         end: End date; defaults to today
-        source_order: List of sources to try in order (e.g., [VCI, KBS, MSN, TCBS]).
-                      Defaults to [VCI, KBS, MSN, TCBS].
+        source_order: List of sources to try in order (e.g., [VCI, KBS]).
+                      Defaults to _VALID_SOURCES.
 
     On any error (429, timeout, bad data), moves to the next source in the list.
     A genuine provider 429 permanently ratchets that source's persisted
@@ -669,7 +670,18 @@ def update_symbol(symbol: str, full: bool = False,
             return 0
     new = fetch_history(symbol, start=start, end=end_str, source_order=source_order)
     before = len(cached)
-    merged = merge_ohlcv(symbol, new)
+    try:
+        merged = merge_ohlcv(symbol, new, validate=not full)
+    except SuspectedCorporateActionArtifact as e:
+        if full:
+            # Already doing a full refetch (which replaces the whole history
+            # via merge_ohlcv's own concat + keep="last" dedup) and STILL hit
+            # an internal violation -- don't recurse forever, surface it.
+            raise
+        logging.getLogger("stockpredict.fetcher").warning(
+            "%s: %s -- forcing a full re-fetch to heal the cache", symbol, e
+        )
+        return update_symbol(symbol, full=True, source_order=source_order)
     # Stamp the watermark to the expected bar so a fetch returning empty
     # data (delisted, halted, broker has no newer bar) doesn't retrigger
     # next run. The watermark only blocks retries within the same expected-

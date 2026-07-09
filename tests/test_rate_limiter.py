@@ -279,7 +279,7 @@ def test_worker_does_not_double_increment_cooldown_for_a_confirmed_429(monkeypat
 
     fx.update_many(["HPG"], full=True)
 
-    for src in ("KBS", "MSN", "VCI"):
+    for src in ("KBS", "VCI"):
         cooldown = source_rate.get_persisted_cooldown(src, default=0.0)
         assert cooldown == 1.0, (
             f"{src} should show exactly the starting 1.0s cooldown after one "

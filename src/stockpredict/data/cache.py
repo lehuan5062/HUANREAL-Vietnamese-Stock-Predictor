@@ -8,6 +8,46 @@ import pandas as pd
 from ..config import cache_dir
 
 
+class SuspectedCorporateActionArtifact(Exception):
+    """Raised by merge_ohlcv when a new incrementally-fetched bar's 1-day
+    move against the last cached close exceeds the symbol's exchange band +
+    margin -- physically impossible for a normal trading day.
+
+    Root cause this guards against: the source (VCI/KBS) can retroactively
+    rewrite a symbol's historical closes after a corporate action (stock
+    dividend / rights issue) is processed server-side, but our incremental
+    fetch only ever appends new dates and never re-validates already-cached
+    ones. If an incremental fetch lands while a date is mid-rewrite, or the
+    two sides of a dividend adjustment straddle an append boundary, the
+    result is a bar that's an impossible jump/reversal against its neighbor
+    (confirmed live on ABB's 2026-07 cache: an exact 1.150x checkerboard
+    matching its 15% stock dividend ratio, sourced from a temporal mismatch,
+    not a same-moment cross-source disagreement -- both VCI and KBS agree
+    with each other on a fresh pull, disagreeing only with our stale cache).
+
+    Signals the caller (update_symbol) to force a full re-fetch rather than
+    write a row that would create or extend this kind of corruption."""
+
+
+def _corp_action_threshold(symbol: str) -> float:
+    """Per-symbol corporate-action threshold = that symbol's exchange price
+    band + margin. Mirrors filters.py's _row_band_threshold (same band +
+    _CORP_ACTION_MARGIN values) but as a scalar for one symbol instead of a
+    vectorized per-row Series -- this is the write-time counterpart of that
+    analysis-time check, applied here to prevent an impossible bar from ever
+    being cached rather than filtering it out after the fact."""
+    from ..filters import _CORP_ACTION_MARGIN, _ceiling_params
+    from .universe import load_universe
+
+    limits, _tol = _ceiling_params()
+    widest = max(limits.values()) if limits else 0.15
+    uni = load_universe()
+    ex_map = (dict(zip(uni["symbol"].astype(str), uni["exchange"]))
+              if uni is not None and len(uni) else {})
+    band = limits.get(ex_map.get(symbol.upper()), widest)
+    return band + _CORP_ACTION_MARGIN
+
+
 def ohlcv_dir() -> Path:
     d = cache_dir() / "ohlcv"
     d.mkdir(parents=True, exist_ok=True)
@@ -52,7 +92,20 @@ def write_ohlcv(symbol: str, df: pd.DataFrame) -> None:
     # (as_of normalized to midnight) in tracking.py's exit scan, producing
     # phantom same-day "recoveries" that are impossible to actually trade.
     out.index = out.index.normalize()
-    out = out.sort_index()
+    # kind="stable" is essential here, not cosmetic: merge_ohlcv's whole
+    # "new data overwrites stale existing data" contract (via concat +
+    # duplicated(keep="last") below) depends on ties preserving their
+    # ORIGINAL relative order -- existing's rows (concatenated first)
+    # must sort before new's rows (concatenated second) for the same
+    # date, so keep="last" picks new's fresher value. The default
+    # sort_index() kind is quicksort, which is NOT stable -- ties can
+    # land in either order, and duplicated(keep="last") would then pick
+    # whichever happened to sort last, sometimes the STALE existing row
+    # instead of the fresh new one. Confirmed live: a full re-fetch that
+    # should have overwritten ABB's corrupted 06-24/06-25 rows with clean
+    # VCI data left the stale corrupted values in place because quicksort
+    # put the fresh rows before the stale ones for those exact dates.
+    out = out.sort_index(kind="stable")
     out = out[~out.index.duplicated(keep="last")]
     target = ohlcv_path(symbol)
     tmp = target.with_suffix(target.suffix + ".tmp")
@@ -61,8 +114,54 @@ def write_ohlcv(symbol: str, df: pd.DataFrame) -> None:
     os.replace(tmp, target)
 
 
-def merge_ohlcv(symbol: str, new: pd.DataFrame) -> pd.DataFrame:
-    """Append new rows into the cached parquet, dedupe on date, return merged frame."""
+def _validate_no_impossible_move(symbol: str, closes: list[tuple], start_prev_close: float | None) -> None:
+    """Walk ``closes`` (a sequence of (label, close) pairs, in date order)
+    checking each consecutive pair's move against ``_corp_action_threshold``.
+    ``start_prev_close`` seeds the running previous close (None to start from
+    the first row with no prior comparison). Raises
+    SuspectedCorporateActionArtifact on the first violation."""
+    threshold = _corp_action_threshold(symbol)
+    prev_close = start_prev_close
+    for label, close in closes:
+        if prev_close is not None and prev_close > 0:
+            move = abs(close / prev_close - 1.0)
+            if move > threshold:
+                raise SuspectedCorporateActionArtifact(
+                    f"{symbol} {label}: {move:.1%} move vs prior close "
+                    f"{prev_close} exceeds {threshold:.1%} band+margin"
+                )
+        prev_close = close
+
+
+def merge_ohlcv(symbol: str, new: pd.DataFrame, validate: bool = True) -> pd.DataFrame:
+    """Append new rows into the cached parquet, dedupe on date, return merged frame.
+
+    ``validate`` (default True) gates a consecutive-close-move check across
+    the WHOLE combined series (existing's last close -> new's rows, in
+    order) against ``_corp_action_threshold``. Intended for the incremental
+    append path, where a single new day landing on top of trusted existing
+    history really shouldn't ever jump beyond the exchange band.
+
+    Full re-fetches (``full=True`` in update_symbol) pass ``validate=False``:
+    a full refetch is EXPECTED to jump past whatever (possibly stale/
+    corrupted) history was cached before, so gating on that boundary would
+    risk a false rejection on the very refetch meant to heal the cache.
+
+    IMPORTANT LIMITATION (deliberately accepted, not fixed): with
+    validate=False, a bad row from a flaky source sandwiched between good
+    neighbors WITHIN THE SAME fetch batch is NOT caught here (confirmed
+    live: MSN briefly returned ABB's close as ~1039 for one date while
+    VCI/KBS both agreed on ~15.8 for the same date). An earlier attempt to
+    ALSO validate internal batch consistency during full=True broke far
+    worse: it rejects ANY symbol whose real multi-year history contains a
+    genuine, permanent corporate-action jump (extremely common for VN
+    stocks), since a bare consecutive-move check can't distinguish "real
+    permanent level change" from "phantom row that will revert" without a
+    reversal-lookahead window — see scripts/repair_corporate_action_corruption.py
+    for that reversal-based distinction, applied there instead of here.
+    Mitigation for now: prefer a single trusted source (not a multi-source
+    fallback chain) for full re-fetches when healing a specific symbol.
+    """
     existing = read_ohlcv(symbol)
     if new.empty:
         # Nothing to add (e.g. a thin ticker with no matched trades in the
@@ -71,6 +170,14 @@ def merge_ohlcv(symbol: str, new: pd.DataFrame) -> pd.DataFrame:
         # FutureWarning on every call, which spams the console across a
         # large batch with many quiet tickers.
         return existing
+
+    if validate and not existing.empty:
+        new_sorted = new.sort_index()
+        closes = [(ts.date() if hasattr(ts, "date") else ts, float(c))
+                  for ts, c in new_sorted["close"].items()]
+        boundary_prev = float(existing["close"].iloc[-1])
+        _validate_no_impossible_move(symbol, closes, boundary_prev)
+
     if existing.empty:
         merged = new
     else:

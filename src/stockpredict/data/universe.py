@@ -92,8 +92,19 @@ def _normalize_type_value(value: object) -> str:
 
 def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
     """Pull the full ticker list via vnstock. Falls back across data sources.
-    Pass ``source`` to force a specific provider (e.g. 'VCI' to try to pick up
-    the ``exchange`` column when KBS is the configured default).
+
+    Default fallback order is VCI -> KBS. Pass ``source`` to force a
+    specific provider first instead — e.g. ``selector.py``'s hose_only logic
+    passes ``source="VCI"`` explicitly because it specifically needs the
+    ``exchange`` column, which KBS doesn't always return.
+
+    MSN was removed from this fallback chain 2026-07-09: confirmed 3-for-3
+    on real OHLCV corruption incidents this session (ABB, USC, EMS) via
+    fetch_history/Quote, silently returning fabricated/wrong-instrument
+    prices with no error. This function only calls Listing (ticker lists,
+    not prices), a different, unverified endpoint — but given MSN's
+    confirmed unreliability elsewhere, it's dropped here too rather than
+    trusted by default until proven otherwise.
 
     Prefers ``Listing.symbols_by_exchange()`` over ``all_symbols()`` because the
     former returns explicit ``exchange`` / ``type`` columns we use to drop
@@ -102,9 +113,11 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
     the pipeline writes picks for tickers the broker won't accept orders for.
 
     Also unions in the dedicated ETF listing from ``Listing.all_etf()`` (only
-    supported by the KBS source). ``all_symbols()`` returns common stocks
-    only — ETFs / fund certificates live on a separate endpoint and would be
-    invisible without this second call.
+    supported by the KBS source — VCI doesn't have this endpoint at all, so
+    ETF listing is always KBS regardless of the stock-list fallback order
+    above). ``all_symbols()`` returns common stocks only — ETFs / fund
+    certificates live on a separate endpoint and would be invisible without
+    this second call.
 
     Listing calls share the broker's per-IP rate window with Quote calls.
     We go through the global limiter so a fresh process doesn't burn its
@@ -113,13 +126,13 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
 
     from .fetcher import _limiter, _looks_like_rate_limit
 
-    cfg = load_config()
-    # Listing API only supports KBS / VCI / MSN per vnstock 4.x
-    if source and source.upper() in ("KBS", "VCI", "MSN"):
+    # Listing API only supports KBS / VCI per vnstock 4.x (MSN removed, see
+    # docstring above).
+    if source and source.upper() in ("KBS", "VCI"):
         pref = source.upper()
+        sources = [pref] + [s for s in ("VCI", "KBS") if s != pref]
     else:
-        pref = cfg.data["source"] if cfg.data["source"] in ("KBS", "VCI", "MSN") else "VCI"
-    sources = [pref] + [s for s in ("VCI", "KBS") if s != pref]
+        sources = ["VCI", "KBS"]
     last_err: Exception | None = None
     for src in sources:
         for attempt in range(retries):

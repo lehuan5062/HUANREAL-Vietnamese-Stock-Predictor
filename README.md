@@ -237,9 +237,29 @@ proposals.
 ## Universe coverage, cache, and `--warm-only`
 
 Every run covers the **entire universe** (all of HOSE + HNX + UPCOM, ~1,760
-tickers) with no time cap. The fetcher bypasses vnstock's 20/min guest quota and
-self-throttles to `data.api_per_min` (default 60). Expect ~30 minutes the first
-time; subsequent runs are near-instant because up-to-date tickers cost 0 API calls.
+tickers) with no time cap. OHLCV comes from **KBS and VCI** via vnstock, with
+cross-source failover on 429s. (MSN was dropped as a source: it silently
+returns fabricated / wrong-instrument prices for dates the other providers
+agree have no trading — confirmed on ABB, USC, and EMS.) The fetcher bypasses
+vnstock's 20/min guest quota and self-throttles to `data.api_per_min` (default
+60, per-source overrides in `data.api_per_min_overrides`). Expect ~30 minutes
+the first time; subsequent runs are near-instant because up-to-date tickers
+cost 0 API calls.
+
+Each genuine provider 429 permanently ratchets that source's calls/min down by
+1 (to `data.api_per_min_floor`) and grows its cooldown, persisted in
+`cache/source_rate.json`. Neither recovers on its own — **delete
+`cache/source_rate.json`** to reset every source to its configured starting
+rate.
+
+A write-time guard rejects any incrementally fetched bar whose move against
+the last cached close exceeds the exchange band + margin (physically
+impossible for a normal trading day) and heals the symbol with an automatic
+full re-fetch — this stops a bad provider bar from being frozen into the
+parquet cache. `scripts/repair_corporate_action_corruption.py` scans the
+existing cache for the phantom-spike signature (a jump beyond the band that
+reverts within days); treat it as a **diagnostic** — review its findings and
+heal symbols individually rather than letting it rewrite the whole cache.
 
 `--warm-only` is tri-state, default `yes`:
 
@@ -313,11 +333,12 @@ Optional API keys live in [`.env.example`](.env.example); copy to `.env`.
 .venv\Scripts\python -m pytest -q
 ```
 
-131 tests, all synthetic — no network. Coverage spans the downtrend filter,
+159 tests, all synthetic — no network. Coverage spans the downtrend filter,
 recovery targets + Kaplan-Meier estimator, P/N ranking + healthy gate, recovery
 pricing, the ledger + flexible-exit evaluator, the walk-forward backtest, the
-LLM-overlay finalize, the trading calendar, cache freshness + watermarks, and the
-rate limiter.
+LLM-overlay finalize, the trading calendar, cache freshness + watermarks, the
+rate limiter, the write-time corporate-action guard, and the phantom-spike
+cache-repair detector.
 
 ## Configuration
 
@@ -367,7 +388,7 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
     news/                  claude / claude-llm plan builders + gemini prompt/response
     modes/                 base / claude / gemini orchestrators
 
-  scripts/                 portfolio simulators (realistic money-weighted P&L)
+  scripts/                 portfolio simulators + one-off diagnostics (cache repair, config tuner)
   tests/                   pytest, synthetic data only
   cache/                   OHLCV parquet cache, predictions ledger
   models/                  saved recovery estimator (recovery_latest.pkl)

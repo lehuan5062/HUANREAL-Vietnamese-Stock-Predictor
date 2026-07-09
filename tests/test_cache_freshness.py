@@ -146,7 +146,7 @@ def test_update_symbol_caps_end_date_at_expected_bar(monkeypatch, fake_calendar)
         "close": [10.2], "volume": [1000],
     }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-23")], name="date"))
     monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: df)
-    monkeypatch.setattr(fetcher, "merge_ohlcv", lambda s, d: pd.concat([df, d]))
+    monkeypatch.setattr(fetcher, "merge_ohlcv", lambda s, d, validate=True: pd.concat([df, d]))
     # No prior watermark — otherwise a real-world watermark file from
     # earlier runs (dated to today) would short-circuit the fetch.
     monkeypatch.setattr(fetcher, "get_watermark", lambda s: None)
@@ -183,7 +183,7 @@ def test_update_symbol_fetches_when_cache_stale(monkeypatch, fake_calendar):
         "close": [10.2], "volume": [1000],
     }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-23")], name="date"))
     monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: df)
-    monkeypatch.setattr(fetcher, "merge_ohlcv", lambda s, d: pd.concat([df, d]))
+    monkeypatch.setattr(fetcher, "merge_ohlcv", lambda s, d, validate=True: pd.concat([df, d]))
     # No prior watermark — every test starts with a clean slate.
     monkeypatch.setattr(fetcher, "get_watermark", lambda s: None)
     monkeypatch.setattr(fetcher, "set_watermark", lambda s, d: None)
@@ -204,6 +204,73 @@ def test_update_symbol_fetches_when_cache_stale(monkeypatch, fake_calendar):
 
     assert fetch_called["count"] == 1, "expected fetch to fire when cache is stale"
     assert result == 1  # one new row
+
+
+def test_update_symbol_forces_full_refetch_on_corporate_action_rejection(monkeypatch, fake_calendar):
+    """When merge_ohlcv rejects an incremental append as a suspected
+    corporate-action artifact, update_symbol retries with full=True instead
+    of propagating the error, and returns the healed result."""
+    from stockpredict.data.cache import SuspectedCorporateActionArtifact
+
+    df = pd.DataFrame({
+        "open": [10.0], "high": [10.5], "low": [9.5],
+        "close": [10.2], "volume": [1000],
+    }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-23")], name="date"))
+    monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: df)
+    monkeypatch.setattr(fetcher, "get_watermark", lambda s: None)
+    monkeypatch.setattr(fetcher, "set_watermark", lambda s, d: None)
+
+    def fake_merge(symbol, new, validate=True):
+        if validate:
+            raise SuspectedCorporateActionArtifact("simulated checkerboard")
+        # full=True path (validate=False) succeeds, healing the cache.
+        return pd.concat([df, new])
+    monkeypatch.setattr(fetcher, "merge_ohlcv", fake_merge)
+
+    fetch_called = {"count": 0}
+    def fake_fetch(symbol, start, end=None, source_order=None):
+        fetch_called["count"] += 1
+        return pd.DataFrame({
+            "open": [10.2], "high": [10.6], "low": [10.1],
+            "close": [10.5], "volume": [2000],
+        }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-24")], name="date"))
+    monkeypatch.setattr(fetcher, "fetch_history", fake_fetch)
+
+    monkeypatch.setattr(tracking.dt, "datetime",
+                        _fixed_now(dt.datetime(2026, 4, 25, 11, 0)))
+    result = fetcher.update_symbol("FPT", full=False)
+
+    # First call (incremental, validate=True) rejected -> retried with
+    # full=True (validate=False) -> fetch_history called again for the retry.
+    assert fetch_called["count"] == 2
+    assert result == 1
+
+
+def test_update_symbol_full_refetch_still_corrupted_reraises(monkeypatch, fake_calendar):
+    """If even a full re-fetch (validate=False) still hits an internal
+    violation, update_symbol must NOT recurse forever -- it re-raises."""
+    from stockpredict.data.cache import SuspectedCorporateActionArtifact
+
+    df = pd.DataFrame({
+        "open": [10.0], "high": [10.5], "low": [9.5],
+        "close": [10.2], "volume": [1000],
+    }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-23")], name="date"))
+    monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: df)
+    monkeypatch.setattr(fetcher, "get_watermark", lambda s: None)
+    monkeypatch.setattr(fetcher, "set_watermark", lambda s, d: None)
+
+    def always_raise(symbol, new, validate=True):
+        raise SuspectedCorporateActionArtifact("still corrupted even on full refetch")
+    monkeypatch.setattr(fetcher, "merge_ohlcv", always_raise)
+    monkeypatch.setattr(fetcher, "fetch_history", lambda *a, **kw: pd.DataFrame({
+        "open": [10.2], "high": [10.6], "low": [10.1],
+        "close": [10.5], "volume": [2000],
+    }, index=pd.DatetimeIndex([pd.Timestamp("2026-04-24")], name="date")))
+
+    monkeypatch.setattr(tracking.dt, "datetime",
+                        _fixed_now(dt.datetime(2026, 4, 25, 11, 0)))
+    with pytest.raises(SuspectedCorporateActionArtifact):
+        fetcher.update_symbol("FPT", full=False)
 
 
 # ---------------------------------------------------------------------------
