@@ -15,9 +15,9 @@ data:
   # With the bypass on, vnstock's 20/min guest cap no longer applies, so this
   # is the only limit — set vs the providers' real servers.
   # 60/min matches vnstock's Community tier. Env override: STOCKPREDICT_API_PER_MIN=10
-  api_per_min: 60          # fixed calls/min ceiling for any source without an override
+  api_per_min: 59          # fixed calls/min ceiling for any source without an override
   api_per_min_overrides:   # per-source fixed rates
-    VCI: 30                # VCI 429s aggressively; keep it conservative
+    VCI: 40                # VCI 429s aggressively; keep it conservative
     KBS: 80                # KBS has been the most reliable source so far
   # Fixed per-source cooldown (seconds) applied after ANY fetch failure on
   # that source — a confirmed 429, or anything else (timeout, reset,
@@ -28,10 +28,10 @@ data:
   # publish a Retry-After header or documented cooldown period, so there's
   # no provider value to anchor to — pick values that keep you under their
   # (unpublished) limits in practice.
-  cooldown_seconds: 1          # default for any source without an override
+  cooldown_seconds: 61         # default for any source without an override
   cooldown_seconds_overrides:  # per-source fixed cooldowns
-    VCI: 1
-    KBS: 1
+    VCI: 61
+    KBS: 61
 
 universe:
   liquidity_filter:

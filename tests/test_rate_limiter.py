@@ -215,11 +215,20 @@ def test_worker_applies_the_fixed_cooldown_on_a_confirmed_429(monkeypatch):
         raise ConnectionError("Failed to fetch data: 429 - Too Many Requests")
     monkeypatch.setattr(fx, "_quote_history", fake_quote_history)
     monkeypatch.setattr(fx, "read_ohlcv", lambda s: __import__("pandas").DataFrame())
+
+    cooldown_seconds = 3.0
+
+    class _Cfg:
+        data = {
+            "api_per_min": 60, "api_per_min_overrides": {},
+            "cooldown_seconds": cooldown_seconds, "cooldown_seconds_overrides": {},
+            "bypass_vnai_quota": True, "history_start": "2018-01-01",
+        }
+    monkeypatch.setattr(fx, "load_config", lambda: _Cfg())
     fx._LIMITERS.clear()
 
     fx.update_many(["HPG"], full=True)
 
-    cooldown_seconds = float(fx.load_config().data.get("cooldown_seconds", 3.0))
     for src in ("KBS", "VCI"):
         remaining = fx._limiter(src).paused_remaining()
         assert 0.0 < remaining <= cooldown_seconds + 0.05, (

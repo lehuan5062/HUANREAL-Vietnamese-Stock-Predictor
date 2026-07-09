@@ -335,7 +335,7 @@ Optional API keys live in [`.env.example`](.env.example); copy to `.env`.
 .venv\Scripts\python -m pytest -q
 ```
 
-152 tests, all synthetic — no network. Coverage spans the downtrend filter,
+153 tests, all synthetic — no network. Coverage spans the downtrend filter,
 recovery targets + Kaplan-Meier estimator, P/N ranking + healthy gate, recovery
 pricing, the ledger + flexible-exit evaluator, the walk-forward backtest, the
 LLM-overlay finalize, the trading calendar, cache freshness + watermarks, the

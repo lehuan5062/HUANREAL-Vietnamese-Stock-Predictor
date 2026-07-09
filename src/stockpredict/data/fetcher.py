@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 import os
 import queue
 import threading
@@ -11,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
 import pandas as pd
-from tqdm import tqdm
 
 from ..config import load_config
 from .cache import SuspectedCorporateActionArtifact, get_watermark, merge_ohlcv, read_ohlcv, set_watermark
@@ -19,6 +19,24 @@ from .cache import SuspectedCorporateActionArtifact, get_watermark, merge_ohlcv,
 
 def _today_str() -> str:
     return dt.date.today().isoformat()
+
+
+# Plain, \n-terminated colored console lines for the update_many fetch loop.
+# Deliberately NOT using tqdm here: tqdm's redraw is a bare \r with no
+# trailing \n, which isn't coordinated with these lines at all -- a line
+# firing mid-redraw got silently appended onto the tail of the still-open
+# bar (confirmed live on a real .bat run). Every write below ends in \n, so
+# concurrent writes from the two worker threads can interleave in ORDER but
+# never corrupt a single line's CONTENT.
+_ANSI_COLORS = {
+    "green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m",
+    "orange": "\033[38;5;208m", "blue": "\033[34m",
+}
+_ANSI_RESET = "\033[0m"
+
+
+def _cprint(msg: str, color: str | None = None) -> None:
+    print(f"{_ANSI_COLORS[color]}{msg}{_ANSI_RESET}" if color else msg)
 
 
 class _RateLimiter:
@@ -68,15 +86,14 @@ class _RateLimiter:
 
     def pause(self, seconds: float, reason: str = "") -> None:
         """Force everyone to wait at least `seconds` more before the next call.
-        Stacks with prior pauses (takes the longer)."""
+        Stacks with prior pauses (takes the longer). Silent — callers own any
+        announcement (see ``_cprint`` call sites), since the right color/text
+        depends on context (429 vs. transient failure) this method doesn't
+        have."""
         with self.cond:
             until = time.monotonic() + max(0.0, float(seconds))
             if until > self.paused_until:
                 self.paused_until = until
-                if reason:
-                    logging.getLogger("stockpredict.rate").warning(
-                        "rate-limit pause %.1fs: %s", seconds, reason
-                    )
                 self.cond.notify_all()
 
     def cooldown(self, source: str, seconds: float, reason: str = "") -> None:
@@ -84,11 +101,9 @@ class _RateLimiter:
         transient). No rate adjustment and nothing persisted — the cap stays
         put; this only pauses the source for ``seconds`` so a struggling
         source doesn't hot-loop its failing endpoint. ``seconds`` comes from
-        ``config.yaml``'s ``data.cooldown_seconds`` and is fixed."""
+        ``config.yaml``'s ``data.cooldown_seconds``/``cooldown_seconds_overrides``
+        and is fixed. Silent (see ``pause``'s docstring)."""
         self.pause(seconds, reason=reason)
-        logging.getLogger("stockpredict.rate").warning(
-            "rate-limit: %s cooling down %.0fs: %s", source, seconds, reason
-        )
 
     def paused_remaining(self) -> float:
         """Seconds this source is still backing off (0.0 if not paused)."""
@@ -332,6 +347,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
         for interval in ("1D", "D"):  # vnstock 4 uses 1D, older uses D
             try:
                 _limiter(src).wait()
+                _cprint(f"{src} is fetching ...")
                 df = _quote_history(symbol, src, start, end, interval, bypass_quota)
                 if df is not None and len(df) > 0:
                     return _normalize_ohlcv(df)
@@ -346,10 +362,8 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                     # immediately (don't burn the other interval) — the caller
                     # hands it off to another source right away while the
                     # cooldown throttles the flood. The rate is not adjusted.
-                    _limiter(src).cooldown(
-                        src, _configured_cooldown_for(src, cfg),
-                        reason=f"{src} 429 on {symbol}"
-                    )
+                    _cprint(f"{src}: 429 hit fetching {symbol}", "orange")
+                    _limiter(src).cooldown(src, _configured_cooldown_for(src, cfg))
                     break
                 if _looks_like_empty_data(e):
                     # The provider raised "empty data" — it responded fine,
@@ -460,7 +474,8 @@ def _source_worker(source: str,
                    results: dict,
                    lock: threading.Lock,
                    total_to_fetch: int,
-                   status: dict | None = None,
+                   fetch_total: int = 0,
+                   fetched_counter: dict | None = None,
                    cooldown_seconds: float = 3.0) -> None:
     """One worker per source, all pulling from a single shared ``work`` queue.
 
@@ -472,7 +487,9 @@ def _source_worker(source: str,
     Cooldown handling: if this source is currently in its 429 cooldown, the
     worker does not grab new work (it would only have to wait) — it sleeps
     briefly and lets the other source drain the queue. That is what keeps the
-    two workers genuinely parallel instead of one stalling the batch.
+    two workers genuinely parallel instead of one stalling the batch. While
+    paused, this worker prints a blue countdown once per second (via the 0.2s
+    poll below, throttled to one line per integer-second change).
 
     Cross-source fallback: a symbol this source can't fetch is put back on the
     shared queue tagged (in ``tried``) so it won't be retried by the same
@@ -484,31 +501,31 @@ def _source_worker(source: str,
     accounted for), not when the queue is momentarily empty — otherwise a
     worker could exit just as another puts a symbol back.
 
-    ``status`` (optional) is a shared per-source dict the progress bar reads
-    to show what each worker is doing right now (current symbol + done count).
+    ``fetch_total``/``fetched_counter`` (shared across both workers) drive the
+    green "progress update: n/total" line on every successful write.
     """
     lim = _limiter(source)
-    mine = status.setdefault(source, {"sym": None, "done": 0}) if status is not None else None
+    last_cooldown_sec: int | None = None
     while True:
         with lock:
             if len(results) >= total_to_fetch:
-                if mine is not None:
-                    mine["sym"] = None
                 return
 
         # Don't hog work while cooling down from a 429 — let the other source
         # keep draining the shared queue.
-        if lim.paused_remaining() > _BACKOFF_REROUTE_THRESHOLD:
-            if mine is not None:
-                mine["sym"] = None
+        remaining = lim.paused_remaining()
+        if remaining > _BACKOFF_REROUTE_THRESHOLD:
+            sec = math.ceil(remaining)
+            if sec != last_cooldown_sec:
+                _cprint(f"{source} is cooling down: {sec}s", "blue")
+                last_cooldown_sec = sec
             time.sleep(0.2)
             continue
+        last_cooldown_sec = None
 
         try:
             symbol = work.get(timeout=0.2)
         except queue.Empty:
-            if mine is not None:
-                mine["sym"] = None
             continue
 
         with tried_lock:
@@ -531,47 +548,46 @@ def _source_worker(source: str,
             continue
 
         try:
-            if mine is not None:
-                mine["sym"] = symbol
             delta = update_symbol(symbol, full=full, source_order=[source])
             with lock:
                 results[symbol] = delta
-            if mine is not None:
-                mine["done"] += 1
-                mine["sym"] = None
+                if fetched_counter is not None:
+                    fetched_counter["n"] += 1
+                    done_count = fetched_counter["n"]
+                else:
+                    done_count = None
+            if done_count is not None:
+                _cprint(f"progress update: {done_count}/{fetch_total}", "green")
         except Exception as e:
             with tried_lock:
                 done_srcs = tried.setdefault(symbol, set())
                 done_srcs.add(source)
                 untried = [s for s in sources if s not in done_srcs]
-            # Make EVERY source's failure visible — not just VCI's 429s.
-            # fetch_history wraps EVERY failure (429 or otherwise) in a
-            # generic RuntimeError("Could not fetch ... from any source in
-            # [...]") before it reaches here, so _looks_like_rate_limit(e)
-            # can't distinguish them at this layer — always log. Previously
-            # only VCI's internal 429 line printed; a KBS (or any other)
-            # failure was silently requeued, making a struggling source look
-            # like it was "doing nothing" while progress stalled.
-            log = logging.getLogger("stockpredict.fetcher")
+            # Make EVERY source's failure visible — not just a 429. A confirmed
+            # 429 already got its own orange announcement inside fetch_history;
+            # this generic line still fires alongside it because fetch_history
+            # wraps EVERY failure (429 or otherwise) in a generic RuntimeError
+            # before it reaches here, so _looks_like_rate_limit(e) can't
+            # distinguish them at this layer (the original exception text is
+            # gone by this point).
             if untried:
-                log.warning("%s failed %s (%s) — requeuing for %s",
-                            source, symbol, type(e).__name__, "/".join(untried))
+                _cprint(f"{source} failed {symbol} ({type(e).__name__}) — "
+                        f"requeuing for {'/'.join(untried)}", "yellow")
             else:
-                log.warning("%s failed %s (%s) — all sources exhausted, giving up",
-                            source, symbol, type(e).__name__)
+                _cprint(f"{source} failed {symbol} ({type(e).__name__}) — "
+                        f"all sources exhausted, giving up", "red")
             # Defensive cooldown on ANY failure, not just a recognized 429.
             # A genuine 429 already applied its own (identical) fixed cooldown
             # from inside fetch_history — re-applying here would be redundant
-            # (pause() takes the max of equal values, so harmless, but it
-            # double-logs). We can't tell from the exception text (fetch_history
-            # wraps every failure in the same generic RuntimeError regardless
-            # of cause), so instead check whether the limiter is ALREADY
-            # paused: a confirmed 429 always leaves it paused; if it's NOT
-            # paused, fetch_history never applied a cooldown for this attempt,
-            # so this failure was something else and needs its own here.
+            # (pause() takes the max of equal values, so harmless). We can't
+            # tell from the exception text (fetch_history wraps every failure
+            # in the same generic RuntimeError regardless of cause), so
+            # instead check whether the limiter is ALREADY paused: a confirmed
+            # 429 always leaves it paused; if it's NOT paused, fetch_history
+            # never applied a cooldown for this attempt, so this failure was
+            # something else and needs its own here.
             if lim.paused_remaining() <= _JUST_COOLED_EPSILON:
-                lim.cooldown(source, cooldown_seconds,
-                             reason=f"{source} error on {symbol}: {type(e).__name__}")
+                lim.cooldown(source, cooldown_seconds)
             if untried:
                 # Another source hasn't had a shot yet — requeue so it can try.
                 work.put(symbol)
@@ -693,29 +709,11 @@ def update_many(symbols: Iterable[str], full: bool = False,
     lock = threading.Lock()
     tried: dict[str, set] = {}
     tried_lock = threading.Lock()
-    # Per-source live status the progress bar renders: current symbol + done
-    # count per worker, so the user can see e.g. KBS still fetching while VCI
-    # sits in a 429 cooldown (instead of the bar looking stalled).
-    status: dict[str, dict] = {src: {"sym": None, "done": 0} for src in sources}
-
-    def _status_line() -> str:
-        parts = []
-        for src in sources:
-            st = status[src]
-            cooling = _limiter(src).paused_remaining()
-            if cooling > _BACKOFF_REROUTE_THRESHOLD:
-                state = f"cool {cooling:.0f}s"
-            elif st["sym"]:
-                state = str(st["sym"])
-            else:
-                state = "idle"
-            parts.append(f"{src}:{state}({st['done']})")
-        line = " ".join(parts)
-        # Hard cap: with ncols=78 (see below), a postfix longer than ~30
-        # chars can push the WHOLE rendered line past 78 on its own (tqdm can
-        # only shrink the bar fill, not the postfix text), re-triggering the
-        # same wrap-then-stack bug this cap exists to prevent.
-        return line if len(line) <= 30 else line[:27] + "..."
+    # Shared across both workers: drives the green "progress update: n/total"
+    # line on every successful write. Kept separate from `results` (which is
+    # pre-seeded with warm symbols) so it counts only actual fetch work.
+    fetch_total = len(to_fetch)
+    fetched_counter = {"n": 0}
 
     total_to_fetch = warm_count + len(to_fetch)
     with ThreadPoolExecutor(max_workers=len(sources)) as executor:
@@ -732,55 +730,19 @@ def update_many(symbols: Iterable[str], full: bool = False,
                 results=results,
                 lock=lock,
                 total_to_fetch=total_to_fetch,
-                status=status,
+                fetch_total=fetch_total,
+                fetched_counter=fetched_counter,
                 cooldown_seconds=_configured_cooldown_for(src, _cfg)
             )
             futures[src] = future
 
-        # Wait for all workers to complete with progress bar. Progress is the
-        # number of *fetched* symbols (total results minus the pre-seeded warm
-        # ones), and we loop until the workers actually finish — not until a
-        # results-count threshold is crossed, which previously let the bar hit
-        # 100% while the executor was still churning through the tail. The
-        # postfix shows each worker's live state (current symbol / cooldown
-        # countdown / idle, plus its done count).
-        # Fixed ncols (not dynamic_ncols): the postfix carries a live per-
-        # source status string that pushes the rendered line past 80 columns
-        # on a legacy Windows conhost window (the common case when a .bat is
-        # double-clicked, default 80-wide). tqdm's redraw is a bare `\r`,
-        # which only rewinds to the start of the current WRAPPED row, not the
-        # true start of a line that wrapped onto two rows -- so once the line
-        # is too wide, every update leaves the old row's remnants on screen
-        # and appends a new one below instead of overwriting in place
-        # (confirmed live: a staircase of dozens of stale progress lines).
-        # Capping ncols=78 keeps the whole rendered line under 80 columns.
-        with tqdm(total=len(to_fetch), desc="update", ncols=78) as pbar:
-            last_count = 0
-            last_status = ""
-            while not all(f.done() for f in futures.values()):
-                current_count = len(results) - warm_count
-                line = _status_line()
-                if current_count > last_count or line != last_status:
-                    if current_count > last_count:
-                        pbar.update(current_count - last_count)
-                        last_count = current_count
-                    if line != last_status:
-                        pbar.set_postfix_str(line)
-                        last_status = line
-                time.sleep(0.1)  # Check progress every 100ms
-            # Final flush once all workers have returned.
-            current_count = len(results) - warm_count
-            if current_count > last_count:
-                pbar.update(current_count - last_count)
-            pbar.set_postfix_str(_status_line())
-
-        # Check for worker exceptions
+        # Block until every worker finishes and surface any worker-thread
+        # crash. Progress itself is now plain lines printed by _source_worker
+        # as it goes (no bar/postfix to drive here).
         for src, future in futures.items():
             try:
                 future.result()
             except Exception as e:
-                logging.getLogger("stockpredict.fetcher").error(
-                    "Worker for source %s failed: %s", src, e
-                )
+                _cprint(f"worker for source {src} failed: {e}", "red")
 
     return results
