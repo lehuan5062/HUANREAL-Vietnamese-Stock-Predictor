@@ -5,20 +5,12 @@ import time
 import pytest
 
 import stockpredict.data.fetcher as fetcher
-import stockpredict.data.source_rate as source_rate
 from stockpredict.data.fetcher import (
     _RateLimiter,
     _limiter,
     _looks_like_rate_limit,
     _RATE_LIMIT_ERROR_TOKENS,
 )
-
-
-@pytest.fixture
-def isolated_rate_file(tmp_path, monkeypatch):
-    """Redirect source_rate's persisted-rate file to a scratch path per test."""
-    monkeypatch.setattr(source_rate, "_rate_file", lambda: tmp_path / "source_rate.json")
-    yield tmp_path
 
 
 def test_even_pacing_spaces_calls_by_min_interval():
@@ -39,14 +31,6 @@ def test_even_pacing_spaces_calls_by_min_interval():
     gaps = [stamps[i] - stamps[i - 1] for i in range(1, len(stamps))]
     for g in gaps:
         assert 0.15 <= g <= 0.35, f"consecutive calls should be ~0.2s apart; gap was {g:.2f}s"
-
-
-def test_reduce_cap_widens_the_interval():
-    """Ratcheting the cap down lengthens the enforced spacing immediately."""
-    lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    assert abs(lim.min_interval - 1.0) < 1e-9  # 60/60 = 1.0s
-    lim.reduce_cap(30)
-    assert abs(lim.min_interval - 2.0) < 1e-9  # 60/30 = 2.0s
 
 
 def test_pause_blocks_subsequent_callers():
@@ -166,109 +150,65 @@ def test_fetch_history_returns_empty_not_error_on_empty_data(monkeypatch):
     fx._LIMITERS.clear()
 
 
-# --- Adaptive per-source rate ratchet (persisted cross-session) ---
+# --- Fixed per-source cooldown (no ratchet, nothing persisted) ---
 
-def test_ratchet_down_decrements_by_one_and_persists(isolated_rate_file):
-    """Three consecutive 429s step 60 -> 59 -> 58 -> 57, saved to disk each time."""
-    rates = [source_rate.ratchet_down("VCI", floor=30, default=60) for _ in range(3)]
-    assert rates == [59, 58, 57]
-    assert source_rate.get_persisted_rate("VCI", default=60) == 57
-
-
-def test_ratchet_down_respects_floor(isolated_rate_file):
-    """A source already at the floor never goes lower."""
-    source_rate._save_rates({"VCI": {"calls_per_min": 30}})
-    new_rate = source_rate.ratchet_down("VCI", floor=30, default=60)
-    assert new_rate == 30
-
-
-def test_limiter_seeds_from_persisted_rate_across_fresh_process(isolated_rate_file):
-    """A fresh _limiter() build picks up the persisted (reduced) rate, not the config default."""
-    source_rate.ratchet_down("VCI", floor=30, default=60)  # -> 59
-    source_rate.ratchet_down("VCI", floor=30, default=60)  # -> 58
-
-    fetcher._LIMITERS.clear()  # simulate a fresh process: no in-memory limiter yet
-    lim = fetcher._RateLimiter(
-        calls_per_min=source_rate.get_persisted_rate("VCI", default=60)
-    )
-    assert lim.cap == 58, "new limiter must seed from the persisted rate, not the config ceiling"
-
-
-def test_ratchet_down_and_cooldown_applies_cap_and_starting_cooldown(isolated_rate_file):
-    """ratchet_down_and_cooldown reduces the live cap AND applies the
-    starting cooldown on this source's first-ever 429."""
+def test_cooldown_applies_fixed_pause_and_leaves_cap_untouched():
+    """cooldown() pauses the source for the fixed seconds and never changes
+    the rate cap — the rate is config-driven and fixed for the process."""
     lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    new_rate, new_cooldown = lim.ratchet_down_and_cooldown(
-        "VCI", floor=30, default=60, cooldown_start=1.0, cooldown_step=1.0, reason="test 429"
-    )
-    assert new_rate == 59
-    assert lim.cap == 59, "live limiter cap must update immediately, not just the persisted file"
-    assert new_cooldown == 1.0, "first-ever cooldown for a source should be cooldown_start"
+    lim.cooldown("VCI", 3.0, reason="test 429")
+    assert lim.cap == 60, "cooldown must not change the rate cap"
     remaining = lim.paused_remaining()
-    assert 0.5 <= remaining <= 1.0, f"cooldown should be ~1s on the first 429; got {remaining:.1f}s"
+    assert 2.5 <= remaining <= 3.0, f"cooldown should pause ~3s; got {remaining:.1f}s"
 
 
-def test_ratchet_down_and_cooldown_grows_by_step_each_time(isolated_rate_file):
-    """Repeated 429s on the SAME source grow its cooldown by cooldown_step
-    each time (1s, 2s, 3s, ...) — not flat, not exponential."""
+def test_cooldown_is_flat_not_growing():
+    """Repeated cooldowns on the SAME source apply the SAME fixed value every
+    time — no growth, no accumulation (the whole point of going manual)."""
     lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    cooldowns = []
+    applied = []
     for _ in range(3):
-        # Force the limiter's own pause to have already elapsed so we can
-        # observe each call's fresh cooldown length via paused_remaining().
-        lim.paused_until = 0.0
-        _, new_cooldown = lim.ratchet_down_and_cooldown(
-            "VCI", floor=10, default=60, cooldown_start=1.0, cooldown_step=1.0, reason="test 429"
-        )
-        cooldowns.append(new_cooldown)
-    assert cooldowns == [1.0, 2.0, 3.0], f"cooldown should grow by 1s each call; got {cooldowns}"
-
-
-def test_ratchet_down_and_cooldown_respects_configured_start_and_step(isolated_rate_file):
-    """cooldown_start/cooldown_step are real, honored parameters — not hardcoded."""
-    lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    _, new_cooldown = lim.ratchet_down_and_cooldown(
-        "VCI", floor=30, default=60, cooldown_start=5.0, cooldown_step=2.0, reason="test 429"
+        lim.paused_until = 0.0  # clear the prior pause so we can measure afresh
+        lim.cooldown("VCI", 3.0, reason="test 429")
+        applied.append(round(lim.paused_remaining(), 1))
+    assert all(2.5 <= a <= 3.0 for a in applied), (
+        f"every cooldown should be the same fixed ~3s, never growing; got {applied}"
     )
-    assert new_cooldown == 5.0
-    remaining = lim.paused_remaining()
-    assert 4.5 <= remaining <= 5.0, f"cooldown should honor the 5s start; got {remaining:.1f}s"
 
 
-def test_cooldown_persists_across_fresh_process_and_continues_growing(isolated_rate_file):
-    """A fresh process's first cooldown for a source picks up the
-    accumulated value, not cooldown_start — growth continues, doesn't reset."""
-    source_rate.increment_cooldown("VCI", step=1.0, start=1.0)  # -> 1
-    source_rate.increment_cooldown("VCI", step=1.0, start=1.0)  # -> 2
-    assert source_rate.get_persisted_cooldown("VCI", default=1.0) == 2.0
+def test_configured_cooldown_for_uses_per_source_override():
+    """cooldown_seconds_overrides[source] wins over the global default —
+    mirrors _configured_rate_for's override precedence."""
+    from stockpredict.data.fetcher import _configured_cooldown_for
 
-    # Simulate a fresh process: new limiter, but the SAME persisted file.
-    lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    _, new_cooldown = lim.ratchet_down_and_cooldown(
-        "VCI", floor=10, default=60, cooldown_start=1.0, cooldown_step=1.0, reason="test 429"
+    class _Cfg:
+        data = {
+            "cooldown_seconds": 3.0,
+            "cooldown_seconds_overrides": {"VCI": 5.0},
+        }
+    assert _configured_cooldown_for("VCI", _Cfg()) == 5.0
+    assert _configured_cooldown_for("KBS", _Cfg()) == 3.0, (
+        "a source with no override should fall back to the global default"
     )
-    assert new_cooldown == 3.0, "must continue from the persisted 2s, not restart at 1s"
 
 
-def test_cooldown_only_does_not_touch_rate(isolated_rate_file):
-    """A non-429 failure grows the cooldown but must NOT ratchet the rate."""
-    lim = _RateLimiter(calls_per_min=60, window_seconds=60.0)
-    new_cooldown = lim.cooldown_only("VCI", cooldown_start=1.0, cooldown_step=1.0, reason="timeout")
-    assert new_cooldown == 1.0
-    assert lim.cap == 60, "cooldown_only must not reduce the live rate cap"
-    assert source_rate.get_persisted_rate("VCI", default=60) == 60, \
-        "cooldown_only must not touch the persisted rate"
+def test_limiter_uses_configured_rate_not_persisted(monkeypatch):
+    """A fresh _limiter() build takes the configured rate every time — there
+    is no persisted state to seed a reduced rate from anymore."""
+    class _Cfg:
+        data = {"api_per_min": 60, "api_per_min_overrides": {"VCI": 20}}
+    monkeypatch.setattr(fetcher, "load_config", lambda: _Cfg())
+    fetcher._LIMITERS.clear()
+    lim = _limiter("VCI")
+    assert lim.cap == 20, "limiter must use the fixed configured rate"
+    fetcher._LIMITERS.clear()
 
 
-def test_worker_does_not_double_increment_cooldown_for_a_confirmed_429(monkeypatch, isolated_rate_file):
-    """Regression test: fetch_history's own ratchet_down_and_cooldown already
-    applies+increments the cooldown for a confirmed 429. _source_worker's
-    generic except-block cooldown must NOT increment it AGAIN for the same
-    failure — that previously happened because the "was this already cooled
-    down" check reused _BACKOFF_REROUTE_THRESHOLD (1.0s), which collided with
-    cooldown_start_seconds also defaulting to 1.0s: right after the first-ever
-    1.0s cooldown, paused_remaining() is ~1.0s, which satisfied the buggy
-    "<= 1.0" check and made the worker think nothing had been applied yet."""
+def test_worker_applies_the_fixed_cooldown_on_a_confirmed_429(monkeypatch):
+    """After a confirmed 429 on every source, each source ends up paused by
+    the fixed cooldown — applied once, never stacked (pause takes the max of
+    equal values, so even the belt-and-suspenders worker call can't inflate
+    it beyond the configured seconds)."""
     import stockpredict.data.fetcher as fx
 
     def fake_quote_history(symbol, src, start, end, interval, bypass):
@@ -279,22 +219,11 @@ def test_worker_does_not_double_increment_cooldown_for_a_confirmed_429(monkeypat
 
     fx.update_many(["HPG"], full=True)
 
+    cooldown_seconds = float(fx.load_config().data.get("cooldown_seconds", 3.0))
     for src in ("KBS", "VCI"):
-        cooldown = source_rate.get_persisted_cooldown(src, default=0.0)
-        assert cooldown == 1.0, (
-            f"{src} should show exactly the starting 1.0s cooldown after one "
-            f"429, not a double-incremented value; got {cooldown}"
+        remaining = fx._limiter(src).paused_remaining()
+        assert 0.0 < remaining <= cooldown_seconds + 0.05, (
+            f"{src} should be paused by the fixed cooldown (~{cooldown_seconds}s), "
+            f"not a stacked/inflated value; got {remaining:.1f}s"
         )
     fx._LIMITERS.clear()
-
-
-def test_reset_rates_clears_persisted_rate_and_cooldown(isolated_rate_file):
-    """reset_rates() wipes BOTH the rate ratchet and the cooldown growth."""
-    source_rate.ratchet_down("VCI", floor=30, default=60)
-    source_rate.increment_cooldown("VCI", step=1.0, start=1.0)
-    assert source_rate.get_persisted_rate("VCI", default=60) != 60
-    assert source_rate.get_persisted_cooldown("VCI", default=1.0) != 0.0
-
-    source_rate.reset_rates()
-    assert source_rate.get_persisted_rate("VCI", default=60) == 60
-    assert source_rate.get_persisted_cooldown("VCI", default=1.0) == 1.0

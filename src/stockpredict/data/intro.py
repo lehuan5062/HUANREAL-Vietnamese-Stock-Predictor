@@ -77,8 +77,7 @@ def introduce(verify: bool = True) -> None:
         for modname in (
             "vnstock.explorer.vci.quote",
             "vnstock.explorer.vci.listing",
-            "vnstock.explorer.tcbs.quote",
-            "vnstock.explorer.msn.quote",
+            "vnstock.explorer.kbs.quote",
         ):
             try:
                 import importlib

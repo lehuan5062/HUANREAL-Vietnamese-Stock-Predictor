@@ -246,11 +246,13 @@ vnstock's 20/min guest quota and self-throttles to `data.api_per_min` (default
 the first time; subsequent runs are near-instant because up-to-date tickers
 cost 0 API calls.
 
-Each genuine provider 429 permanently ratchets that source's calls/min down by
-1 (to `data.api_per_min_floor`) and grows its cooldown, persisted in
-`cache/source_rate.json`. Neither recovers on its own — **delete
-`cache/source_rate.json`** to reset every source to its configured starting
-rate.
+Per-source calls/min (`data.api_per_min` / `data.api_per_min_overrides`) and
+the post-failure cooldown (`data.cooldown_seconds` /
+`data.cooldown_seconds_overrides`) are **fixed**: they are never adjusted
+automatically at runtime and nothing is persisted across sessions. Any fetch
+failure (a 429 or a transient error) pauses that source for its configured
+cooldown and nothing more. If a source keeps getting throttled,
+lower its rate by hand in `config.yaml`.
 
 A write-time guard rejects any incrementally fetched bar whose move against
 the last cached close exceeds the exchange band + margin (physically
@@ -333,7 +335,7 @@ Optional API keys live in [`.env.example`](.env.example); copy to `.env`.
 .venv\Scripts\python -m pytest -q
 ```
 
-159 tests, all synthetic — no network. Coverage spans the downtrend filter,
+152 tests, all synthetic — no network. Coverage spans the downtrend filter,
 recovery targets + Kaplan-Meier estimator, P/N ranking + healthy gate, recovery
 pricing, the ledger + flexible-exit evaluator, the walk-forward backtest, the
 LLM-overlay finalize, the trading calendar, cache freshness + watermarks, the
