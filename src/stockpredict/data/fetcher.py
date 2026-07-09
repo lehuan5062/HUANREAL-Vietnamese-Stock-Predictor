@@ -643,9 +643,7 @@ def update_symbol(symbol: str, full: bool = False,
             # via merge_ohlcv's own concat + keep="last" dedup) and STILL hit
             # an internal violation -- don't recurse forever, surface it.
             raise
-        logging.getLogger("stockpredict.fetcher").warning(
-            "%s: %s -- forcing a full re-fetch to heal the cache", symbol, e
-        )
+        _cprint(f"{symbol}: {e} -- forcing a full re-fetch to heal the cache", "yellow")
         return update_symbol(symbol, full=True, source_order=source_order)
     # Stamp the watermark to the expected bar so a fetch returning empty
     # data (delisted, halted, broker has no newer bar) doesn't retrigger
