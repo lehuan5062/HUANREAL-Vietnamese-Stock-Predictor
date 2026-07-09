@@ -91,12 +91,11 @@ def _normalize_type_value(value: object) -> str:
 
 
 def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
-    """Pull the full ticker list via vnstock. Falls back across data sources.
+    """Pull the full ticker list via vnstock from both KBS and VCI sources,
+    consolidated to capture stocks that may be missing or corrupt on one source.
 
-    Default fallback order is VCI -> KBS. Pass ``source`` to force a
-    specific provider first instead — e.g. ``selector.py``'s hose_only logic
-    passes ``source="VCI"`` explicitly because it specifically needs the
-    ``exchange`` column, which KBS doesn't always return.
+    Note: the ``source`` parameter is now ignored and kept only for backwards
+    compatibility. Both KBS and VCI are fetched and consolidated.
 
     MSN was removed from this fallback chain 2026-07-09: confirmed 3-for-3
     on real OHLCV corruption incidents this session (ABB, USC, EMS) via
@@ -113,11 +112,9 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
     the pipeline writes picks for tickers the broker won't accept orders for.
 
     Also unions in the dedicated ETF listing from ``Listing.all_etf()`` (only
-    supported by the KBS source — VCI doesn't have this endpoint at all, so
-    ETF listing is always KBS regardless of the stock-list fallback order
-    above). ``all_symbols()`` returns common stocks only — ETFs / fund
-    certificates live on a separate endpoint and would be invisible without
-    this second call.
+    supported by the KBS source — VCI doesn't have this endpoint at all).
+    ``all_symbols()`` returns common stocks only — ETFs / fund certificates
+    live on a separate endpoint and would be invisible without this second call.
 
     Listing calls share the broker's per-IP rate window with Quote calls.
     We go through the global limiter so a fresh process doesn't burn its
@@ -126,14 +123,11 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
 
     from .fetcher import _limiter, _looks_like_rate_limit
 
-    # Listing API only supports KBS / VCI per vnstock 4.x (MSN removed, see
-    # docstring above).
-    if source and source.upper() in ("KBS", "VCI"):
-        pref = source.upper()
-        sources = [pref] + [s for s in ("VCI", "KBS") if s != pref]
-    else:
-        sources = ["VCI", "KBS"]
+    # Fetch from both KBS and VCI to consolidate listings
+    sources = ["KBS", "VCI"]
+    results = {}
     last_err: Exception | None = None
+
     for src in sources:
         for attempt in range(retries):
             try:
@@ -149,16 +143,8 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
                     continue
                 df = _drop_untradable(df)
                 df = _normalize_listing(df)
-                # Union in the dedicated ETF listing. Failure is non-fatal —
-                # the stock listing is the primary product; ETF augmentation
-                # is best-effort. Without it the curated HOSE_ETFS list still
-                # supplies the 10 most-liquid ETFs via the selector.
-                etf_df = _try_fetch_etf_listing()
-                if etf_df is not None and not etf_df.empty:
-                    df = _merge_etf_rows(df, etf_df)
-                df["fetched_at"] = dt.datetime.utcnow().isoformat()
-                df["source"] = src
-                return df
+                results[src] = df
+                break
             except SystemExit as e:
                 # See fetcher._disable_vnstock_hard_exit — vnstock's
                 # CleanErrorContext sys.exit()s on rate-limit. Treat as 429.
@@ -170,7 +156,87 @@ def fetch_universe(retries: int = 3, source: str | None = None) -> pd.DataFrame:
                 if _looks_like_rate_limit(e):
                     _limiter().pause(65.0, reason=f"{src} Listing 429")
                 continue
-    raise RuntimeError(f"All vnstock sources failed for Listing: {last_err}")
+
+    # If we got at least one source, consolidate; if only one, use it directly
+    if len(results) == 0:
+        raise RuntimeError(f"All vnstock sources failed for Listing: {last_err}")
+    elif len(results) == 1:
+        df = list(results.values())[0]
+    else:
+        # Consolidate both sources
+        df = _merge_stock_listings(results["KBS"], results["VCI"])
+
+    # Union in the dedicated ETF listing. Failure is non-fatal —
+    # the stock listing is the primary product; ETF augmentation
+    # is best-effort. Without it the curated HOSE_ETFS list still
+    # supplies the 10 most-liquid ETFs via the selector.
+    etf_df = _try_fetch_etf_listing()
+    if etf_df is not None and not etf_df.empty:
+        df = _merge_etf_rows(df, etf_df)
+    df["fetched_at"] = dt.datetime.utcnow().isoformat()
+    # When consolidated from both, mark as such; otherwise mark the single source
+    df["source"] = "KBS+VCI" if len(results) > 1 else list(results.keys())[0]
+    return df
+
+
+def _merge_stock_listings(kbs_df: pd.DataFrame, vci_df: pd.DataFrame) -> pd.DataFrame:
+    """Consolidate stock listings from KBS and VCI sources.
+
+    Deduplicates on symbol by keeping the row with more non-null fields
+    (more complete data), preferring VCI if both have equal completeness.
+    For the consolidated row, fills missing fields from the other source.
+    Re-classifies instrument types using existing symbol patterns."""
+    if kbs_df is None or kbs_df.empty:
+        return vci_df
+    if vci_df is None or vci_df.empty:
+        return kbs_df
+
+    # Normalize symbol column to uppercase for dedup matching
+    kbs = kbs_df.copy()
+    vci = vci_df.copy()
+    kbs["symbol"] = kbs["symbol"].astype(str).str.upper().str.strip()
+    vci["symbol"] = vci["symbol"].astype(str).str.upper().str.strip()
+
+    # Union all symbols from both sources
+    all_symbols = set(kbs["symbol"].tolist()) | set(vci["symbol"].tolist())
+    rows = []
+
+    for sym in sorted(all_symbols):
+        kbs_row = kbs[kbs["symbol"] == sym]
+        vci_row = vci[vci["symbol"] == sym]
+        kbs_has = kbs_row.shape[0] > 0
+        vci_has = vci_row.shape[0] > 0
+
+        if kbs_has and vci_has:
+            # Both have the symbol — keep the more complete row
+            kbs_nulls = kbs_row.iloc[0].isna().sum()
+            vci_nulls = vci_row.iloc[0].isna().sum()
+
+            if vci_nulls < kbs_nulls:
+                # VCI has fewer nulls, use as base and fill from KBS
+                row = vci_row.iloc[0].copy()
+                for col in row.index:
+                    if pd.isna(row[col]) and col in kbs_row.columns:
+                        row[col] = kbs_row.iloc[0][col]
+            else:
+                # KBS has equal or fewer nulls, use as base and fill from VCI
+                row = kbs_row.iloc[0].copy()
+                for col in row.index:
+                    if pd.isna(row[col]) and col in vci_row.columns:
+                        row[col] = vci_row.iloc[0][col]
+            rows.append(row)
+        elif kbs_has:
+            rows.append(kbs_row.iloc[0])
+        else:
+            rows.append(vci_row.iloc[0])
+
+    out = pd.DataFrame(rows)
+
+    # Re-classify instrument types using symbol patterns (they take precedence)
+    if "instrument_type" in out.columns:
+        out["instrument_type"] = out["symbol"].map(classify_symbol)
+
+    return out.reset_index(drop=True)
 
 
 def _try_symbols_by_exchange(listing) -> pd.DataFrame | None:

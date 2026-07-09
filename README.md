@@ -237,21 +237,28 @@ proposals.
 ## Universe coverage, cache, and `--warm-only`
 
 Every run covers the **entire universe** (all of HOSE + HNX + UPCOM, ~1,760
-tickers) with no time cap. OHLCV comes from **KBS and VCI** via vnstock, with
-cross-source failover on 429s. (MSN was dropped as a source: it silently
-returns fabricated / wrong-instrument prices for dates the other providers
-agree have no trading — confirmed on ABB, USC, and EMS.) The fetcher bypasses
-vnstock's 20/min guest quota and self-throttles to `data.api_per_min` (default
-60, per-source overrides in `data.api_per_min_overrides`). Expect ~30 minutes
-the first time; subsequent runs are near-instant because up-to-date tickers
-cost 0 API calls.
+tickers) with no time cap. The **stock list is consolidated from both KBS and
+VCI** — each source is fetched, then merged by symbol-completeness: if a symbol
+exists in both, the row with fewer missing fields is kept (with fields filled
+from the other source). This captures stocks that may be missing, empty, or
+corrupt on one source but available on the other. ETF lists come from KBS only
+(VCI doesn't support ETFs).
+
+OHLCV comes from **KBS and VCI** via vnstock, with cross-source failover on 429s.
+(MSN was dropped as a source: it silently returns fabricated / wrong-instrument
+prices for dates the other providers agree have no trading — confirmed on ABB,
+USC, and EMS.) The fetcher bypasses vnstock's 20/min guest quota and
+self-throttles to `data.api_per_min` (default 60, per-source overrides in
+`data.api_per_min_overrides`). Expect ~30 minutes the first time; subsequent
+runs are near-instant because up-to-date tickers cost 0 API calls.
 
 Per-source calls/min (`data.api_per_min` / `data.api_per_min_overrides`) and
-the post-failure cooldown (`data.cooldown_seconds` /
+the post-429 cooldown (`data.cooldown_seconds` /
 `data.cooldown_seconds_overrides`) are **fixed**: they are never adjusted
-automatically at runtime and nothing is persisted across sessions. Any fetch
-failure (a 429 or a transient error) pauses that source for its configured
-cooldown and nothing more. If a source keeps getting throttled,
+automatically at runtime and nothing is persisted across sessions. Only a
+confirmed 429 pauses a source, for its configured cooldown and nothing more —
+a transient error (timeout, connection reset, etc.) on one ticker never
+pauses the source for other tickers. If a source keeps getting throttled,
 lower its rate by hand in `config.yaml`.
 
 A write-time guard rejects any incrementally fetched bar whose move against
