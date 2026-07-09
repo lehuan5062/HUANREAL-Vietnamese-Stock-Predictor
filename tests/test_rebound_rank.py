@@ -50,12 +50,16 @@ def _stub_predict(model, monkeypatch, mapping):
 def test_rebound_rank_scores_by_profit_per_day(monkeypatch):
     panel = _panel(["FAST", "MID", "SLOW"])
     model = _model(panel)
-    # All clear the recovery gate (config min_recovery_prob=0.95); ordering
-    # is pure P/N: FAST 0.06/3=0.020, MID 0.03/3=0.010, SLOW 0.06/12=0.005.
+    # All clear the recovery gate (fixed min_recovery_prob=0.5, injected below
+    # -- NOT read from the live config.yaml, so tuning that knob elsewhere
+    # can't silently break this test); ordering is pure P/N:
+    # FAST 0.06/3=0.020, MID 0.03/3=0.010, SLOW 0.06/12=0.005.
     _stub_predict(model, monkeypatch, {
         "FAST": (0.96, 3.0, 0.06), "MID": (0.96, 3.0, 0.03),
         "SLOW": (0.96, 12.0, 0.06)})
     monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(predict_mod, "load_config",
+                        lambda: type("Cfg", (), {"strategy": {"recovery": {"min_recovery_prob": 0.5}}})())
 
     out = predict_mod.rank_today(recovery_model=model, n_picks=3, panel=panel)
     order = list(out["symbol"])
@@ -72,14 +76,17 @@ def test_rebound_rank_scores_by_profit_per_day(monkeypatch):
 
 
 def test_rebound_rank_healthy_gate_drops_low_prob(monkeypatch):
-    """The min_recovery_prob gate (config 0.85) filters out a chronic
-    falling-knife name before ranking, even if its P/N would rank it high."""
+    """The min_recovery_prob gate (fixed at 0.5 here, injected below -- not
+    read from the live config.yaml) filters out a chronic falling-knife name
+    before ranking, even if its P/N would rank it high."""
     panel = _panel(["HEALTHY", "KNIFE"])
     model = _model(panel)
     # KNIFE has a huge P/N but only 5% recovery probability -> gated out.
     _stub_predict(model, monkeypatch, {
         "HEALTHY": (0.95, 3.0, 0.04), "KNIFE": (0.05, 2.0, 0.20)})
     monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(predict_mod, "load_config",
+                        lambda: type("Cfg", (), {"strategy": {"recovery": {"min_recovery_prob": 0.5}}})())
 
     out = predict_mod.rank_today(recovery_model=model, n_picks=5, panel=panel)
     syms = set(out["symbol"])

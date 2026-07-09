@@ -370,7 +370,7 @@ its own caveats — read what it prints, don't second-guess or re-derive it.
 
 **Edit-target priority:**
 1. **`config.yaml`** — the primary lever:
-   - `strategy.recovery.min_recovery_prob` (current 0.85) — the healthy filter.
+   - `strategy.recovery.min_recovery_prob` — the healthy filter (check config.yaml for current value).
      Raise if picks under-recover / knives slip through.
    - `strategy.downtrend.*` — `mom20_max`, `high_prox_max`, `rsi_floor` (0=off),
      `rsi_ceil` — widen or tighten the candidate pool.

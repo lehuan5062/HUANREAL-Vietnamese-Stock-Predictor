@@ -130,15 +130,6 @@ _VALID_SOURCES = ("KBS", "VCI")
 # When a source is backing off from a 429 by more than this many seconds, a
 # worker reroutes its queued symbols to a healthy source instead of blocking.
 _BACKOFF_REROUTE_THRESHOLD = 1.0
-
-# A much smaller threshold used ONLY to detect "did fetch_history already
-# apply a cooldown for this exact failure a moment ago" (so _source_worker
-# doesn't apply a redundant second cooldown for the same 429). Must be well
-# below data.cooldown_seconds — reusing _BACKOFF_REROUTE_THRESHOLD here was a
-# bug: paused_remaining() right after a fresh cooldown is ~cooldown_seconds,
-# which satisfied "<= 1.0" and made the worker think no cooldown had been
-# applied yet.
-_JUST_COOLED_EPSILON = 0.05
 _RATE_LIMIT_ERROR_TOKENS = (
     "rate limit",
     "rate-limit",
@@ -341,6 +332,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
         source_order = list(_VALID_SOURCES)
 
     saw_empty_data = False  # a source authoritatively reported "no bars in range"
+    last_err: Exception | None = None
     for src in source_order:
         if src not in _VALID_SOURCES:
             continue
@@ -356,6 +348,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                 saw_empty_data = True
                 break
             except Exception as e:
+                last_err = e
                 if _looks_like_rate_limit(e):
                     # Genuine provider-side 429: apply this source's fixed
                     # cooldown, then abandon this symbol on this source
@@ -390,7 +383,13 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
             index=pd.DatetimeIndex([], name="date"),
         )
 
-    raise RuntimeError(f"Could not fetch {symbol} from any source in {source_order}")
+    # Preserve the real failure -- both in the message (so the caller can
+    # print the ACTUAL reason instead of a generic "could not fetch") and via
+    # `from last_err` (standard exception chaining, so the caller can inspect
+    # __cause__ directly instead of us inventing a separate flag).
+    raise RuntimeError(
+        f"Could not fetch {symbol} from any source in {source_order}: {last_err}"
+    ) from last_err
 
 
 def _normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -475,8 +474,7 @@ def _source_worker(source: str,
                    lock: threading.Lock,
                    total_to_fetch: int,
                    fetch_total: int = 0,
-                   fetched_counter: dict | None = None,
-                   cooldown_seconds: float = 3.0) -> None:
+                   fetched_counter: dict | None = None) -> None:
     """One worker per source, all pulling from a single shared ``work`` queue.
 
     There is NO pre-distribution or source ranking: whichever worker is free
@@ -563,31 +561,29 @@ def _source_worker(source: str,
                 done_srcs = tried.setdefault(symbol, set())
                 done_srcs.add(source)
                 untried = [s for s in sources if s not in done_srcs]
-            # Make EVERY source's failure visible — not just a 429. A confirmed
-            # 429 already got its own orange announcement inside fetch_history;
-            # this generic line still fires alongside it because fetch_history
-            # wraps EVERY failure (429 or otherwise) in a generic RuntimeError
-            # before it reaches here, so _looks_like_rate_limit(e) can't
-            # distinguish them at this layer (the original exception text is
-            # gone by this point).
-            if untried:
-                _cprint(f"{source} failed {symbol} ({type(e).__name__}) — "
+            # fetch_history chains the real failure via `raise ... from
+            # last_err`, so the ORIGINAL exception (with its real message) is
+            # e.__cause__ -- use that instead of inventing generic text or
+            # guessing whether this was a 429.
+            cause = e.__cause__ or e
+            if _looks_like_rate_limit(cause):
+                # Already announced (orange) and cooled down for the real
+                # reason inside fetch_history at the moment it happened --
+                # nothing further to print or pause here.
+                pass
+            elif untried:
+                _cprint(f"{source} failed {symbol}: {cause} — "
                         f"requeuing for {'/'.join(untried)}", "yellow")
             else:
-                _cprint(f"{source} failed {symbol} ({type(e).__name__}) — "
+                _cprint(f"{source} failed {symbol}: {cause} — "
                         f"all sources exhausted, giving up", "red")
-            # Defensive cooldown on ANY failure, not just a recognized 429.
-            # A genuine 429 already applied its own (identical) fixed cooldown
-            # from inside fetch_history — re-applying here would be redundant
-            # (pause() takes the max of equal values, so harmless). We can't
-            # tell from the exception text (fetch_history wraps every failure
-            # in the same generic RuntimeError regardless of cause), so
-            # instead check whether the limiter is ALREADY paused: a confirmed
-            # 429 always leaves it paused; if it's NOT paused, fetch_history
-            # never applied a cooldown for this attempt, so this failure was
-            # something else and needs its own here.
-            if lim.paused_remaining() <= _JUST_COOLED_EPSILON:
-                lim.cooldown(source, cooldown_seconds)
+            # No cooldown here for non-429 failures: pausing an ENTIRE source
+            # for a problem specific to one ticker (e.g. a delisted symbol
+            # that errors on every source) would block that source's other,
+            # perfectly-fetchable work for no reason -- and previously did so
+            # for the full configured cooldown on ANY unidentified error.
+            # Only a confirmed 429 (handled above, already applied inside
+            # fetch_history) ever pauses a source.
             if untried:
                 # Another source hasn't had a shot yet — requeue so it can try.
                 work.put(symbol)
@@ -680,7 +676,6 @@ def update_many(symbols: Iterable[str], full: bool = False,
         return {}
 
     sources = list(_VALID_SOURCES)
-    _cfg = load_config()
 
     if full:
         # User asked for an unconditional re-fetch — every symbol gets a job.
@@ -730,7 +725,6 @@ def update_many(symbols: Iterable[str], full: bool = False,
                 total_to_fetch=total_to_fetch,
                 fetch_total=fetch_total,
                 fetched_counter=fetched_counter,
-                cooldown_seconds=_configured_cooldown_for(src, _cfg)
             )
             futures[src] = future
 
