@@ -85,33 +85,51 @@ class _RateLimiter:
             self.cap = max(1, int(new_cap))
             self.min_interval = self.window / self.cap
 
-    def ratchet_down_and_cooldown(self, source: str, floor: float,
-                                   default: float, cooldown_seconds: float = 61.0,
-                                   reason: str = "") -> float:
+    def ratchet_down_and_cooldown(self, source: str, floor: float, default: float,
+                                   cooldown_start: float = 1.0, cooldown_step: float = 1.0,
+                                   reason: str = "") -> tuple[float, float]:
         """Handle a genuine provider 429: permanently knock 1 off this
         source's persisted calls/min (down to ``floor``, never recovering on
         its own — see ``source_rate.reset_rates`` for the manual escape
-        hatch), apply the reduced cap to this live limiter, and force a flat
-        cooldown so every worker on this source waits for the provider's
-        window to clear. Returns the new rate.
+        hatch), apply the reduced cap to this live limiter, AND grow this
+        source's persisted cooldown (starts at ``cooldown_start``, +
+        ``cooldown_step`` every subsequent cooldown, persisted cross-session
+        — see ``source_rate.increment_cooldown``). Returns (new_rate, new_cooldown).
 
-        ``cooldown_seconds`` defaults to 61s. Neither VCI nor KBS publish a
-        documented rate-limit/Retry-After header or cooldown period (VCI's
-        429 is served by an edge/CDN layer with a generic HTML body, no
-        rate-limit headers at all; KBS didn't even trip a limit across 120+
-        rapid unpaced requests in testing) — 61s is a deliberate choice, not
-        a confirmed provider value; see ``config.yaml -> data.rate_limit_cooldown_seconds``.
+        Neither VCI nor KBS publish a documented rate-limit/Retry-After
+        header or cooldown period (VCI's 429 is served by an edge/CDN layer
+        with a generic HTML body, no rate-limit headers at all; KBS didn't
+        even trip a limit across 120+ rapid unpaced requests in testing), so
+        there's no provider value to anchor to — the incrementing cooldown is
+        a deliberate choice, escalating pressure on a source that keeps
+        failing rather than retrying at a fixed interval forever.
         """
         from . import source_rate
         new_rate = source_rate.ratchet_down(source, floor=floor, default=default,
                                             live_cap=self.cap)
         self.reduce_cap(new_rate)
-        self.pause(cooldown_seconds, reason=reason)
+        new_cooldown = source_rate.increment_cooldown(source, step=cooldown_step, start=cooldown_start)
+        self.pause(new_cooldown, reason=reason)
         logging.getLogger("stockpredict.rate").warning(
             "rate-limit: %s ratcheted to %.0f calls/min, %.0fs cooldown: %s",
-            source, new_rate, cooldown_seconds, reason
+            source, new_rate, new_cooldown, reason
         )
-        return new_rate
+        return new_rate, new_cooldown
+
+    def cooldown_only(self, source: str, cooldown_start: float = 1.0,
+                      cooldown_step: float = 1.0, reason: str = "") -> float:
+        """Handle a non-429 failure: grow and apply this source's persisted
+        cooldown (same incrementing mechanism as ``ratchet_down_and_cooldown``)
+        WITHOUT touching the rate/floor — an unrecognized failure (timeout,
+        reset, transient outage) isn't evidence the source's real rate limit
+        was hit, so only the ratchet's own 429 path should ever reduce the
+        rate. Without any backoff at all here, a source failing for a
+        non-429 reason would hot-loop the same failing endpoint with zero
+        pause between attempts. Returns the cooldown applied."""
+        from . import source_rate
+        new_cooldown = source_rate.increment_cooldown(source, step=cooldown_step, start=cooldown_start)
+        self.pause(new_cooldown, reason=reason)
+        return new_cooldown
 
     def paused_remaining(self) -> float:
         """Seconds this source is still backing off (0.0 if not paused)."""
@@ -122,14 +140,30 @@ class _RateLimiter:
 _LIMITERS: dict[str, _RateLimiter] = {}
 _LIMITERS_LOCK = threading.Lock()
 
-# The only vnstock sources that still serve VN stock OHLCV in the installed
-# version. TCBS was removed from the Quote module; MSN is unreliable (see
-# project memory / commit history). Keep this in sync with update_many().
-_VALID_SOURCES = ("VCI", "KBS")
+# The vnstock sources that still serve VN stock OHLCV in the installed
+# version. TCBS was removed from the Quote module entirely. MSN was
+# temporarily dropped based on one bad transient test (0/3); a later retest
+# this session showed it working cleanly (3/3) — back in for now so its real
+# reliability can be observed across manual runs. Order is KBS, MSN, VCI per
+# user preference: the shared-queue worker pool is symmetric (FIFO, no
+# priority), so this order only controls (a) fetch_history's default
+# fallback-chain order on direct calls without an explicit source_order, and
+# (b) display order in the status bar / logs — NOT which worker gets to a
+# symbol first in update_many. Keep in sync with update_many().
+_VALID_SOURCES = ("KBS", "MSN", "VCI")
 
 # When a source is backing off from a 429 by more than this many seconds, a
 # worker reroutes its queued symbols to a healthy source instead of blocking.
 _BACKOFF_REROUTE_THRESHOLD = 1.0
+
+# A much smaller threshold used ONLY to detect "did fetch_history already
+# apply a cooldown for this exact failure a moment ago" (so _source_worker
+# doesn't double-increment the same persisted cooldown via cooldown_only).
+# Must be well below cooldown_start_seconds (default 1.0s) — reusing
+# _BACKOFF_REROUTE_THRESHOLD here was a bug: paused_remaining() right after a
+# fresh 1.0s cooldown is ~1.0s, which satisfied "<= 1.0" and made the worker
+# think no cooldown had been applied yet.
+_JUST_COOLED_EPSILON = 0.05
 _RATE_LIMIT_ERROR_TOKENS = (
     "rate limit",
     "rate-limit",
@@ -313,9 +347,10 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
 
     On any error (429, timeout, bad data), moves to the next source in the list.
     A genuine provider 429 permanently ratchets that source's persisted
-    calls/min down 1 (see ``source_rate.py``) and forces a flat cooldown
-    (default 61s, see ``data.rate_limit_cooldown_seconds``) before abandoning
-    the symbol on that source (see ``_looks_like_rate_limit``).
+    calls/min down 1 (see ``source_rate.py``) and grows its persisted
+    cooldown (starts at ``data.cooldown_start_seconds``, +
+    ``data.cooldown_step_seconds`` every subsequent cooldown) before
+    abandoning the symbol on that source (see ``_looks_like_rate_limit``).
 
     When ``data.bypass_vnai_quota`` is set (default), calls go straight to
     the underlying provider endpoint via ``_quote_history``, sidestepping
@@ -331,8 +366,8 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
 
     rate_floor = float(cfg.data.get("api_per_min_floor",
                                      cfg.data.get("api_per_min", 12.0) / 2.0))
-    cooldown_default = float(cfg.data.get("rate_limit_cooldown_seconds", 61.0))
-    cooldown_overrides = cfg.data.get("rate_limit_cooldown_overrides", {}) or {}
+    cooldown_start = float(cfg.data.get("cooldown_start_seconds", 1.0))
+    cooldown_step = float(cfg.data.get("cooldown_step_seconds", 1.0))
 
     saw_empty_data = False  # a source authoritatively reported "no bars in range"
     for src in source_order:
@@ -358,7 +393,7 @@ def fetch_history(symbol: str, start: str, end: str | None = None,
                     # the cooldown throttles the flood.
                     _limiter(src).ratchet_down_and_cooldown(
                         src, floor=rate_floor, default=_configured_rate_for(src, cfg),
-                        cooldown_seconds=float(cooldown_overrides.get(src, cooldown_default)),
+                        cooldown_start=cooldown_start, cooldown_step=cooldown_step,
                         reason=f"{src} 429 on {symbol}"
                     )
                     break
@@ -472,7 +507,8 @@ def _source_worker(source: str,
                    lock: threading.Lock,
                    total_to_fetch: int,
                    status: dict | None = None,
-                   error_cooldown_seconds: float = 5.0) -> None:
+                   cooldown_start: float = 1.0,
+                   cooldown_step: float = 1.0) -> None:
     """One worker per source, all pulling from a single shared ``work`` queue.
 
     There is NO pre-distribution or source ranking: whichever worker is free
@@ -571,14 +607,21 @@ def _source_worker(source: str,
                 log.warning("%s failed %s (%s) — all sources exhausted, giving up",
                             source, symbol, type(e).__name__)
             # Defensive cooldown on ANY failure, not just a recognized 429.
-            # A genuine 429 already got its own (longer) cooldown from inside
-            # fetch_history via ratchet_down_and_cooldown; pause() only takes
-            # effect if it's LONGER than what's already set, so this is a
-            # no-op there. For an unrecognized failure (timeout, reset,
-            # transient outage) this is the ONLY backoff applied — without
-            # it, that source would hot-loop the same failing endpoint with
-            # zero pause between attempts.
-            lim.pause(error_cooldown_seconds, reason=f"{source} error on {symbol}: {type(e).__name__}")
+            # A genuine 429 already grew+applied its own cooldown from inside
+            # fetch_history via ratchet_down_and_cooldown, which increments
+            # the SAME persisted cooldown this would — calling it again here
+            # would double-increment for a single 429 event. We can't tell
+            # from the exception text (fetch_history wraps every failure in
+            # the same generic RuntimeError regardless of cause), so instead
+            # check whether the limiter is ALREADY paused: a confirmed 429
+            # always leaves it paused; if it's NOT paused, fetch_history
+            # never applied a cooldown for this attempt, so this failure was
+            # something else and needs its own (first-time-through-this-path)
+            # increment here.
+            if lim.paused_remaining() <= _JUST_COOLED_EPSILON:
+                lim.cooldown_only(source, cooldown_start=cooldown_start,
+                                 cooldown_step=cooldown_step,
+                                 reason=f"{source} error on {symbol}: {type(e).__name__}")
             if untried:
                 # Another source hasn't had a shot yet — requeue so it can try.
                 work.put(symbol)
@@ -662,7 +705,9 @@ def update_many(symbols: Iterable[str], full: bool = False,
         return {}
 
     sources = list(_VALID_SOURCES)
-    error_cooldown_seconds = float(load_config().data.get("error_cooldown_seconds", 5.0))
+    _cfg = load_config()
+    cooldown_start = float(_cfg.data.get("cooldown_start_seconds", 1.0))
+    cooldown_step = float(_cfg.data.get("cooldown_step_seconds", 1.0))
 
     if full:
         # User asked for an unconditional re-fetch — every symbol gets a job.
@@ -724,7 +769,8 @@ def update_many(symbols: Iterable[str], full: bool = False,
                 lock=lock,
                 total_to_fetch=total_to_fetch,
                 status=status,
-                error_cooldown_seconds=error_cooldown_seconds
+                cooldown_start=cooldown_start,
+                cooldown_step=cooldown_step
             )
             futures[src] = future
 

@@ -125,8 +125,8 @@ def test_shared_queue_falls_over_when_one_source_fails(monkeypatch):
 
     def fake_update(s, full=False, source_order=None):
         src = (source_order or [None])[0]
-        if src == "VCI":
-            raise RuntimeError("simulated VCI outage")
+        if src != "KBS":
+            raise RuntimeError(f"simulated {src} outage")
         with served_lock:
             served_by[s] = src
         return 1
@@ -137,7 +137,8 @@ def test_shared_queue_falls_over_when_one_source_fails(monkeypatch):
     results = fetcher.update_many(syms, full=True)
 
     assert all(results[s] == 1 for s in syms), f"all should succeed: {results}"
-    # Every symbol was ultimately served by the healthy source (KBS), never VCI.
+    # Every symbol was ultimately served by the one healthy source (KBS),
+    # regardless of how many other sources are configured/failing.
     assert set(served_by) == set(syms)
     assert all(src == "KBS" for src in served_by.values()), served_by
     fetcher._LIMITERS.clear()

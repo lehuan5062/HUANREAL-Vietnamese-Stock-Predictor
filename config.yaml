@@ -17,9 +17,10 @@ data:
   # With the bypass on, vnstock's 20/min guest cap no longer applies, so this
   # is the only limit — set vs the providers' real servers.
   # 60/min matches vnstock's Community tier. Env override: STOCKPREDICT_API_PER_MIN=10
-  api_per_min: 60          # default ceiling for any source
+  api_per_min: 60          # default ceiling for any source (MSN uses this)
   api_per_min_overrides:   # per-source starting-rate overrides
-    KBS: 60
+    VCI: 20                # VCI 429s aggressively; start it conservative
+    KBS: 70                # KBS has been the most reliable source so far
   # Adaptive per-source floor: every genuine provider 429 permanently knocks
   # 1 off that source's persisted calls/min (see data/source_rate.py), never
   # recovering on its own — down to this floor. No official published rate
@@ -27,25 +28,25 @@ data:
   # vnai guest tier (a separate, unrelated client-side quota we bypass) is
   # confirmed at 20/min (vnai.beam.auth.authenticator.get_limits()) — 19
   # (just under that known-safe number) is a more grounded floor than an
-  # arbitrary fraction of api_per_min.
+  # arbitrary fraction of api_per_min. NOTE: with VCI's starting rate now
+  # also 20, VCI has only one ratchet-down step of headroom before it hits
+  # this floor (20 -> 19, then stuck) — intentional, not an oversight.
   api_per_min_floor: 19
-  # Defensive cooldown applied after ANY fetch failure, not just a
-  # recognized 429 (see rate_limit_cooldown_seconds/overrides above). Without
-  # this, a source failing for a reason _looks_like_rate_limit doesn't
-  # recognize (timeout, reset, transient outage) gets zero backoff and
-  # hot-loops the same failing endpoint. Short and does NOT ratchet the
-  # persisted rate down — only a confirmed 429 does that.
-  error_cooldown_seconds: 5
-  # Flat per-source cooldown (seconds) after a genuine provider 429. Neither
-  # VCI nor KBS publish a Retry-After header or documented cooldown (VCI's
-  # 429 is served by an edge/CDN layer with a generic HTML body and no
-  # rate-limit headers at all; KBS didn't even trip a limit across 120+ rapid
-  # unpaced test requests) — these are deliberate choices, not confirmed
-  # provider values. VCI 429s aggressively and can IP-block for extended
-  # periods, so it gets a longer cooldown via the per-source override below.
-  rate_limit_cooldown_seconds: 61          # default for any source
-  rate_limit_cooldown_overrides:           # per-source overrides
-    VCI: 121
+  # Per-source cooldown after ANY fetch failure (a confirmed 429, or anything
+  # else — timeout, reset, transient outage; without SOME backoff on every
+  # failure a struggling source would hot-loop the same failing endpoint).
+  # Starts small and grows by a fixed step every time that source needs
+  # cooling down again, persisted cross-session (a fresh process continues
+  # from the accumulated cooldown, not back to the start) — see
+  # data/source_rate.py's increment_cooldown(). One-way, like the rate floor
+  # above: only data/source_rate.py's reset_rates() (or reset_rate_limits.bat)
+  # clears it back to cooldown_start_seconds. Neither VCI nor KBS publish a
+  # Retry-After header or documented cooldown period (VCI's 429 is served by
+  # an edge/CDN layer with a generic HTML body and no rate-limit headers at
+  # all; KBS didn't even trip a limit across 120+ rapid unpaced test
+  # requests), so there's no provider value to anchor to.
+  cooldown_start_seconds: 1     # every source's first-ever cooldown
+  cooldown_step_seconds: 1      # growth per subsequent cooldown, persisted per source
 
 universe:
   liquidity_filter:

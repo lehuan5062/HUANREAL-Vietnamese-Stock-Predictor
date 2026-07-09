@@ -1,12 +1,21 @@
-"""Persist each source's adaptive request rate across sessions.
+"""Persist each source's adaptive request rate AND cooldown across sessions.
 
 A source's calls/min cap is a one-way ratchet: every genuine provider 429
 knocks 1 off, down to a floor, and the reduced rate survives process
-restarts (unlike the in-memory-only ``_RateLimiter.cap``). Nothing ever
-raises the rate back up automatically — if a provider's real limit is
+restarts (unlike the in-memory-only ``_RateLimiter.cap``). Its cooldown grows
+the same way: it starts small and grows by a fixed step every time that
+source needs cooling down again, persisted so a fresh process continues from
+the accumulated cooldown rather than restarting small. Neither the rate nor
+the cooldown ever recovers on its own — if a provider's real limit is
 believed to have relaxed, reset manually via::
 
     python -c "from stockpredict.data.source_rate import reset_rates; reset_rates()"
+
+Both live in the same per-source dict in the same JSON file (e.g.
+``{"VCI": {"calls_per_min": 20.0, "cooldown_seconds": 3.0}}``), so every
+write merges into the existing entry rather than replacing it — otherwise a
+rate ratchet would silently wipe out that source's accumulated cooldown
+(and vice versa).
 """
 import json
 import logging
@@ -96,15 +105,48 @@ def ratchet_down(source: str, floor: float, default: float,
     src = source.upper()
     with _RATE_LOCK:
         rates = _load_rates()
-        current = float(rates.get(src, {}).get("calls_per_min", default))
+        entry = rates.setdefault(src, {})
+        current = float(entry.get("calls_per_min", default))
         if live_cap is not None:
             current = min(current, float(live_cap))
         new_rate = max(float(floor), current - 1.0)
-        rates[src] = {"calls_per_min": new_rate}
+        entry["calls_per_min"] = new_rate
         _save_rates(rates)
         return new_rate
 
 
+def get_persisted_cooldown(source: str, default: float) -> float:
+    """Return the persisted cooldown (seconds) for ``source``, or ``default``
+    if none has been recorded yet (first run, or after ``reset_rates``)."""
+    rates = _load_rates()
+    entry = rates.get(source.upper())
+    if entry is None:
+        return default
+    return float(entry.get("cooldown_seconds", default))
+
+
+def increment_cooldown(source: str, step: float, start: float) -> float:
+    """Grow ``source``'s persisted cooldown by ``step`` seconds; seed at
+    ``start`` if this source has never been cooled down before.
+
+    One-way (never shrinks except via ``reset_rates()``) and persisted
+    cross-session — a fresh process picks up the accumulated cooldown, not
+    ``start``, for that source's NEXT failure. Same locking/atomicity as
+    ``ratchet_down``, and merges into the same per-source entry rather than
+    overwriting the ``calls_per_min`` field a rate ratchet may have set.
+    Returns the cooldown to apply now.
+    """
+    src = source.upper()
+    with _RATE_LOCK:
+        rates = _load_rates()
+        entry = rates.setdefault(src, {})
+        current = entry.get("cooldown_seconds")
+        new_cooldown = float(start) if current is None else float(current) + float(step)
+        entry["cooldown_seconds"] = new_cooldown
+        _save_rates(rates)
+        return new_cooldown
+
+
 def reset_rates() -> None:
-    """Clear all persisted per-source rates (manual escape hatch)."""
+    """Clear all persisted per-source rates AND cooldowns (manual escape hatch)."""
     _rate_file().unlink(missing_ok=True)
