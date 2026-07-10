@@ -126,6 +126,8 @@ def test_looks_like_empty_data_matches_provider_empty_errors():
         "Dữ liệu trống cho mã AME với interval 1D.",  # KBS actual message
         "Empty data for symbol XYZ",
         "Không có dữ liệu",
+        # VCI's "ticker not found" -- a no-data outcome, NOT a hard error.
+        "Không tìm thấy dữ liệu. Vui lòng kiểm tra lại mã chứng khoán hoặc KBS",
     ]
     for s in empties:
         assert _looks_like_empty_data(Exception(s)), f"missed empty-data: {s}"
@@ -147,6 +149,59 @@ def test_fetch_history_returns_empty_not_error_on_empty_data(monkeypatch):
     df = fx.fetch_history("AME", start="2026-07-07", end="2026-07-08", source_order=["KBS"])
     assert df.empty, "empty-data should yield an empty frame, not raise"
     assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+    fx._LIMITERS.clear()
+
+
+def test_no_data_from_all_sources_is_a_distinct_warning(monkeypatch, capsys):
+    """A ticker that comes back empty from EVERY source is neither an `ok`
+    (int) nor a hard `ERR:` — it's a NODATA sentinel, announced once as a
+    yellow warning, and no source is left cooling down."""
+    import pandas as pd
+    from stockpredict.data import fetcher as fx
+
+    # Every source raises the "ticker not found" message (now recognized as
+    # empty-data), so update_symbol writes nothing and the cache stays empty.
+    def fake_quote(symbol, src, start, end, interval, bypass):
+        raise ValueError("Không tìm thấy dữ liệu. Vui lòng kiểm tra lại mã")
+    monkeypatch.setattr(fx, "_quote_history", fake_quote)
+    monkeypatch.setattr(fx, "read_ohlcv", lambda s: pd.DataFrame())
+    fx._LIMITERS.clear()
+
+    results = fx.update_many(["GHOST"], full=True)
+
+    assert isinstance(results["GHOST"], str)
+    assert results["GHOST"].startswith("NODATA:")
+    out = capsys.readouterr().out
+    assert "GHOST: no data available from any source" in out
+    for src in ("KBS", "VCI"):
+        assert fx._limiter(src).paused_remaining() == 0.0, \
+            "a no-data ticker must not cool down any source"
+    fx._LIMITERS.clear()
+
+
+def test_stale_ticker_with_no_new_bars_is_a_normal_success(monkeypatch, capsys):
+    """A ticker that already has cached rows and fetches 0 NEW bars is a
+    normal success (green progress), NOT flagged no-data — the got_data
+    signal keys off existing cached rows, not this fetch's row delta."""
+    import pandas as pd
+    from stockpredict.data import fetcher as fx
+
+    existing = pd.DataFrame(
+        {"open": [10.0], "high": [10.0], "low": [10.0], "close": [10.0],
+         "volume": [1]},
+        index=pd.DatetimeIndex(["2026-07-01"], name="date"),
+    )
+    # Fetch returns nothing new, but the symbol's cache is NON-empty.
+    monkeypatch.setattr(fx, "update_symbol", lambda s, full=False, source_order=None: 0)
+    monkeypatch.setattr(fx, "read_ohlcv", lambda s: existing)
+    fx._LIMITERS.clear()
+
+    results = fx.update_many(["HAScache"], full=True)
+
+    assert results["HAScache"] == 0  # int -> counted ok, not NODATA
+    out = capsys.readouterr().out
+    assert "no data available" not in out
+    assert "progress update:" in out
     fx._LIMITERS.clear()
 
 

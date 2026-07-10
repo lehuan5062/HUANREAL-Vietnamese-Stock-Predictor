@@ -65,10 +65,13 @@ def test_rebound_rank_scores_by_profit_per_day(monkeypatch):
     order = list(out["symbol"])
     assert order == ["FAST", "MID", "SLOW"], out[["symbol", "score"]]
     # Recovery pricing columns present; no legacy entry_vnd / stop / rr columns.
-    assert {"target_vnd", "hold_days", "score", "net_reward_vnd",
+    assert {"target_vnd", "pred_days", "score", "net_reward_vnd",
             "close_vnd"}.issubset(out.columns)
     assert "rr_ratio" not in out.columns   # legacy ATR risk-reward gone
     assert "entry_vnd" not in out.columns  # no entry-price prediction; buy at close
+    # hold_days was dropped (cd8a32c) -- pred_days is the single source of
+    # truth for expected hold length now, rounded only at display time.
+    assert "hold_days" not in out.columns
     # buy price = close; target = close * (1 + P).
     fast = out[out["symbol"] == "FAST"].iloc[0]
     assert fast["close_vnd"] == 20000

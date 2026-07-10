@@ -117,7 +117,6 @@ def test_shared_queue_falls_over_when_one_source_fails(monkeypatch):
     """With no pre-distribution, if one source always fails every symbol is
     still fetched via the other source (self-balancing shared queue)."""
     import threading
-    monkeypatch.setattr(fetcher, "read_ohlcv", lambda s: pd.DataFrame())
     fetcher._LIMITERS.clear()
 
     served_by = {}
@@ -132,6 +131,14 @@ def test_shared_queue_falls_over_when_one_source_fails(monkeypatch):
         return 1
 
     monkeypatch.setattr(fetcher, "update_symbol", fake_update)
+    # The worker checks read_ohlcv(sym).empty to tell "got data" from "no
+    # data anywhere", so the mock must reflect what fake_update served: a
+    # non-empty frame once KBS has served the symbol, empty before that.
+    def fake_read(s):
+        with served_lock:
+            served = s in served_by
+        return pd.DataFrame({"close": [10.0]}) if served else pd.DataFrame()
+    monkeypatch.setattr(fetcher, "read_ohlcv", fake_read)
 
     syms = [f"S{i}" for i in range(6)]
     results = fetcher.update_many(syms, full=True)

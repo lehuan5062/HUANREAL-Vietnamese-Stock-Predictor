@@ -632,8 +632,13 @@ def run_cmd(mode: str, n_picks: int | None,
         # fetches stale + cold (lazy).
         # warm_mode == "no" → full=True forces re-fetch of every symbol.
         results = update_many(syms, full=(warm_mode == "no"))
+        # Three outcomes, not two: int = rows fetched (or a warm 0-delta);
+        # "NODATA:" = fetched fine but the ticker has no data anywhere (a
+        # warning, not a failure); any other string = a real fetch error.
         ok = sum(1 for v in results.values() if isinstance(v, int))
-        err = len(results) - ok
+        no_data = sum(1 for v in results.values()
+                      if isinstance(v, str) and v.startswith("NODATA:"))
+        err = len(results) - ok - no_data
         # Re-audit AFTER the fetch so the user can see what actually persisted
         # to disk. If pre-fetch said "10 stale + 5 cold" and post-fetch still
         # says "10 stale + 5 cold", something's wrong (writes didn't take).
@@ -650,16 +655,24 @@ def run_cmd(mode: str, n_picks: int | None,
         1 for v in results.values()
         if not isinstance(v, int) and "rate" in str(v).lower()
     )
-    click.echo(f"  fetched: ok={ok} err={err}"
+    click.echo(f"  fetched: ok={ok} err={err} no-data={no_data}"
                + (f" (rate-limit: {rate_limit_errs})" if rate_limit_errs else ""))
-    if err and err <= 5:
-        for k, v in results.items():
-            if not isinstance(v, int):
-                click.echo(f"    {k}: {str(v)[:120]}")
-    elif err > 5:
-        click.echo(f"  {err} ticker(s) failed; "
+    errored = {k: v for k, v in results.items()
+               if isinstance(v, str) and not v.startswith("NODATA:")}
+    nodata = sorted(k for k, v in results.items()
+                    if isinstance(v, str) and v.startswith("NODATA:"))
+    if errored and len(errored) <= 5:
+        for k, v in errored.items():
+            click.echo(f"    {k}: {str(v)[:120]}")
+    elif len(errored) > 5:
+        click.echo(f"  {len(errored)} ticker(s) failed; "
                    f"continuing with what's already cached. "
                    f"Re-run later (or with `--workers 1`) to backfill the rest.")
+    if nodata:
+        shown = ", ".join(nodata[:20]) + (f", … (+{len(nodata) - 20} more)"
+                                          if len(nodata) > 20 else "")
+        click.echo(f"  {len(nodata)} ticker(s) had no data available "
+                   f"(delisted / wrong symbol / never traded): {shown}")
     click.echo("")
 
     # Critical: fall through and predict on whatever IS cached, even if
@@ -672,8 +685,10 @@ def run_cmd(mode: str, n_picks: int | None,
                    err=True)
         sys.exit(1)
     if len(syms_with_data) < len(syms):
+        missing = len(syms) - len(syms_with_data)
         click.echo(f"  proceeding with {len(syms_with_data)} cached symbols "
-                   f"({len(syms) - len(syms_with_data)} skipped due to fetch errors)")
+                   f"({missing} have no cached data — see the err / no-data "
+                   f"counts above)")
     syms = syms_with_data
 
     # Now that data is fresh, evaluate any predictions whose T+N has elapsed

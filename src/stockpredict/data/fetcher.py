@@ -159,6 +159,8 @@ _EMPTY_DATA_TOKENS = (
     "empty data",
     "no data",
     "không có dữ liệu",
+    "không tìm thấy dữ liệu",   # VCI: "Không tìm thấy dữ liệu. Vui lòng kiểm tra lại mã..."
+    "khong tim thay du lieu",
 )
 
 
@@ -547,15 +549,6 @@ def _source_worker(source: str,
 
         try:
             delta = update_symbol(symbol, full=full, source_order=[source])
-            with lock:
-                results[symbol] = delta
-                if fetched_counter is not None:
-                    fetched_counter["n"] += 1
-                    done_count = fetched_counter["n"]
-                else:
-                    done_count = None
-            if done_count is not None:
-                _cprint(f"progress update: {done_count}/{fetch_total}", "green")
         except Exception as e:
             with tried_lock:
                 done_srcs = tried.setdefault(symbol, set())
@@ -590,6 +583,44 @@ def _source_worker(source: str,
             else:
                 with lock:
                     results[symbol] = f"ERR: {type(e).__name__}: {str(e)[:160]}"
+            continue
+
+        # The fetch didn't raise. But "didn't raise" isn't the same as "got
+        # data": a provider returning zero rows (or a recognized empty-data /
+        # "ticker not found" message) yields an empty frame, NOT an exception.
+        # Distinguish the two by whether the symbol has ANY cached rows now:
+        # a stale/warm ticker that simply had no NEW bars keeps its old rows
+        # (real success); a cold ticker that got nothing stays empty.
+        if read_ohlcv(symbol).empty:
+            with tried_lock:
+                done_srcs = tried.setdefault(symbol, set())
+                done_srcs.add(source)
+                untried = [s for s in sources if s not in done_srcs]
+            if untried:
+                # This source had nothing, but another hasn't tried yet — don't
+                # declare "no data" until every source has been checked.
+                work.put(symbol)
+                continue
+            # All sources returned empty: the ticker genuinely has no data
+            # anywhere. A WARNING, not an error — nothing is wrong with the
+            # sources (not red), and it's not a rate limit (not orange).
+            _cprint(f"{symbol}: no data available from any source", "yellow")
+            with lock:
+                results[symbol] = "NODATA: no rows from any source"
+                if fetched_counter is not None:
+                    fetched_counter["n"] += 1
+            continue
+
+        # Real rows landed.
+        with lock:
+            results[symbol] = delta
+            if fetched_counter is not None:
+                fetched_counter["n"] += 1
+                done_count = fetched_counter["n"]
+            else:
+                done_count = None
+        if done_count is not None:
+            _cprint(f"progress update: {done_count}/{fetch_total}", "green")
 
 
 def update_symbol(symbol: str, full: bool = False,
