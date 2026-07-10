@@ -26,6 +26,27 @@ def liquidity_mask(df: pd.DataFrame) -> pd.Series:
     return cond.fillna(False)
 
 
+def staleness_mask(df: pd.DataFrame, on: pd.Timestamp) -> pd.Series:
+    """Boolean Series aligned to df.index: True where the row's bar date (the
+    frame's index) is no more than ``max_staleness_days`` business days before
+    ``on``. Expects a latest-cross-section frame (one row per symbol, date
+    index).
+
+    Data-integrity gate, not a strategy knob: a dormant name whose cache ended
+    months ago would otherwise be scored on a stale close, and that close
+    silently recorded as the entry price. ``0`` (or a missing key) disables the
+    gate (all True)."""
+    import numpy as np
+    max_stale = int(load_config().universe["liquidity_filter"]
+                    .get("max_staleness_days", 0) or 0)
+    if max_stale <= 0:
+        return pd.Series(True, index=df.index)
+    dates = pd.to_datetime(df.index).values.astype("datetime64[D]")
+    ref = np.datetime64(pd.Timestamp(on).normalize(), "D")
+    age = np.busday_count(dates, ref)
+    return pd.Series(age <= max_stale, index=df.index)
+
+
 def has_enough_history(df: pd.DataFrame) -> bool:
     cfg = load_config().universe["liquidity_filter"]
     return len(df) >= cfg["min_history_days"]

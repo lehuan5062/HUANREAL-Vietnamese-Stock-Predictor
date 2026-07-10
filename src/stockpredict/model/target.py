@@ -153,16 +153,25 @@ def resolve_exit(future_close, entry: float, thr: float,
     Returns ``{"reason": "recovery", "k" (1-based day), "exit_close"}`` for that
     day, or ``None`` when the trade is still open (never recovered within the
     available data). Callers decide how to treat an open trade (the backtest
-    marks-to-market at the last close; the ledger leaves it pending)."""
+    marks-to-market at the last close; the ledger leaves it pending).
+
+    Like ``recovery_episode``, the scan censors at a ``_BAND_BREAK`` jump: a
+    1-day move beyond the widest exchange band is a phantom bar (unadjusted
+    corporate action or unit-scale corruption), so it must not fake a recovery.
+    The trade is left open for a later, clean re-evaluation."""
     import numpy as _np
     fc = _np.asarray(future_close, dtype=float)
     n = fc.size
     if n == 0 or entry <= 0:
         return None
     recov = entry * (1.0 + float(thr))
-    for k in range(max(1, int(min_hold_days)), n + 1):
+    prev = float(entry)
+    for k in range(1, n + 1):
         c = float(fc[k - 1])
-        if c >= recov:
+        if prev > 0 and abs(c / prev - 1.0) > _BAND_BREAK:
+            return None
+        prev = c
+        if k >= max(1, int(min_hold_days)) and c >= recov:
             return {"reason": "recovery", "k": k, "exit_close": c}
     return None
 

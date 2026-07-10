@@ -13,7 +13,7 @@ from ..config import load_config
 from ..data.universe import tradable_symbols
 from ..dataset import FEATURE_COLS, build_panel
 from ..filters import (ceiling_lock_mask, corporate_action_mask, downtrend_mask,
-                       liquidity_mask, overbought_mask)
+                       liquidity_mask, overbought_mask, staleness_mask)
 from ..pricing import add_recovery_price_suggestions
 from .train import RecoveryKMModel, latest_recovery_model_path
 
@@ -135,6 +135,22 @@ def eligible_universe(on: str | pd.Timestamp | None = None,
     tradable = tradable_symbols()
     if tradable is not None:
         snap = snap[snap["symbol"].astype(str).str.upper().isin(tradable)]
+    if snap.empty:
+        return snap
+
+    # Drop names whose most recent cached bar is stale relative to the pick
+    # date: they'd be scored on a months-old close and that close recorded as
+    # the entry price (VTS/DCH, July 2026). Print the exclusions — a stale
+    # cache is a data problem the user should see, not a silent drop.
+    ref = pd.to_datetime(on) if on is not None else pd.Timestamp(snap.index.max())
+    fresh = staleness_mask(snap, ref)
+    if not fresh.all():
+        stale_syms = sorted(snap.loc[~fresh, "symbol"].astype(str))
+        shown = (", ".join(stale_syms) if len(stale_syms) <= 20
+                 else ", ".join(stale_syms[:20]) + f", ... +{len(stale_syms) - 20} more")
+        print(f"[filters] dropped {len(stale_syms)} stale-data candidate(s) "
+              f"(last bar too old for {ref.date()}): {shown}")
+        snap = snap[fresh].copy()
     if snap.empty:
         return snap
 

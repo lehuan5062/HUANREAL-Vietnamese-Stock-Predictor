@@ -314,6 +314,7 @@ def compare_modes_cmd(window: int, as_of: str | None, modes: str | None) -> None
     same params (picks/horizon/hose-only/etfs/exclude). Advisory: tells you
     which method to PREFER, not a knob to tune."""
     from .analyze import mode_compare
+    from .config import reports_dir
     mode_list = ([m.strip() for m in modes.split(",") if m.strip()]
                  if modes else None)
     result = mode_compare.compare_modes(window_days=window, as_of=as_of,
