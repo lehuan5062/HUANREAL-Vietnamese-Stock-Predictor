@@ -19,7 +19,7 @@ import pandas as pd
 
 from .config import cache_dir, load_config
 from .data.cache import read_ohlcv
-from .model.target import resolve_exit
+from .model.target import resolve_exit, settle_days
 from .pricing import profit_threshold
 
 
@@ -645,7 +645,7 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
                 thr = profit_threshold()
                 fut = ohlcv[ohlcv.index > as_of]
                 ex = resolve_exit(fut["close"].astype(float).to_numpy(),
-                                  float(entry), thr)
+                                  float(entry), thr, min_hold_days=settle_days())
                 # Only a resolved exit whose bar has actually landed closes the
                 # position; otherwise it stays pending (open) for a later pass.
                 if ex is not None:

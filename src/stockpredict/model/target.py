@@ -30,7 +30,8 @@ _BAND_BREAK = 0.15
 
 
 def recovery_episode(df: pd.DataFrame, thr: float,
-                     max_horizon: int | None = None) -> pd.DataFrame:
+                     max_horizon: int | None = None,
+                     settle_days: int = 1) -> pd.DataFrame:
     """Label the rebound recovery episode for every row of a single symbol's
     (date-ascending) OHLCV frame.
 
@@ -53,6 +54,12 @@ def recovery_episode(df: pd.DataFrame, thr: float,
     The scan is bounded by ``max_horizon`` (see ``_DEFAULT_LABEL_HORIZON``) and
     is additionally censored at the first future band-break day (an unadjusted
     corporate-action spike), so a phantom jump can't fake a recovery.
+
+    ``settle_days`` embargoes ``k < settle_days`` from counting as a recovery
+    (T+2 broker settlement means shares can't be sold before then) — a
+    band-break at ``k < settle_days`` still censors the row, it just can't be
+    the "recovery" itself. Defaults to 1 (no embargo) for callers that don't
+    care; ``attach_target`` passes the configured value (see ``settle_days()``).
     """
     n = len(df)
     idx = df.index
@@ -109,7 +116,7 @@ def recovery_episode(df: pd.DataFrame, thr: float,
             censored_at |= brk_hit
             # Recovery on a trustworthy (non-break) future day. Invalid entries
             # have target_level = +inf (see above), so they never hit here.
-            elig = active & ~brk_hit
+            elig = active & ~brk_hit & (k >= settle_days)
             hit = elig & (fut_close >= target_level)
             N[hit] = k
             P[hit] = fut_close[hit] / close[hit] - 1.0
@@ -132,12 +139,16 @@ def recovery_episode(df: pd.DataFrame, thr: float,
     }, index=idx)
 
 
-def resolve_exit(future_close, entry: float, thr: float) -> dict | None:
+def resolve_exit(future_close, entry: float, thr: float,
+                 min_hold_days: int = 1) -> dict | None:
     """Resolve a rebound trade's exit by walking its forward close path.
 
     ``future_close`` is the sequence of closes AFTER the entry bar, in
     chronological order (offset k = 1, 2, ...). The trade exits on the first day
-    the close clears the profitable point (``close >= entry*(1 + thr)``).
+    at or after ``min_hold_days`` whose close clears the profitable point
+    (``close >= entry*(1 + thr)``) — ``min_hold_days`` embargoes earlier days
+    that aren't actually sellable (T+2 settlement); pass ``settle_days()`` to
+    match the label definition used to train the model.
 
     Returns ``{"reason": "recovery", "k" (1-based day), "exit_close"}`` for that
     day, or ``None`` when the trade is still open (never recovered within the
@@ -149,7 +160,7 @@ def resolve_exit(future_close, entry: float, thr: float) -> dict | None:
     if n == 0 or entry <= 0:
         return None
     recov = entry * (1.0 + float(thr))
-    for k in range(1, n + 1):
+    for k in range(max(1, int(min_hold_days)), n + 1):
         c = float(fc[k - 1])
         if c >= recov:
             return {"reason": "recovery", "k": k, "exit_close": c}
@@ -163,13 +174,23 @@ def _label_horizon() -> int:
     return int(recovery.get("label_max_horizon", _DEFAULT_LABEL_HORIZON))
 
 
+def settle_days() -> int:
+    """Earliest tradable exit day (T+2 settlement) — see
+    ``strategy.recovery.settle_days`` in config.yaml."""
+    cfg = load_config()
+    strat = dict(getattr(cfg, "strategy", {}) or {})
+    recovery = dict(strat.get("recovery", {}) or {})
+    return int(recovery.get("settle_days", 1))
+
+
 def attach_target(df: pd.DataFrame) -> pd.DataFrame:
     """Attach the rebound recovery targets (N / P / recovered) to a per-symbol
     OHLCV frame. ``thr`` is the shared profit_threshold (round-trip cost +
     margin), so "profitable" means the same thing the pricing charges."""
     out = df.copy()
     rec = recovery_episode(df, thr=profit_threshold(),
-                           max_horizon=_label_horizon())
+                           max_horizon=_label_horizon(),
+                           settle_days=settle_days())
     out["target_days_to_recover"] = rec["target_days_to_recover"]
     out["target_recovery_return"] = rec["target_recovery_return"]
     out["target_recovered"] = rec["target_recovered"]

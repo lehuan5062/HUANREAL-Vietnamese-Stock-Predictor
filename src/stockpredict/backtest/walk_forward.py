@@ -21,7 +21,7 @@ from ..config import load_config, reports_dir
 from ..dataset import build_panel
 from ..filters import (ceiling_lock_mask, corporate_action_mask, downtrend_mask,
                        liquidity_mask, overbought_mask)
-from ..model.target import resolve_exit
+from ..model.target import resolve_exit, settle_days
 from ..model.train import train_recovery
 from ..pricing import profit_threshold
 
@@ -151,7 +151,7 @@ def _run_rebound(panel: pd.DataFrame, start, end, top_k, train_years,
                 if fut.size == 0:
                     continue  # no forward bar to exit on
                 fut_close = close_arr[fut]
-                ex = resolve_exit(fut_close, entry, thr)
+                ex = resolve_exit(fut_close, entry, thr, min_hold_days=settle_days())
                 if ex is not None:
                     reason = ex["reason"]
                     hold_days = int(ex["k"])

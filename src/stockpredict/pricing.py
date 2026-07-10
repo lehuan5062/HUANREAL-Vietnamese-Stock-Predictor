@@ -90,7 +90,6 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
         close_vnd            the buy price = today's close (no entry-price
                              prediction — you buy at the close)
         target_vnd           close * (1 + pred_profit) — the profit target
-        hold_days            estimated trading days held (= round(pred_days))
         score                P/N * recovery_prob — the ranking objective
         gross_reward_vnd, fees_round_trip_vnd, net_reward_vnd, breakeven_pct
         below_recovery_bar   True when the pick fails the quality bar
@@ -118,7 +117,6 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     # was removed), so ``close_vnd`` is the single buy price.
     close_v = (close_k * 1000.0).round(0)
     target_v = (close_v * (1.0 + pred_profit.clip(lower=0.0))).round(0)
-    hold_days = pred_days.round(0)
     # LLM-only picks carry no statistical recovery probability (the LLM's
     # DROP/selection vetting IS its probability judgement) — treat a missing
     # prob as 1.0 so score reduces to plain P/N and the prob gate is skipped.
@@ -144,7 +142,6 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
 
     out["close_vnd"] = close_v.astype("Int64")
     out["target_vnd"] = target_v.astype("Int64")
-    out["hold_days"] = hold_days.astype("Int64")
     out["score"] = score.round(6)
     out["gross_reward_vnd"] = gross_reward.round(0).astype("Int64")
     out["fees_round_trip_vnd"] = fees_total.round(0).astype("Int64")

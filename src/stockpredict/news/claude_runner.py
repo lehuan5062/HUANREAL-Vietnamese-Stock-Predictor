@@ -212,8 +212,8 @@ def write_plan(candidates: pd.DataFrame, on: dt.date | None = None,
         if "close_vnd" in row and pd.notna(row.get("close_vnd")):
             entry = int(row["close_vnd"])
             tgt = int(row["target_vnd"])
-            hold = row.get("hold_days")
-            hold_s = f"{int(hold)}d" if pd.notna(hold) else "?"
+            hold = row.get("pred_days")
+            hold_s = f"{int(round(hold))}d" if pd.notna(hold) else "?"
             fees = int(row.get("fees_round_trip_vnd", 0))
             net = int(row.get("net_reward_vnd", 0))
             below = bool(row.get("below_recovery_bar", False))

@@ -33,7 +33,7 @@ def _format_picks(picks) -> str:
     if picks is None or len(picks) == 0:
         return "(no picks)"
     show_cols = [c for c in [
-        "symbol", "close_vnd", "target_vnd", "hold_days",
+        "symbol", "close_vnd", "target_vnd",
         "fees_round_trip_vnd", "net_reward_vnd", "net_loss_vnd",
         "rr_ratio", "below_breakeven",
         "score", "pred_days", "pred_profit", "pred_recovery_prob",
@@ -82,8 +82,8 @@ def _format_picks_explained(picks) -> str:
                 # Rebound: flexible exit, no stop. Show buy / target / hold.
                 below = bool(r.get("below_recovery_bar", False))
                 verdict = "BELOW RECOVERY BAR (weak)" if below else "OK"
-                hold = r.get("hold_days")
-                hold_s = f"{int(hold)}d" if pd.notna(hold) else "?"
+                hold = r.get("pred_days")
+                hold_s = f"{int(round(hold))}d" if pd.notna(hold) else "?"
                 parts.append(f"  Trade: buy @ {entry:,} VND  |  target {tgt:,}  |  hold ≈ {hold_s} (sell at target)")
                 parts.append(f"  P&L per share (after ACBS fees {fees:,}): net {net:+,}  -> {verdict}")
             else:
@@ -203,9 +203,9 @@ def _print_sell_reminder(picks, *, mode_label="") -> None:
     click.echo("==> EXIT PLAN (flexible — sell when the price reaches the target):")
     for _, r in picks.reset_index(drop=True).iterrows():
         tgt = r.get("target_vnd")
-        hold = r.get("hold_days")
+        hold = r.get("pred_days")
         tgt_s = f"{int(tgt):,}" if pd.notna(tgt) else "?"
-        hold_s = f", expected ≈ {int(hold)}d" if pd.notna(hold) else ""
+        hold_s = f", expected ≈ {int(round(hold))}d" if pd.notna(hold) else ""
         click.echo(f"    {r['symbol']}: target {tgt_s} VND{hold_s}")
     if mode_label in ("claude", "gemini"):
         click.echo(f"    {mode_label.title()}: there is NO fixed sell day — do not "

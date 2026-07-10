@@ -88,7 +88,7 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
     ordered = snap.sort_values("score", ascending=False)
     out = add_recovery_price_suggestions(ordered.head(int(n_picks)))
     cols = ["symbol", "close",
-            "close_vnd", "target_vnd", "hold_days",
+            "close_vnd", "target_vnd",
             "score", "pred_days", "pred_profit", "pred_recovery_prob",
             "gross_reward_vnd", "fees_round_trip_vnd", "net_reward_vnd",
             "breakeven_pct", "below_recovery_bar", "suggested_max_units", "rank",

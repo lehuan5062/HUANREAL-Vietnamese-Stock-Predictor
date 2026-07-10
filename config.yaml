@@ -72,6 +72,10 @@ strategy:
     # (round-trip cost + profit_margin). See pricing.profit_threshold().
     profit_margin: 0.005     # extra return above fees to call a day "profitable"
     p_quantile: 0.65         # per-bucket P summary (0.65 = 65th percentile — slower, more realistic bounces)
+    # Earliest tradable exit day (T+2 settlement: shares bought today can't be
+    # sold until this many trading days later). A "recovery" cannot be labeled
+    # before this day, since it isn't executable. See target.recovery_episode.
+    settle_days: 2
     # Cap (trading days) on the historical recovery-labeling scan. NOT a trading
     # policy cap (the strategy holds until recovery) — it only bounds labeling so
     # it stays O(H) per symbol. Rows not recovered within it are right-censored.
