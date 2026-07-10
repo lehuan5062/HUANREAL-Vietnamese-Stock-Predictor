@@ -1,13 +1,6 @@
 @echo off
-title Rebound Strategy - CONFIG TUNER (1 random trial)
+title Rebound Strategy - CONFIG TUNER (looping until stopped)
 cd /d "%~dp0"
-
-echo.
-echo === Randomized config trial for rebound_sim_include_held ===
-echo Picks one random combination of backtest/recovery settings, runs the
-echo simulation once, records the result, then reverts config.yaml.
-echo Run this again (double-click) to add more trials to the results file.
-echo.
 
 if not exist ".venv\Scripts\python.exe" (
   echo ERROR: virtual environment not found at .venv
@@ -15,8 +8,18 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-.venv\Scripts\python.exe -m scripts.rebound_config_tuner
-
 echo.
-echo === Done. Result appended to reports\tuning\rebound_include_held_search.jsonl ===
-pause
+echo === Randomized config trials for rebound_sim_include_held ===
+echo Runs continuously: each loop picks one random config, runs the sim,
+echo appends the result, then reverts config.yaml.
+echo Press Ctrl+C to stop (then press Y to confirm).
+echo.
+
+set /a TRIAL=0
+
+:loop
+set /a TRIAL+=1
+echo.
+echo ==================== Trial %TRIAL% ====================
+.venv\Scripts\python.exe -m scripts.rebound_config_tuner
+goto :loop

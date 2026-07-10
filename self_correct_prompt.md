@@ -345,22 +345,23 @@ Write the diagnosis + proposals to
 routes to `claude_prompt.md`/source instead). Don't run it speculatively on
 every pass — only when there's an actual candidate edit to check.
 
-When Step 5 DOES implicate a knob: `run_config_suggest` analyzes the
-accumulated portfolio-level backtests from `scripts/rebound_config_tuner.py`
-(run manually via `run_config_tuner.bat`), which randomizes essentially every
-prediction-affecting `config.yaml` knob (liquidity/history gates, downtrend
-gates, recovery/model thresholds, pricing knobs, walk-forward windows — ~24
-knobs total) each on its own random 1-year window, scored by
-`annualized_IRR`. Since knobs are sampled independently and jointly, a
-per-knob marginal analysis (grouping/correlating one knob at a time against
-IRR, averaging over the others) is a legitimate signal — not just eyeballing
-the single best row.
+When Step 5 DOES implicate a knob, run:
 
 ```
 .venv\Scripts\python.exe -m scripts.rebound_config_suggest
 ```
 
-This prints, per knob: grouped mean IRR (categorical) or correlation with IRR
+It analyzes the accumulated portfolio-level backtests recorded by
+`scripts.rebound_config_tuner` (which randomizes essentially every
+prediction-affecting `config.yaml` knob — liquidity/history gates, downtrend
+gates, recovery/model thresholds, pricing knobs, walk-forward windows, ~24
+knobs total — each on its own random 1-year window, scored by
+`annualized_IRR`). Since knobs are sampled independently and jointly, a
+per-knob marginal analysis (grouping/correlating one knob at a time against
+IRR, averaging over the others) is a legitimate signal — not just eyeballing
+the single best row.
+
+It prints, per knob: grouped mean IRR (categorical) or correlation with IRR
 (continuous), flags thin/low-confidence groups, and a suggested value where
 the evidence supports one. It already handles the too-few-trials case (prints
 "not enough trials yet" and stops) and prints its own caveats — read what it
@@ -370,15 +371,15 @@ prints, don't second-guess or re-derive it.
 - **Step 5 identifies THAT a knob-related problem exists and WHICH area**
   (e.g. "Focus 1 found under-recovery in `min_recovery_prob`'s territory").
   Step 5 alone **never** determines the new value.
-- **The actual proposed number always comes from this step's output.** If
-  `run_config_suggest` gives a usable suggested value for that knob, propose
-  it, citing both the Step 5 finding (why this knob) and this step's evidence
-  (why this value).
-- **If `run_config_suggest` says "not enough trials yet," or flags that knob
-  as thin/no-suggestion** — do NOT propose a specific number. Write the Step 5
-  finding as-is, and recommend running `run_config_tuner`/`run_config_suggest`
-  more before a numeric edit can be justified. A finding without a
-  well-supported number is a valid, honest outcome here.
+- **The actual proposed number always comes from this step's output.** If it
+  gives a usable suggested value for that knob, propose it, citing both the
+  Step 5 finding (why this knob) and this step's evidence (why this value).
+- **If it says "not enough trials yet," or flags that knob as
+  thin/no-suggestion** — do NOT propose a specific number. Write the Step 5
+  finding as-is, and tell the user to accumulate more tuner trials (they run
+  `scripts.rebound_config_tuner` themselves) before a numeric edit can be
+  justified. A finding without a well-supported number is a valid, honest
+  outcome here.
 - **If this step's suggested direction contradicts an unmistakable Step 5
   finding** (e.g. it suggests loosening a gate but Step 5 found clear
   falling-knife evidence) — do not propose the edit; surface the conflict
@@ -432,9 +433,10 @@ If a `config.yaml` knob that feeds the model was changed
 time and need no retrain.) Remind the user: one report ≠ a backtest — re-run
 self-correction on another report after more picks resolve before treating any
 change as confirmed. For a portfolio-level sanity check, they can re-run
-`scripts/rebound_portfolio_sim.py`. If a backtest-window or recovery-model
-knob was changed, also suggest running `run_config_tuner.bat` a few more
-times to keep building search evidence for Step 6a in future passes.
+`.venv\Scripts\python.exe -m scripts.rebound_portfolio_sim`. If a
+backtest-window or recovery-model knob was changed, also suggest they
+accumulate more `scripts.rebound_config_tuner` trials to keep building search
+evidence for Step 6a in future passes.
 
 ## What NOT to do
 

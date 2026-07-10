@@ -162,15 +162,18 @@ def main():
 
     raw = yaml.safe_load(original_bytes.decode("utf-8"))
     mutated = _apply_overrides(raw, flat)
-    CONFIG_PATH.write_text(yaml.safe_dump(mutated, sort_keys=False), encoding="utf-8")
-    load_config.cache_clear()
 
-    print("Randomized config for this trial:")
-    print(json.dumps(flat, indent=2, default=str))
-    print(f"window: {window_start.date()} -> {window_end.date()}")
-    print()
-
+    # Everything from here on touches config.yaml, so it's all inside try/finally:
+    # a Ctrl+C at any point (including mid-write) still restores the original.
     try:
+        CONFIG_PATH.write_text(yaml.safe_dump(mutated, sort_keys=False), encoding="utf-8")
+        load_config.cache_clear()
+
+        print("Randomized config for this trial:")
+        print(json.dumps(flat, indent=2, default=str))
+        print(f"window: {window_start.date()} -> {window_end.date()}")
+        print()
+
         from scripts.rebound_sim_include_held import _build_data, simulate
 
         print("Building data (retrains the recovery model per anchor)...", flush=True)
