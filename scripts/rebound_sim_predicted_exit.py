@@ -49,6 +49,17 @@ def _build_data():
 def simulate_strict_exit(data=None):
     """Exit strictly on the predicted exit_date at the predicted exit_price."""
     per_day, paths, days = data if data is not None else _build_data()
+    if not days:
+        return {
+            "execution": "strict_exit_on_predicted_day", "span": "no eligible days",
+            "signals": 0, "missed_fills_gap_up": 0, "fill_rate": float("nan"),
+            "total_trades": 0, "predicted_day_exits": 0, "unsold_counted_as_loss": 0,
+            "win_rate": float("nan"), "mean_hold_days": float("nan"),
+            "total_capital_injected_VND": 0.0, "total_fees_paid_VND": 0.0,
+            "final_value_VND": 0.0, "total_profit_VND": 0.0,
+            "profit_on_injected": float("nan"), "annualized_IRR": float("nan"),
+            "book_max_drawdown": float("nan"),
+        }
     buy_fee, sell_fee = _fees()
 
     cash = 0.0

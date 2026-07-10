@@ -63,6 +63,17 @@ def simulate(data=None):
     No sub-modes — this sim has ONE rule set.
     """
     per_day, paths, days = data if data is not None else _build_data()
+    if not days:
+        return {
+            "span": "no eligible days", "days_all_candidates_held": 0,
+            "signals": 0, "missed_fills_gap_up": 0, "fill_rate": float("nan"),
+            "total_trades": 0, "sold_at_profit": 0, "unsold_counted_as_loss": 0,
+            "win_rate": float("nan"), "mean_hold_days_winners": float("nan"),
+            "total_capital_injected_VND": 0.0, "total_fees_paid_VND": 0.0,
+            "final_value_VND": 0.0, "total_profit_VND": 0.0,
+            "profit_on_injected": float("nan"), "annualized_IRR": float("nan"),
+            "book_max_drawdown": float("nan"),
+        }
     thr = profit_threshold()
     buy_fee, sell_fee = _fees()
 
