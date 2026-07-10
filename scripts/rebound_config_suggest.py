@@ -30,8 +30,24 @@ MIN_TRIALS = 5
 MIN_GROUP_SIZE = 3
 TERCILE_MIN_TRIALS = 12
 
-CATEGORICAL_KNOBS = ["train_window_years", "oos_window_months", "step_months"]
-CONTINUOUS_KNOBS = ["min_recovery_prob", "p_quantile", "profit_margin"]
+# Knob names are the FULL dotted config paths the tuner records under `config.`
+# (rebound_config_tuner writes flat dotted keys). List-valued knobs
+# (state_buckets.*_edges) are recorded in the JSONL but not scalar-analyzed here.
+CATEGORICAL_KNOBS = [
+    "backtest.train_window_years", "backtest.oos_window_months", "backtest.step_months",
+    "strategy.recovery.min_ticker_obs", "strategy.recovery.min_bucket_obs",
+    "strategy.recovery.label_max_horizon",
+    "universe.liquidity_filter.min_close_vnd", "universe.liquidity_filter.min_adv_active_days",
+    "universe.liquidity_filter.min_adv_vnd", "universe.liquidity_filter.min_history_days",
+    "pricing.overbought_rsi_max", "pricing.corp_action_lookback",
+    "features.rsi_period", "strategy.downtrend.rsi_floor", "strategy.downtrend.rsi_ceil",
+]
+CONTINUOUS_KNOBS = [
+    "strategy.recovery.min_recovery_prob", "strategy.recovery.p_quantile",
+    "strategy.recovery.profit_margin",
+    "strategy.downtrend.mom20_max", "strategy.downtrend.high_prox_max",
+    "pricing.ceiling_tol", "pricing.max_participation_pct",
+]
 
 
 def _load_trials() -> pd.DataFrame:
@@ -90,9 +106,11 @@ def main():
         return
 
     print(f"{n} trial(s) recorded in {RESULTS_PATH}")
+    cat_knobs = [k for k in CATEGORICAL_KNOBS if f"config.{k}" in df.columns]
+    con_knobs = [k for k in CONTINUOUS_KNOBS if f"config.{k}" in df.columns]
     print()
     print("=== Categorical knobs (grouped by value) ===")
-    for knob in CATEGORICAL_KNOBS:
+    for knob in cat_knobs:
         print(f"\n-- {knob} --")
         grouped = _analyze_categorical(df, knob)
         print(grouped.to_string(index=False))
@@ -102,7 +120,7 @@ def main():
     print()
     print("=== Continuous knobs (correlation with annualized_IRR) ===")
     continuous_results = {}
-    for knob in CONTINUOUS_KNOBS:
+    for knob in con_knobs:
         res = _analyze_continuous(df, knob)
         continuous_results[knob] = res
         print(f"\n-- {knob} --")
@@ -114,29 +132,31 @@ def main():
 
     print()
     print("=== Suggested config (advisory - cross-check before applying) ===")
-    for knob in CATEGORICAL_KNOBS:
+    for knob in cat_knobs:
         grouped = _analyze_categorical(df, knob)
         usable = grouped[~grouped["thin"]]
         if usable.empty:
             print(f"  {knob}: no group has >=3 trials yet - no suggestion")
         else:
             best = usable.iloc[0]
-            print(f"  backtest.{knob}: {best[f'config.{knob}']} "
+            print(f"  {knob}: {best[f'config.{knob}']} "
                   f"(mean IRR {best['mean_irr']:.4f} over {int(best['count'])} trials)")
-    for knob in CONTINUOUS_KNOBS:
+    for knob in con_knobs:
         res = continuous_results[knob]
         if res["terciles"] is not None:
             best_row = res["terciles"].sort_values("mean_irr", ascending=False).iloc[0]
-            print(f"  strategy.recovery.{knob}: prefer range {best_row['range_']} "
+            print(f"  {knob}: prefer range {best_row['range_']} "
                   f"(mean IRR {best_row['mean_irr']:.4f} over {int(best_row['count'])} trials)")
         else:
-            print(f"  strategy.recovery.{knob}: {res['read']} (not enough trials for a range yet)")
+            print(f"  {knob}: {res['read']} (not enough trials for a range yet)")
 
     print()
     print("=== Caveats ===")
-    print("- All trials backtest the SAME fixed historical window (2024-01-02..present).")
-    print("  A knob that looks good here may be overfit to this exact period, not a")
-    print("  robust improvement.")
+    print("- Each trial backtests a DIFFERENT random 1-year window, so raw IRR is")
+    print("  NOT comparable across trials (a 2021-bull window beats a 2022-bear one")
+    print("  regardless of config). Only the per-knob averages above are meaningful:")
+    print("  window difficulty averages out within each knob group because the")
+    print("  window is randomized independently of the knobs. Do NOT rank raw trials.")
     print("- These are correlational, not causal, and sample sizes are still small.")
     print("- Advisory only - don't copy this verbatim into config.yaml. Cross-check")
     print("  against per-pick diagnosis before proposing an edit.")

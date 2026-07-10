@@ -338,52 +338,60 @@ Write the diagnosis + proposals to
 `reports\self_correction_<YYYY-MM-DD>_<sig>.md` (use the report's `as_of` /
 `run_signature`). Keep it lean: findings + proposed edits + applied tracking.
 
-### Step 6a — Check config-tuner search history (if available)
+### Step 6a — Run config-tuner search analysis (only if Step 5 points at a config.yaml knob)
 
-`scripts/rebound_config_tuner.py` (run manually via `run_config_tuner.bat`)
-accumulates portfolio-level backtests over randomized
-`(train_window_years, oos_window_months, step_months, min_recovery_prob,
-p_quantile, profit_margin)` combinations, each scored by `annualized_IRR`.
-This is the ONLY evidence source that speaks to the backtest-window knobs at
-all (Step 5's per-pick diagnosis can't see them), and it's
-corroborating/conflicting evidence for `min_recovery_prob` / `p_quantile` /
-`profit_margin`. Since the tuner samples all 6 knobs independently and
-jointly on every trial, a per-knob marginal analysis (grouping/correlating
-one knob at a time against IRR, averaging over the other 5) is a legitimate
-signal — not just eyeballing the single best row.
+**Skip this step entirely if Step 5 found no finding that implicates a
+`config.yaml` knob** (e.g. "no systemic pattern found," or every finding
+routes to `claude_prompt.md`/source instead). Don't run it speculatively on
+every pass — only when there's an actual candidate edit to check.
+
+When Step 5 DOES implicate a knob: `run_config_suggest` analyzes the
+accumulated portfolio-level backtests from `scripts/rebound_config_tuner.py`
+(run manually via `run_config_tuner.bat`), which randomizes essentially every
+prediction-affecting `config.yaml` knob (liquidity/history gates, downtrend
+gates, recovery/model thresholds, pricing knobs, walk-forward windows — ~24
+knobs total) each on its own random 1-year window, scored by
+`annualized_IRR`. Since knobs are sampled independently and jointly, a
+per-knob marginal analysis (grouping/correlating one knob at a time against
+IRR, averaging over the others) is a legitimate signal — not just eyeballing
+the single best row.
 
 ```
 .venv\Scripts\python.exe -m scripts.rebound_config_suggest
 ```
 
-This prints, per knob: grouped mean IRR (categorical knobs) or correlation
-with IRR (continuous knobs), flags thin/low-confidence groups, and a
-suggested value where the evidence supports one. It already handles the
-too-few-trials case (prints "not enough trials yet" and stops) and prints
-its own caveats — read what it prints, don't second-guess or re-derive it.
+This prints, per knob: grouped mean IRR (categorical) or correlation with IRR
+(continuous), flags thin/low-confidence groups, and a suggested value where
+the evidence supports one. It already handles the too-few-trials case (prints
+"not enough trials yet" and stops) and prints its own caveats — read what it
+prints, don't second-guess or re-derive it.
 
-- **Advisory only, same as the rest of this prompt** — don't copy its
-  suggested values verbatim into `config.yaml`; cross-check them against
-  Step 5's per-pick diagnosis (if Step 5 found an unrelated problem, e.g.
-  falling knives, tuner evidence about backtest windows doesn't override
-  that).
+**Once run, it gates what Step 6 may propose for `config.yaml`:**
+- **Step 5 identifies THAT a knob-related problem exists and WHICH area**
+  (e.g. "Focus 1 found under-recovery in `min_recovery_prob`'s territory").
+  Step 5 alone **never** determines the new value.
+- **The actual proposed number always comes from this step's output.** If
+  `run_config_suggest` gives a usable suggested value for that knob, propose
+  it, citing both the Step 5 finding (why this knob) and this step's evidence
+  (why this value).
+- **If `run_config_suggest` says "not enough trials yet," or flags that knob
+  as thin/no-suggestion** — do NOT propose a specific number. Write the Step 5
+  finding as-is, and recommend running `run_config_tuner`/`run_config_suggest`
+  more before a numeric edit can be justified. A finding without a
+  well-supported number is a valid, honest outcome here.
+- **If this step's suggested direction contradicts an unmistakable Step 5
+  finding** (e.g. it suggests loosening a gate but Step 5 found clear
+  falling-knife evidence) — do not propose the edit; surface the conflict
+  explicitly and let the user decide.
 
 **Edit-target priority:**
-1. **`config.yaml`** — the primary lever:
-   - `strategy.recovery.min_recovery_prob` — the healthy filter (check config.yaml for current value).
-     Raise if picks under-recover / knives slip through.
-   - `strategy.downtrend.*` — `mom20_max`, `high_prox_max`, `rsi_floor` (0=off),
-     `rsi_ceil` — widen or tighten the candidate pool.
-   - `strategy.recovery.state_buckets` / `p_quantile` / `min_ticker_obs` /
-     `min_bucket_obs` / `profit_margin` — the empirical estimator shape
-     (Focus 2 and Focus 4; high bar). Cross-check `p_quantile` and
-     `profit_margin` proposals against Step 6a if search history exists.
-   - `backtest.train_window_years` / `oos_window_months` / `step_months` —
-     the walk-forward mechanics. Only Step 6a's search history can motivate
-     these; propose an edit here ONLY if it has ≥5 trials clustering around
-     a value that beats the current config's neighborhood.
-   - `strategy.recovery.stop_loss_pct` (0 = off, the default) — the only exit
-     override left. **Note the backtest finding: a price stop HURTS this
+1. **`config.yaml`** — the primary lever, but ONLY via Step 6a above: for any
+   knob Step 5 flags, check its Step 6a output and propose its suggested value
+   only if usable per the gate above. Do not hand-pick a "raise/lower it a
+   bit" number from diagnosis alone.
+   - **Exception — `strategy.recovery.stop_loss_pct`** (0 = off, the default):
+     the tuner does not search this knob, so no automated evidence exists
+     either way. **Note the backtest finding: a price stop HURTS this
      mean-reversion strategy (it sells right before the bounce); off is
      deliberate.** Don't propose turning it on without a strong, user-endorsed
      reason. (There is no time cap — the strategy holds until profit.)

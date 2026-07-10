@@ -48,19 +48,21 @@ def _lot(sh):
     return int(sh // 100 * 100)
 
 
-def _build_data():
+def _build_data(start=START, end=None):
     from stockpredict.dataset import build_panel
     panel = build_panel(require_target=True)
-    per_day, paths = _daily_candidates(panel, START)
+    per_day, paths = _daily_candidates(panel, start, end)
     return per_day, paths, sorted(per_day.keys())
 
 
-def simulate(data=None):
+def simulate(data=None, start=START, end=None):
     """Simulate with hardcoded limit_next_day execution.
 
-    No sub-modes — this sim has ONE rule set.
+    No sub-modes — this sim has ONE rule set. ``start``/``end`` bound the
+    backtest window when ``data`` is not supplied (default = the module START
+    → last bar, i.e. identical to prior behavior).
     """
-    per_day, paths, days = data if data is not None else _build_data()
+    per_day, paths, days = data if data is not None else _build_data(start, end)
     thr = profit_threshold()
     buy_fee, sell_fee = _fees()
 

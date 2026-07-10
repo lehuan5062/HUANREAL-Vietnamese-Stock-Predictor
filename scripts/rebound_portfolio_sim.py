@@ -48,7 +48,7 @@ SEED_DAYS = 3
 SLOTS = 3
 
 
-def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
+def _daily_candidates(panel: pd.DataFrame, start: str, end=None) -> tuple[dict, dict]:
     """Return (per_day, paths):
       per_day[date] = list of candidate dicts (score-ranked) with
         {symbol, close, max_units, next_open, next_low,
@@ -56,11 +56,18 @@ def _daily_candidates(panel: pd.DataFrame, start: str) -> tuple[dict, dict]:
       paths[symbol] = (index_np, open_np, low_np, close_np) forward price path.
     ``next_open`` / ``next_low`` are the NEXT trading day's bar (None when the
     signal day is the last bar) — used by execution models that place the buy
-    order the following morning. Mirrors the walk-forward training/scoring loop."""
+    order the following morning. Mirrors the walk-forward training/scoring loop.
+
+    ``end`` caps the OOS evaluation window (anchors + candidate-days are limited
+    to ``date < end``); None means "run to the last bar in the panel". Note the
+    full ``paths`` (forward price series per symbol) are always built over the
+    whole panel, so exits after ``end`` still resolve — only signal generation
+    is capped."""
     cfg = load_config()
     bt = cfg.backtest
     start = pd.to_datetime(start)
-    end = panel.index.max()
+    data_end = panel.index.max()
+    end = data_end if end is None else min(pd.to_datetime(end), data_end)
     train_years = int(bt["train_window_years"])
     oos_months = int(bt["oos_window_months"])
     step_months = int(bt["step_months"])

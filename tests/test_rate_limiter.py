@@ -277,7 +277,7 @@ def test_worker_applies_the_fixed_cooldown_on_a_confirmed_429(monkeypatch):
         data = {
             "api_per_min": 60, "api_per_min_overrides": {},
             "cooldown_seconds": cooldown_seconds, "cooldown_seconds_overrides": {},
-            "bypass_vnai_quota": True, "history_start": "2018-01-01",
+            "bypass_vnai_quota": True, "history_duration_years": 9,
         }
     monkeypatch.setattr(fx, "load_config", lambda: _Cfg())
     fx._LIMITERS.clear()

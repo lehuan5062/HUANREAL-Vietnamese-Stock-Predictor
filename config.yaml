@@ -3,7 +3,10 @@
 
 data:
   cache_dir: cache           # parquet cache root
-  history_start: "2018-01-01"
+  # Rolling history depth: a full re-fetch pulls the last N years from *today*,
+  # recomputed each run (not a frozen calendar date), so the covered window
+  # slides forward automatically over time.
+  history_duration_years: 9
   exchanges: [HSX, HNX, UPCOM]
   # Bypass vnstock's client-side vnai quota (the guest-tier 20/min cap) by
   # calling the underlying public provider endpoint directly. vnstock only

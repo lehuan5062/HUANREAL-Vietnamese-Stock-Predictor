@@ -634,7 +634,10 @@ def update_symbol(symbol: str, full: bool = False,
     and force an extra refetch later.
     """
     cfg = load_config()
-    start_full = cfg.data["history_start"]
+    # Rolling history floor: last N years from today, recomputed each call.
+    _dur = int(cfg.data.get("history_duration_years", 9))
+    start_full = (pd.Timestamp.now().normalize()
+                  - pd.DateOffset(years=_dur)).strftime("%Y-%m-%d")
     cached = read_ohlcv(symbol)
 
     # Look up the latest finalized bar once. We use it both to short-circuit
