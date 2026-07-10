@@ -1,15 +1,28 @@
 """Analyze accumulated rebound_config_tuner.py trials to suggest config values.
 
 Reads reports/tuning/rebound_include_held_search.jsonl (written by
-scripts/rebound_config_tuner.py) and does a per-knob marginal analysis:
-since the tuner samples all 6 knobs independently and jointly on every
-trial, grouping/correlating one knob at a time against annualized_IRR
-(averaging over the other 5) is a legitimate signal — not just eyeballing
-the single best row.
+scripts/rebound_config_tuner.py) and does two layers of analysis:
 
-Prints the analysis + a suggested config to stdout. Never writes any file,
-never touches config.yaml. rebound_config_tuner.py is untouched by this
-script — it only reads what the tuner already wrote.
+1. Per-knob marginal analysis (always): since the tuner samples every knob
+   independently and jointly on every trial, grouping/correlating one knob at
+   a time against annualized_IRR (averaging over the others) is a legitimate
+   signal — not just eyeballing the single best row. Window-difficulty noise
+   averages out within each knob's group because the window is randomized
+   independently of the knobs.
+2. ML surrogate (once >= ML_MIN_TRIALS trials exist): a LightGBM model
+   trained on excess_irr (each trial's IRR minus what a plain buy-and-hold
+   would have returned over that same random window — this removes the
+   "was it a good year" noise that raw IRR can't distinguish from config
+   skill). Unlike the marginal analysis, this can see COMBINATIONS of knobs,
+   not just one at a time. Prints a holdout R² so you can tell whether it
+   found real signal or is just fitting noise, then feature importances and
+   a few concrete candidate configs it predicts would score well.
+
+Prints everything to stdout. Never writes any file, never touches
+config.yaml. rebound_config_tuner.py is untouched by this script — it only
+reads what the tuner already wrote (and reuses its knob-sampling functions to
+generate ML candidate configs, so ranges/coordination never drift out of
+sync between the two scripts).
 
     python -m scripts.rebound_config_suggest
 """
@@ -29,6 +42,18 @@ RESULTS_PATH = PROJECT_ROOT / "reports" / "tuning" / "rebound_include_held_searc
 MIN_TRIALS = 5
 MIN_GROUP_SIZE = 3
 TERCILE_MIN_TRIALS = 12
+ML_MIN_TRIALS = 50
+ML_CANDIDATE_SAMPLES = 5000
+ML_TOP_N = 5
+
+# Knobs whose config value is a small sorted LIST, not a scalar (the
+# coordinated RSI/high-prox bucket edges). Expanded into individual
+# positional features for the ML surrogate; excluded from the marginal
+# per-knob tables below (which only handle scalars).
+LIST_KNOBS = [
+    "strategy.recovery.state_buckets.rsi_edges",
+    "strategy.recovery.state_buckets.high_prox_edges",
+]
 
 # Knob names are the FULL dotted config paths the tuner records under `config.`
 # (rebound_config_tuner writes flat dotted keys). List-valued knobs
@@ -97,6 +122,105 @@ def _analyze_continuous(df: pd.DataFrame, knob: str) -> dict:
     return out
 
 
+def _feature_matrix(df: pd.DataFrame, scalar_knobs: list[str]) -> pd.DataFrame:
+    """ML feature matrix from a trials dataframe: scalar knob columns as-is,
+    LIST_KNOBS (rsi_edges/high_prox_edges) expanded into individual
+    positional columns (edge__0, edge__1, edge__2) since a model can't take
+    a list-valued cell directly."""
+    cols = {}
+    for k in scalar_knobs:
+        col = f"config.{k}"
+        if col in df.columns:
+            cols[k] = df[col]
+    for k in LIST_KNOBS:
+        col = f"config.{k}"
+        if col in df.columns:
+            expanded = pd.DataFrame(df[col].tolist(), index=df.index)
+            for i in range(expanded.shape[1]):
+                cols[f"{k}__{i}"] = expanded[i]
+    return pd.DataFrame(cols)
+
+
+def _flat_to_feature_row(flat: dict, scalar_knobs: list[str]) -> dict:
+    """Same expansion as _feature_matrix, but for one freshly-sampled
+    candidate config (rebound_config_tuner._sample_flat() output) instead of
+    a historical trials dataframe row."""
+    row = {}
+    for k in scalar_knobs:
+        if k in flat:
+            row[k] = flat[k]
+    for k in LIST_KNOBS:
+        if k in flat:
+            for i, v in enumerate(flat[k]):
+                row[f"{k}__{i}"] = v
+    return row
+
+
+def _run_ml_surrogate(df: pd.DataFrame, cat_knobs: list[str], con_knobs: list[str]) -> None:
+    """LightGBM surrogate: learns excess_irr from knob combinations (not just
+    one knob at a time), reports honest holdout R², feature importances, and
+    a handful of concrete candidate configs it predicts would score well.
+    Skips cleanly (prints why) if there's not enough usable data yet."""
+    if "excess_irr" not in df.columns:
+        print(f"(ML surrogate: no trials have excess_irr yet - re-run the tuner "
+              f"to accumulate some, then re-run this script)")
+        return
+
+    scalar_knobs = cat_knobs + con_knobs
+    X = _feature_matrix(df, scalar_knobs)
+    y = df["excess_irr"]
+    valid = X.notna().all(axis=1) & y.notna()
+    X, y = X[valid], y[valid]
+
+    if len(X) < ML_MIN_TRIALS:
+        print(f"(ML surrogate needs >= {ML_MIN_TRIALS} complete trials with "
+              f"excess_irr; have {len(X)} - skipping for now)")
+        return
+
+    from lightgbm import LGBMRegressor
+    from sklearn.metrics import r2_score
+    from sklearn.model_selection import train_test_split
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42)
+    model = LGBMRegressor(n_estimators=200, max_depth=4, min_child_samples=5,
+                          verbosity=-1)
+    model.fit(X_train, y_train)
+    r2 = r2_score(y_test, model.predict(X_test))
+
+    print()
+    print("=== ML surrogate (LightGBM, trained on excess_irr) ===")
+    print(f"Trained on {len(X_train)} trials, holdout R^2 on {len(X_test)} "
+          f"unseen trials: {r2:.3f}")
+    if r2 < 0.05:
+        print("R^2 is near zero: the model has NOT found real signal yet - "
+              "treat everything below as noise, not a pattern. Keep")
+        print("accumulating trials before trusting this section.")
+
+    importances = sorted(zip(X.columns, model.feature_importances_),
+                         key=lambda t: -t[1])
+    print()
+    print("Feature importance (which knobs the model found most predictive,")
+    print("accounting for combinations - this is what a pure per-knob average can't see):")
+    for name, imp in importances:
+        print(f"  {name}: {imp}")
+
+    from scripts.rebound_config_tuner import _sample_flat
+    candidates = [_sample_flat() for _ in range(ML_CANDIDATE_SAMPLES)]
+    cand_features = pd.DataFrame(
+        [_flat_to_feature_row(c, scalar_knobs) for c in candidates])
+    cand_features = cand_features[X.columns]  # match training column order
+    preds = model.predict(cand_features)
+    order = preds.argsort()[::-1][:ML_TOP_N]
+
+    print()
+    print(f"Model's top {ML_TOP_N} predicted-best configs, out of "
+          f"{ML_CANDIDATE_SAMPLES} randomly sampled candidates:")
+    for rank, i in enumerate(order, 1):
+        print(f"\n  #{rank}  predicted excess_irr = {preds[i]:.4f}")
+        print(json.dumps(candidates[int(i)], indent=4, default=str))
+
+
 def main():
     df = _load_trials()
     n = len(df)
@@ -150,6 +274,8 @@ def main():
         else:
             print(f"  {knob}: {res['read']} (not enough trials for a range yet)")
 
+    _run_ml_surrogate(df, cat_knobs, con_knobs)
+
     print()
     print("=== Caveats ===")
     print("- Each trial backtests a DIFFERENT random 1-year window, so raw IRR is")
@@ -158,6 +284,9 @@ def main():
     print("  window difficulty averages out within each knob group because the")
     print("  window is randomized independently of the knobs. Do NOT rank raw trials.")
     print("- These are correlational, not causal, and sample sizes are still small.")
+    print("- The ML surrogate above (if it ran) uses excess_irr specifically to")
+    print("  remove window-luck noise, and its own holdout R^2 tells you whether it")
+    print("  found real signal - a low R^2 means treat its output as noise too.")
     print("- Advisory only - don't copy this verbatim into config.yaml. Cross-check")
     print("  against per-pick diagnosis before proposing an edit.")
 

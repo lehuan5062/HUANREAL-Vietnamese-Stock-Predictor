@@ -31,11 +31,13 @@ import copy
 import datetime
 import json
 import random
+import statistics
 import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -148,6 +150,39 @@ def _pick_window(train_years: int):
     return start, end
 
 
+def _benchmark_irr(paths: dict, window_start: pd.Timestamp, window_end: pd.Timestamp) -> float:
+    """Equal-weighted buy-and-hold return across every symbol with price data
+    spanning [window_start, window_end], annualized by the ACTUAL day count of
+    that slice (not an assumed 365) — works identically for any two dates,
+    calendar-year-aligned or not, since it's just two lookups into the same
+    per-symbol price paths the sim already built for this trial.
+
+    Median (not mean) across symbols — robust to a handful of delistings or
+    data gaps skewing the average. NaN if no symbol has valid data on both
+    ends (e.g. the degenerate empty-paths case)."""
+    start_np = np.datetime64(window_start)
+    end_np = np.datetime64(window_end)
+    rets = []
+    for idx_arr, _o, _l, close_arr in paths.values():
+        if idx_arr.size == 0:
+            continue
+        i0 = int(np.searchsorted(idx_arr, start_np))
+        i1 = int(np.searchsorted(idx_arr, end_np, side="right")) - 1
+        if i0 >= len(idx_arr) or i1 < 0 or i0 > i1:
+            continue
+        start_close = float(close_arr[i0])
+        end_close = float(close_arr[i1])
+        if start_close > 0:
+            rets.append(end_close / start_close - 1.0)
+    if not rets:
+        return float("nan")
+    median_ret = statistics.median(rets)
+    days_span = (window_end - window_start).days
+    if days_span <= 0:
+        return float("nan")
+    return (1.0 + median_ret) ** (365.0 / days_span) - 1.0
+
+
 def main():
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -181,9 +216,12 @@ def main():
                            end=window_end.strftime("%Y-%m-%d"))
         print("Running simulation...", flush=True)
         result = simulate(data=data)
+        benchmark_irr = _benchmark_irr(data[1], window_start, window_end)
     finally:
         CONFIG_PATH.write_bytes(original_bytes)
         load_config.cache_clear()
+
+    excess_irr = result["annualized_IRR"] - benchmark_irr
 
     record = {
         "timestamp": timestamp,
@@ -191,6 +229,8 @@ def main():
         "window_end": window_end.strftime("%Y-%m-%d"),
         "config": flat,
         "result": result,
+        "benchmark_irr": benchmark_irr,
+        "excess_irr": excess_irr,
     }
     with open(RESULTS_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, default=str) + "\n")
@@ -199,6 +239,8 @@ def main():
     print("=== Trial result ===")
     print(f"window: {window_start.date()} -> {window_end.date()}")
     print(f"annualized_IRR: {result['annualized_IRR']:.4f}")
+    print(f"benchmark_irr (buy-and-hold, same window): {benchmark_irr:.4f}")
+    print(f"excess_irr (config skill vs. just holding): {excess_irr:.4f}")
     print(f"total_profit_VND: {result['total_profit_VND']:,.0f}")
     print(f"book_max_drawdown: {result['book_max_drawdown']:.4f}")
     print()

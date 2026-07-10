@@ -1,15 +1,12 @@
 # Vietnamese Rebound Stock Predictor — Self-correction prompt
 
-Paste the contents of this file into a Claude Code or Cowork session. Claude runs
-a one-shot **self-correction** pass over a picks report you choose: cross-reference
-the predictions with what actually happened, diagnose systematic errors, and
-propose program-level edits to `config.yaml` (and, where relevant, `claude_prompt.md`)
-so future rebound runs do better.
-
-This is **the only self-correction path**. Day-to-day runs do not see
-past-performance feedback — each scores tickers purely on today's evidence. To act
-on accumulated history you run this prompt manually on a chosen past picks file.
-The output is targeted edits to the program, not nudges to individual scores.
+Paste this file into a Claude Code or Cowork session. Claude runs a one-shot
+**self-correction** pass over a picks report you choose: cross-reference the
+predictions with what actually happened, diagnose systematic errors, and propose
+program-level edits to `config.yaml` (and, where relevant, `claude_prompt.md`).
+This is the only self-correction path — day-to-day runs score tickers purely on
+today's evidence with no past-performance feedback. The output is targeted edits
+to the program, not nudges to individual scores.
 
 ## What the strategy is (so the diagnosis is grounded)
 
@@ -19,10 +16,10 @@ eventual-**recovery probability** (`pred_recovery_prob`) — dominated by that
 ticker's OWN history of bouncing. It ranks by `score = P/N × recovery_prob` and
 gates out names below `strategy.recovery.min_recovery_prob` (the "healthy" filter).
 The trade buys at the close and **holds until the close first clears the profit
-target** (a flexible exit; there is no time cap, and the stop-loss is off by default).
-So a pick **resolves** (`evaluated=True`, `recovered_flag=True`,
-`actual_exit_date` set, `exit_reason="recovery"`) only when it bounces; a pick
-that hasn't bounced yet stays **open** (`evaluated=False`).
+target** — no time cap, stop-loss off by default. A pick **resolves**
+(`evaluated=True`, `recovered_flag=True`, `actual_exit_date` set,
+`exit_reason="recovery"`) only when it bounces; otherwise it stays **open**
+(`evaluated=False`).
 
 ## Style
 
@@ -31,21 +28,21 @@ Keep numbers exact but say what they mean in everyday terms.
 
 ## Your job
 
-Take a picks report the user names, gather realized outcomes for its picks,
-diagnose what went wrong / right, and propose narrowly scoped edits. Show every
-diff and wait for explicit per-file approval — never silently mutate files.
+Take a picks report the user names, gather realized outcomes, diagnose what went
+wrong / right, and propose narrowly scoped edits. Show every diff and wait for
+explicit per-file approval — never silently mutate files.
 
 ## Step 0 — Refresh ledger with current prices (mandatory)
 
-**Always run this first.** It fetches current prices for all previously-picked symbols and updates the ledger's `recovered_flag` and `evaluated` fields so they reflect actual outcomes (not stale data).
+**Always run this first.** It fetches current prices for all previously-picked
+symbols and updates the ledger's `recovered_flag` / `evaluated` fields; without
+it the resolution status is stale.
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli evaluate
 ```
 
-This refreshes the picked symbols' OHLCV cache and checks which ones have bounced to their profit target. Without this, the ledger flags are stale and resolution status will be wrong.
-
-After `evaluate` completes, proceed to Step 1.
+Then proceed to Step 1.
 
 ## Step 1 — Scan the ledger for resolved vs open, then ask
 
@@ -77,11 +74,7 @@ for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
         if pd.isna(r['pred_days']): continue
         checkpoint_date = _next_trading_offset(pd.Timestamp(r['as_of']), max(int(round(r['pred_days'])), 1))
         if today >= checkpoint_date: checkpoint += 1
-    # Sellability: T+2 settlement means shares bought at as_of's close can't be
-    # sold before as_of + 2 trading days. A 'recovered' exit dated earlier than
-    # that floor is not actually executable — resolve_exit() has no min-hold
-    # gate, so this can happen even on clean data (unlike the dedup bug this
-    # check was added for, which produced same-day/T+1 phantom exits).
+    # T+2 settlement floor; 'recovered' exits earlier than this are not executable.
     unsellable = 0
     recovered_rows = sub[sub['recovered_flag'].fillna(False)]
     for _, r in recovered_rows.iterrows():
@@ -90,38 +83,33 @@ for p in sorted(glob.glob(r'reports\picks_*.json'))[-16:]:
     print(os.path.basename(p), 'as_of=' + d['as_of'], 'mode=' + str(d.get('mode')), 'recovered=' + str(rec) + '/' + str(n), 'open=' + str(openn), 'checkpoint=' + str(checkpoint), 'unsellable=' + str(unsellable))"
 ```
 
-**If `unsellable > 0`**: at least one "recovered" pick exited before T+2 (the
-earliest a VN purchase can actually be sold). This is not real evidence of a
-bounce the user could have captured — exclude those specific picks from Step 3's
-resolved-pick evidence (treat them as still-open in practice) even though the
-ledger marks them `evaluated=True`. If it recurs across several reports, that's
-a mode-independent finding: `resolve_exit()` in `src/stockpredict/model/target.py`
-has no minimum-hold gate, unlike `scripts/rebound_final_sim.py`'s backtest which
-enforces T+2. Note it in the report as a possible source-code fix candidate
-(Step 6, edit-target priority 3) rather than a config edit — don't propose it
-silently, flag it and let the user decide whether to add the gate.
+**If `unsellable > 0`**: that pick "recovered" before T+2 — the earliest a VN
+purchase can actually be sold — so it's not evidence of a capturable bounce.
+Exclude those picks from Step 3's resolved evidence (treat as still-open) even
+though the ledger marks them `evaluated=True`. This can happen on clean data:
+`resolve_exit()` in `src/stockpredict/model/target.py` has no minimum-hold gate
+(unlike `scripts/rebound_final_sim.py`'s backtest). If it recurs across several
+reports, note it as a source-code fix candidate per Step 6's edit-target
+priority 3 — flag it, don't propose it silently.
 
 Classify each report:
 - **Some/all `recovered` (evaluated=True), and `unsellable == 0` for those** →
   **ready to diagnose** (the more genuinely resolved, the stronger the read).
-- **`checkpoint > 0`** (some open picks have passed their `pred_days` date without
-  recovering) → **checkpoint ready** — an intermediate diagnostic signal even though
-  no pick has fully resolved. The model predicted a bounce by now and it hasn't
-  happened; that's actionable evidence for Step 4d (see below), not just "too early."
-- **All still open, `checkpoint == 0`** → not yet useful; no pick has even reached
-  its predicted day yet. Offer to pick an older report with more recovery time, or
-  wait for these picks to resolve further.
-- **Buy day hasn't closed** (`now_vn <= 15:00` on `as_of`) → too early; come back
-  after close.
+- **`checkpoint > 0`** (open picks past their `pred_days` date without
+  recovering) → **checkpoint ready** — actionable evidence for Step 4d, not just
+  "too early."
+- **All still open, `checkpoint == 0`** → not yet useful; offer an older report
+  or waiting.
+- **Buy day hasn't closed** (`now_vn <= 15:00` on `as_of`) → too early.
 
-**Note on matching**: The scan filters ledger rows by both `run_id` AND the symbols
-in the picks JSON, not run_id alone. This is necessary because reruns of the same
-signature on the same day may pick fewer symbols than the prior run. The prior run's
-picks JSON gets overwritten, but its ledger rows for dropped symbols persist as
-orphans. Filtering by symbol set ensures outcomes are matched only to the picks
-actually in the surviving JSON.
+**Note on matching**: filter ledger rows by both `run_id` AND the picks JSON's
+symbols, not run_id alone — a rerun of the same signature can overwrite the picks
+JSON while leaving orphan ledger rows for dropped symbols; the symbol filter
+keeps outcomes matched to the surviving picks.
 
-(Note: `evaluate` was already run in Step 0, so the ledger is current. **Never run a bare `update-data`** — it refetches the whole universe; if a straggler persists, refresh just the picked symbols with `update-data -s <SYM1> -s <SYM2>`.)
+(`evaluate` already ran in Step 0. **Never run a bare `update-data`** — it
+refetches the whole universe; refresh stragglers with
+`update-data -s <SYM1> -s <SYM2>`.)
 
 **Default-recommend** the freshest report with the most resolved picks, and phrase
 question 1 as a confirmation, not an open list. Then ask, one at a time:
@@ -144,20 +132,20 @@ per-ticker reasoning. Also try the sidecar `<plan_file>.candidates.parquet`.
 
 ## Step 3 — Pull outcomes from the ledger
 
-Extract symbols from the picks JSON, then filter the ledger to only rows matching both the `run_id` AND the recorded picks' symbols. (A rerun of the same signature can leave orphan rows for symbols the earlier run picked but the later run dropped; filtering by symbol avoids misattributing those outcomes.)
+Filter the ledger to rows matching both the `run_id` AND the picks' symbols
+(same orphan-row reason as Step 1's matching note):
 
 ```
 .venv\Scripts\python.exe -c "import pandas as pd, json; d = json.load(open(r'<PICKS_JSON_PATH>', encoding='utf-8')); syms = set(x['symbol'] for x in d['picks']); df = pd.read_parquet(r'cache\predictions.parquet'); rid = d['as_of'].replace('-','') + '_' + d['run_signature']; df = df[(df['run_id'] == rid) & (df['symbol'].isin(syms))]; print(df[['symbol','pred_days','pred_profit','pred_recovery_prob','entry_price','target_date','actual_exit_date','realized_return','recovered_flag','exit_reason','evaluated','news_score']].to_string(index=False))"
 ```
 
-Replace `<PICKS_JSON_PATH>` with the path to the picks JSON you're analyzing (e.g., `reports/picks_2026-07-02_base_d2_GEE.json`).
+Replace `<PICKS_JSON_PATH>` with the picks JSON path (e.g.,
+`reports/picks_2026-07-02_base_d2_GEE.json`).
 
 For each resolved pick compute **realized days-to-recover** =
-`actual_exit_date − as_of` in trading days, and compare to `pred_days`; compare
-`realized_return` to `pred_profit`. For open picks, note how long they've been open.
-
-Hold these as working evidence — quote specific numbers inside findings; don't emit
-standalone tables.
+`actual_exit_date − as_of` in trading days vs `pred_days`, and `realized_return`
+vs `pred_profit`. For open picks, note how long they've been open. Hold these as
+working evidence — quote specific numbers inside findings; no standalone tables.
 
 ## Step 4 — Cross-reference the broader ledger (required: all sub-steps)
 
@@ -167,73 +155,62 @@ Pull the 90-day pool stats:
 .venv\Scripts\python.exe -c "from stockpredict.tracking import recent_performance; import json; print(json.dumps(recent_performance(window_days=90), indent=2, default=str))"
 ```
 
-Then run **all four sub-steps (4b, 4c, 4d, 4e)** regardless of interim findings.
-They gather the data that feeds Step 5's diagnosis. The sub-steps are:
+Then run **all four sub-steps (4b, 4c, 4d, 4e)** regardless of interim findings —
+they feed Step 5's diagnosis.
 
 ### Step 4b — Recovery-filter calibration (Focus 1, mandatory comparison)
 
-The highest-value question: **are picks actually bouncing at the rate the model
-predicted?** Over the resolved picks (this report + the 90-day pool), compare the
-realized recovered fraction to the mean `pred_recovery_prob`. If picks recover far
-LESS than predicted (many stay open / turn out to be knives), the healthy filter is
-too loose:
-- raise `strategy.recovery.min_recovery_prob` (stricter — keeps only more-reliable
-  bouncers), and/or
-- tighten `strategy.downtrend.*` (e.g. raise `rsi_floor` off 0 to exclude
-  free-falling knives, or make `high_prox_max` less deep so you're not buying names
-  that have already collapsed).
-If picks recover at or above the predicted rate, the filter is fine — don't touch it.
+The highest-value question: **are picks bouncing at the predicted rate?** Over
+resolved picks (this report + the 90-day pool), compare the realized recovered
+fraction to the mean `pred_recovery_prob`. If picks recover far LESS than
+predicted, the healthy filter is too loose — levers:
+- raise `strategy.recovery.min_recovery_prob` (stricter), and/or
+- tighten `strategy.downtrend.*` (e.g. raise `rsi_floor` off 0, or make
+  `high_prox_max` less deep) to exclude free-falling knives.
+If recovery is at or above the predicted rate, the filter is fine — don't touch it.
 
 ### Step 4c — P/N accuracy (Focus 2, mandatory comparison)
 
-Always compare realized days-to-recover vs `pred_days`, and realized profit vs
-`pred_profit`, across resolved picks. Note whether the realized values track the
-predicted values or show systematic bias (e.g. bounces consistently take 2× longer
-than predicted, or profits undershoot). Hold these findings for Step 5's diagnosis.
-(If a bias pattern clears the evidence threshold, the levers are `strategy.recovery.state_buckets`,
-`p_quantile`, `min_ticker_obs` / `min_bucket_obs`. The estimator is empirical and
-largely self-correcting — **require a clear n≥5 systematic bias before proposing a
-bucket change; don't over-tune to one report.**)
+Compare realized days-to-recover vs `pred_days` and realized profit vs
+`pred_profit` across resolved picks; note any systematic bias (e.g. bounces take
+2× longer, profits undershoot). Hold for Step 5. Levers if a bias clears the bar:
+`strategy.recovery.state_buckets`, `p_quantile`, `min_ticker_obs` /
+`min_bucket_obs`. The estimator is empirical and largely self-correcting —
+**require a clear n≥5 systematic bias before proposing a bucket change; don't
+over-tune to one report.**
 
 ### Step 4d — Falling-knife check + checkpoint misses (mandatory, both resolved and open picks)
 
-Always check every unrecovered pick (open, or `recovered_flag=False`). For each,
-pull its price action to see what actually happened — do not assume it's just
-"slow to bounce":
+Check every unrecovered pick (open, or `recovered_flag=False`). Pull its price
+action — never assume it's just "slow to bounce":
 
 ```
 .venv\Scripts\python.exe -c "import pandas as pd; d=pd.read_parquet(r'cache\ohlcv\<SYM>.parquet'); print(d.tail(20).to_string())"
 ```
 
-Classify each unrecovered pick: is it a **falling knife** (kept falling hard after
-entry, filters/LLM vetting failed to catch it), or is it **stuck/slow** (bouncing
-sideways, waiting)? Hold these findings for Step 5. One knife is noise; a **pattern**
-(≥3 knives on this report, or an n≥5 pool pattern of never-recoverers) clears the
-evidence bar for a diagnosis. This step exists because with no stop-loss a broken
-name is held indefinitely, so catching the systematic source of knives is the main
-way to protect the strategy.
+Classify each: **falling knife** (kept falling hard after entry; the filters/LLM
+vetting missed it) or **stuck/slow** (sideways, waiting). One knife is noise; a
+**pattern** (≥3 knives on this report, or an n≥5 pool pattern of
+never-recoverers) clears the evidence bar. With no stop-loss a broken name is
+held indefinitely, so catching the systematic source of knives is the main
+protection.
 
-**Checkpoint misses** (picks flagged `checkpoint > 0` in Step 1's scan — still
-`evaluated=False` but past their `pred_days` date): for these, additionally check
-whether the close ever reached the target price (`target_vnd` from the picks JSON,
-or recompute as `entry_price × (1 + pred_profit)`) by the predicted checkpoint date:
-- **Reached target by the checkpoint date** → the model's timing was right; not a
-  finding (informational only — it just hasn't been marked `evaluated` yet because
-  `evaluate` hasn't rerun, or the close dipped back below target after touching it).
-- **Never reached target by the checkpoint date, and price has since fallen** →
-  **checkpoint miss** (the model's `pred_days` estimate was too optimistic, and the
-  pick may also be a falling knife — check both).
-- **Never reached target, but still hovering near entry** → **checkpoint miss**,
-  slow-mover variant (timing wrong, but not yet a knife).
+**Checkpoint misses** (picks flagged `checkpoint > 0` in Step 1's scan): check
+whether the close ever reached the target (`target_vnd`, or
+`entry_price × (1 + pred_profit)`) by the predicted checkpoint date:
+- **Reached target by then** → timing was right; informational only (`evaluate`
+  just hasn't marked it, or the close dipped back below).
+- **Never reached target, price has since fallen** → **checkpoint miss** — and
+  possibly also a knife; check both.
+- **Never reached target, hovering near entry** → **checkpoint miss**,
+  slow-mover variant.
 
-Checkpoint misses feed Focus 4 in Step 5 (pred_days calibration) — hold the count
-and specifics (symbol, pred_days, days elapsed, target vs. actual price) for that
-diagnosis.
+Hold the count and specifics (symbol, pred_days, days elapsed, target vs actual
+price) for Focus 4 in Step 5.
 
 ### Step 4e — Cross-method comparison (required, but advisory for edits)
 
-Always run this step. The point is to compare what **different modes picked on the
-same day** (your `as_of`). Do it in two parts:
+Compare what **different modes picked on the same day** (`as_of`), in two parts:
 
 **(1a) Compare the actual pick sets — always works, even with open picks.** Run:
 
@@ -241,16 +218,10 @@ same day** (your `as_of`). Do it in two parts:
 .venv\Scripts\python.exe -m stockpredict.cli compare-picks --date <as_of>
 ```
 
-This reads all picks JSON files for the day across modes (base, claude, claude_llm)
-and shows:
-- Each mode's symbols, scores, recovery prob, and profit target.
-- **Overlap** — which symbols 2+ modes independently picked (agreement is a signal).
-- **LLM rationales** — where claude / claude_llm added or dropped names vs base,
-  and the reasoning (dimensions_cited, rationale). That is the LLM vetting doing
-  its job (or missing something).
-
-This runs off the picks files directly, so it works the moment the reports exist —
-no waiting for recovery.
+Reads all modes' picks JSONs for the day (base, claude, claude_llm) and shows
+each mode's symbols/scores/prob/profit, the **overlap** (2+ mode agreement is a
+signal), and the **LLM rationales** for adds/drops vs base. Works the moment the
+reports exist — no waiting for recovery.
 
 **(1b) Mode accountability for resolved picks — diagnose root cause.** Run:
 
@@ -258,79 +229,64 @@ no waiting for recovery.
 .venv\Scripts\python.exe -m stockpredict.cli compare-picks-accountability --date <as_of>
 ```
 
-For **each resolved pick** (bounced or fell), this shows which modes selected it and
-which avoided it. The output reveals:
-- **Winners:** if only base picked it → base's distinctive picks are strong
-  If only LLM picked it → LLM has good vetting
-- **Losers (knives):** if **all modes** picked a knife → shared ML model problem
-  (recovery-prob too loose, downtrend filter too loose)
-  If **only LLM** picked a knife → LLM vetting failed; tighten claude_prompt.md
-  If **only base** picked a knife → base's distinctive picks are weak; tighten filters
-  If **some modes** avoided it but others didn't → mode divergence; understand why
+For each resolved pick this shows which modes selected it and which avoided it.
+Hold the output for Step 5, which owns the root-cause mapping (shared ML model
+vs mode-specific vetting).
 
-This is diagnostic input for Step 5: use the mode accountability to pinpoint whether
-the root cause is in the shared ML model or mode-specific vetting.
-
-**(2) Compare realized outcomes — only for resolved picks.** Then run:
+**(2) Compare realized outcomes — only for resolved picks.** Run:
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli compare-modes --window 90 --date <as_of>
 ```
 
-Its "Named day" section (bottom) shows each mode's *resolved* symbols and mean
-return for `<as_of>`; the pooled tables above are 90-day context. If the named-day
-section says "no evaluated picks on [date]" or shows only one mode, the outcome
-comparison isn't ready yet — say so and lean on part (1).
+Its "Named day" section (bottom) shows each mode's resolved symbols and mean
+return for `<as_of>`; the pooled tables above are 90-day context. If it says "no
+evaluated picks on [date]" or shows one mode, say so and lean on part (1).
 
 Both parts are **advisory only** — mode is a per-run user choice, so propose no
-edit from it. Flag thin samples (e.g. only one mode ran that day, or n=1 resolved);
-don't recommend switching the default method off a few days' evidence.
+edit from it. Flag thin samples (one mode ran, n=1 resolved); don't recommend
+switching the default method off a few days' evidence.
 
 ## Step 5 — Diagnose (four focuses only)
 
 Diagnose only: **(1) recovery-filter calibration**, **(2) P/N accuracy**, **(3)
-falling knives**, **(4) pred_days calibration**. For each finding, **use the mode
-accountability data from Step 4e(1b) to identify the root cause** — is it a shared
-ML model issue, or mode-specific vetting?
+falling knives**, **(4) pred_days calibration**. For each finding, use the Step
+4e(1b) mode-accountability data to identify the root cause — ask: **Did all
+modes make this error, or only some?**
+- **All modes** (or base + most) picked the knife → **shared ML model** problem
+  (recovery-prob calibration, P/N estimation, downtrend filters)
+  → Edit config.yaml (strategy.recovery.min_recovery_prob, strategy.downtrend.*)
+- **Only LLM modes** → **LLM vetting** missed a red flag
+  → Edit claude_prompt.md (tighten DROP guidance)
+- **Only base** → base's distinctive picks are weak
+  → Edit config.yaml (downtrend filters too loose for base)
+- **Winners** mirror this: only-base winners = base's distinctive strength;
+  only-LLM winners = good vetting.
 
 ### Focus 4 — Pred_days calibration (checkpoint misses)
 
-Using the checkpoint-miss data from Step 4d: are picks reaching their `pred_days`
-date without hitting the target? If so, the model's bounce-timing estimate is
-systematically too optimistic (or the target is set too high for that timeframe).
-- **Evidence threshold**: ≥3 checkpoint misses on this report, or an n≥5 pattern in
-  the 90-day pool where bounces consistently land well past `pred_days`.
-- **Root cause** (via mode accountability): all modes missing timing on the same
-  names → shared ML model issue. Only one mode → mode-specific (unlikely, since
-  `pred_days` comes from the shared empirical estimator, not LLM vetting).
-- **Lever**: `strategy.recovery.p_quantile` (lower quantile = shorter, more
-  optimistic `pred_days`; raising it lengthens the estimate) or
-  `strategy.recovery.state_buckets` / `min_ticker_obs` / `min_bucket_obs` (bucket
-  granularity). Same high bar as Focus 2 — this is the same empirical estimator,
-  just viewed through unresolved picks instead of resolved ones.
-- Don't conflate with falling knives (Focus 3): a checkpoint miss that's still
-  hovering near entry is a **timing** problem; a checkpoint miss that's also
-  cratering is **both** a timing and a knife problem — cite it under both foci if so.
+Using Step 4d's checkpoint-miss data: are picks passing `pred_days` without
+hitting target? If so, the bounce-timing estimate is systematically too
+optimistic (or the target too high for the timeframe).
+- **Evidence threshold**: ≥3 checkpoint misses on this report, or an n≥5
+  pool pattern of bounces landing well past `pred_days`.
+- **Root cause**: `pred_days` comes from the shared empirical estimator, so
+  all-modes misses = shared model; single-mode is unlikely.
+- **Levers**: same as Focus 2 (`p_quantile` — lower = shorter/more optimistic
+  `pred_days`; bucket knobs), same n≥5 bar.
+- Don't conflate with Focus 3: a miss hovering near entry is a **timing**
+  problem; a miss that's also cratering is **both** — cite under both foci.
 
-Write findings as a numbered list; **every finding must drive at least one proposed edit**.
-If a pattern suggests no concrete edit, skip it.
+Write findings as a numbered list; **every finding must drive at least one
+proposed edit** — if a pattern suggests no concrete edit, skip it.
 
-When diagnosing, ask: **Did all modes make this error, or only some?**
-- **All modes** (or base + most) picked the knife → problem is in the **shared ML model**
-  (recovery-prob calibration, P/N estimation, downtrend filters)
-  → Edit config.yaml (strategy.recovery.min_recovery_prob, strategy.downtrend.*)
-- **Only LLM modes** picked the knife → problem is in **LLM vetting** (rationale/dimensions
-  missed a red flag)
-  → Edit claude_prompt.md (tighten DROP guidance)
-- **Only base** picked the knife → **base's distinctive picks are weak**
-  → Edit config.yaml (downtrend filters too loose for base)
+**Evidence threshold**: each finding cites ≥3 same-direction cases on this
+report, **or** echoes an n≥5 pattern in the 90-day pool. A single miss doesn't
+clear the bar — except an unmistakable falling knife bought into a clear
+collapse, which you must state bluntly regardless.
 
-**Evidence threshold**: each finding cites ≥3 same-direction cases on this report,
-**or** echoes an n≥5 pattern in the 90-day pool. A single miss doesn't clear the
-bar — except an unmistakable falling knife bought into a clear collapse, which you
-must state bluntly as a finding regardless.
-
-"No systemic pattern found" is a valid outcome — say so and stop; don't manufacture one.
+"No systemic pattern found" is a valid outcome — say so and stop; don't
+manufacture one.
 
 ## Step 6 — Propose edits
 
@@ -340,78 +296,63 @@ Write the diagnosis + proposals to
 
 ### Step 6a — Run config-tuner search analysis (only if Step 5 points at a config.yaml knob)
 
-**Skip this step entirely if Step 5 found no finding that implicates a
-`config.yaml` knob** (e.g. "no systemic pattern found," or every finding
-routes to `claude_prompt.md`/source instead). Don't run it speculatively on
-every pass — only when there's an actual candidate edit to check.
-
-When Step 5 DOES implicate a knob, run:
+**Skip entirely if no Step 5 finding implicates a `config.yaml` knob** (e.g. "no
+systemic pattern," or everything routes to `claude_prompt.md`/source). When one
+does, run:
 
 ```
 .venv\Scripts\python.exe -m scripts.rebound_config_suggest
 ```
 
-It analyzes the accumulated portfolio-level backtests recorded by
-`scripts.rebound_config_tuner` (which randomizes essentially every
-prediction-affecting `config.yaml` knob — liquidity/history gates, downtrend
-gates, recovery/model thresholds, pricing knobs, walk-forward windows, ~24
-knobs total — each on its own random 1-year window, scored by
-`annualized_IRR`). Since knobs are sampled independently and jointly, a
-per-knob marginal analysis (grouping/correlating one knob at a time against
-IRR, averaging over the others) is a legitimate signal — not just eyeballing
-the single best row.
-
-It prints, per knob: grouped mean IRR (categorical) or correlation with IRR
-(continuous), flags thin/low-confidence groups, and a suggested value where
-the evidence supports one. It already handles the too-few-trials case (prints
-"not enough trials yet" and stops) and prints its own caveats — read what it
-prints, don't second-guess or re-derive it.
+It analyzes the portfolio-level backtests accumulated by
+`scripts.rebound_config_tuner` (which randomizes ~24 prediction-affecting
+`config.yaml` knobs — liquidity/history gates, downtrend gates, recovery/model
+thresholds, pricing, walk-forward windows — each on its own random 1-year
+window, scored by `annualized_IRR`). Because knobs are sampled independently and
+jointly, its per-knob marginal analysis is a legitimate signal. It prints, per
+knob: grouped mean IRR or correlation with IRR, thin-group flags, and a
+suggested value where supported; with 50+ trials it also prints a
+LightGBM-based suggested config with a holdout-R² honesty check. It handles the
+too-few-trials case itself ("not enough trials yet") — **read what it prints;
+don't second-guess or re-derive any of it.**
 
 **Once run, it gates what Step 6 may propose for `config.yaml`:**
-- **Step 5 identifies THAT a knob-related problem exists and WHICH area**
-  (e.g. "Focus 1 found under-recovery in `min_recovery_prob`'s territory").
-  Step 5 alone **never** determines the new value.
-- **The actual proposed number always comes from this step's output.** If it
-  gives a usable suggested value for that knob, propose it, citing both the
-  Step 5 finding (why this knob) and this step's evidence (why this value).
-- **If it says "not enough trials yet," or flags that knob as
-  thin/no-suggestion** — do NOT propose a specific number. Write the Step 5
-  finding as-is, and tell the user to accumulate more tuner trials (they run
-  `scripts.rebound_config_tuner` themselves) before a numeric edit can be
-  justified. A finding without a well-supported number is a valid, honest
-  outcome here.
-- **If this step's suggested direction contradicts an unmistakable Step 5
-  finding** (e.g. it suggests loosening a gate but Step 5 found clear
-  falling-knife evidence) — do not propose the edit; surface the conflict
-  explicitly and let the user decide.
+- Step 5 identifies THAT a knob-area problem exists; it **never** determines
+  the new value — **the proposed number always comes from this step's output**,
+  cited alongside the Step 5 finding.
+- If it says "not enough trials yet" or flags the knob as thin/no-suggestion —
+  do NOT propose a number. Write the finding as-is and tell the user to
+  accumulate more tuner trials first. A finding without a number is a valid,
+  honest outcome.
+- If its suggested direction contradicts an unmistakable Step 5 finding (e.g.
+  loosen a gate vs clear falling-knife evidence) — don't propose the edit;
+  surface the conflict and let the user decide.
 
 **Edit-target priority:**
-1. **`config.yaml`** — the primary lever, but ONLY via Step 6a above: for any
-   knob Step 5 flags, check its Step 6a output and propose its suggested value
-   only if usable per the gate above. Do not hand-pick a "raise/lower it a
-   bit" number from diagnosis alone.
+1. **`config.yaml`** — the primary lever, but ONLY per the Step 6a gate above;
+   never hand-pick a "raise/lower it a bit" number from diagnosis alone.
    - **Exception — `strategy.recovery.stop_loss_pct`** (0 = off, the default):
-     the tuner does not search this knob, so no automated evidence exists
-     either way. **Note the backtest finding: a price stop HURTS this
-     mean-reversion strategy (it sells right before the bounce); off is
-     deliberate.** Don't propose turning it on without a strong, user-endorsed
+     the tuner doesn't search it, and the backtest showed a price stop HURTS
+     this mean-reversion strategy (it sells right before the bounce) — off is
+     deliberate. Don't propose turning it on without a strong, user-endorsed
      reason. (There is no time cap — the strategy holds until profit.)
-2. **`claude_prompt.md`** (claude/gemini only) — tighten the DROP / falling-knife
-   vetting guidance when the LLM missed a broken name. Additive, narrowly scoped.
+2. **`claude_prompt.md`** (claude/gemini only) — tighten the DROP /
+   falling-knife vetting guidance when the LLM missed a broken name. Additive,
+   narrowly scoped.
 3. **Source files** — only for a concrete structural defect (parser bug, wrong
-   formula, missing column). Default to NOT touching code; write the finding, stop,
-   and let the user trigger a separate code task.
+   formula, missing column). Default to NOT touching code; write the finding,
+   stop, and let the user trigger a separate code task.
 
-Each proposed edit lists: the finding it's motivated by, file + line range, the
-exact diff (before/after), and a one-sentence expected effect.
+Each proposed edit lists: the motivating finding, file + line range, the exact
+diff (before/after), and a one-sentence expected effect.
 
 ## Step 7 — Apply on approval
 
 Show the report path and all diffs. Then ask, **one file at a time**:
 `Apply the change to <file>? (y/n)`. On `y`, `Edit` and append to `## Applied`:
 `- <YYYY-MM-DD HH:MM> applied edit to <file> (finding #<n>): <summary>`. On `n`,
-append the declined line. Never apply multiple edits with one approval; never apply
-a source-code edit without a separate explicit "yes, change code here".
+append the declined line. Never apply multiple edits with one approval; never
+apply a source-code edit without a separate explicit "yes, change code here".
 
 ## Step 8 — Sanity-check suggestion
 
@@ -421,39 +362,31 @@ After edits, suggest a dry pass (don't run it for them):
 .venv\Scripts\python.exe -m stockpredict.cli predict --mode base --picks 3 --skip-train
 ```
 
-If a `config.yaml` knob that feeds the model was changed
-(`strategy.downtrend.*`, `strategy.recovery.state_buckets` / `p_quantile` /
-`min_*_obs`), remind them to **retrain the recovery head** so it takes effect:
+If a model-feeding knob changed (`strategy.downtrend.*`,
+`strategy.recovery.state_buckets` / `p_quantile` / `min_*_obs`), remind them to
+**retrain the recovery head**:
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli train
 ```
 
 (`min_recovery_prob` / `profit_margin` / the exit knobs are read at predict/eval
-time and need no retrain.) Remind the user: one report ≠ a backtest — re-run
-self-correction on another report after more picks resolve before treating any
-change as confirmed. For a portfolio-level sanity check, they can re-run
-`.venv\Scripts\python.exe -m scripts.rebound_portfolio_sim`. If a
-backtest-window or recovery-model knob was changed, also suggest they
-accumulate more `scripts.rebound_config_tuner` trials to keep building search
-evidence for Step 6a in future passes.
+time — no retrain.) Remind the user: one report ≠ a backtest — re-run
+self-correction after more picks resolve before treating a change as confirmed.
+For a portfolio-level check they can re-run
+`.venv\Scripts\python.exe -m scripts.rebound_portfolio_sim`; if a
+backtest-window or recovery-model knob changed, also suggest accumulating more
+`scripts.rebound_config_tuner` trials for future Step 6a passes.
 
 ## What NOT to do
 
-- Don't run a full-universe `update-data` (no `-s`). `evaluate` refreshes the
-  picked symbols itself.
 - Don't ask the user to pick blindly from a list — run the eligibility scan and
   default-suggest.
-- Don't propose edits from a single miss (except an obvious falling knife).
-- Don't auto-apply; show diffs and wait for per-file approval.
-- Don't touch source files when a `config.yaml` knob would do.
-- Don't propose turning on the stop-loss without a strong, user-endorsed
-  reason — the backtest showed they hurt this strategy.
-- Don't call an unrecovered pick "just slow" without looking at its chart — it may
-  be a falling knife.
+- Don't call an unrecovered pick "just slow" without looking at its chart — it
+  may be a falling knife.
 - Don't fabricate a finding to fill the report. "No systemic pattern" is valid.
-- Don't narrate readiness or ask "which report?" before working — run Step 0 and
-  the eligibility scan first; lead with the results.
+- Don't narrate readiness or ask "which report?" before working — run Step 0
+  and the eligibility scan first; lead with the results.
 
 Begin now — no preamble. Don't announce what you're about to do or say you're
 ready. Immediately run Step 0 (`evaluate`) and the Step 1 eligibility scan, then
