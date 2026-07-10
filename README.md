@@ -328,6 +328,13 @@ Every diff is shown and applied only after per-file approval.
 
 ## Setup (one-time)
 
+Double-click [`setup.bat`](setup.bat): creates `.venv` (Python 3.13), installs
+`stockpredict` + all dependencies (`dev`, `llm` extras), and prints the installed
+versions. Safe to re-run — it detects an existing `.venv` and asks before
+reinstalling.
+
+**Manual/advanced** (equivalent to what `setup.bat` runs):
+
 ```bash
 py -3.13 -m venv .venv
 .venv\Scripts\python -m pip install -U pip
@@ -335,6 +342,12 @@ py -3.13 -m venv .venv
 ```
 
 Optional API keys live in [`.env.example`](.env.example); copy to `.env`.
+
+**Verified versions** (2026-07-10, this repo's `.venv`): vnstock 4.0.4, vnai 2.5.0,
+pandas 2.3.3, numpy 2.2.6, pyarrow 24.0.0, PyYAML 6.0.3, click 8.3.3, matplotlib
+3.10.9, tqdm 4.67.3, anthropic 0.98.1, pytest 9.0.3, pytest-cov 7.1.0.
+`pyproject.toml` pins these as `>=` floors, not exact versions — this list is a
+known-good reference, not a lockfile.
 
 ## Tests
 
@@ -373,6 +386,7 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
 
 ```
 <repo root>/
+  setup.bat                double-click: create/update .venv + install dependencies
   predict_base.bat         double-click: model-only picks
   predict_gemini.bat       double-click: model + Gemini vetting prompt
   claude_prompt.md         paste into Claude Desktop for model + Claude vetting
