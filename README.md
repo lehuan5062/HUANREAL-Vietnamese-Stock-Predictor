@@ -208,31 +208,57 @@ the open when it opens at/below the limit, else at the limit. This is the
 
 ### Config tuning: brute-force search + analysis
 
-`run_config_tuner.bat` runs `scripts/rebound_config_tuner.py`: one shot per
-double-click, it picks a random combination of the walk-forward windows
-(`backtest.train_window_years` / `oos_window_months` / `step_months`) and
-recovery-model knobs (`strategy.recovery.min_recovery_prob` / `p_quantile` /
-`profit_margin`), temporarily writes it to `config.yaml`, rebuilds and runs
-`rebound_sim_include_held`, appends the `(config, result)` pair to
-`reports/tuning/rebound_include_held_search.jsonl` (gitignored), then
-**always restores the real `config.yaml`** — verified to hold even under a
-mid-run interrupt. Broker fees and the liquidity cap are deliberately
-excluded from the search: they're real fixed costs, not a strategy choice.
-Re-run it as many times as you want to accumulate trials.
+`run_config_tuner.bat` runs `scripts/rebound_config_tuner.py` in a loop until
+you stop it (Ctrl+C). Each iteration:
 
-`run_config_suggest.bat` runs `scripts/rebound_config_suggest.py`: reads
-that accumulated JSONL and does a per-knob marginal analysis — since the
-tuner samples all 6 knobs independently and jointly on every trial, grouping
-(categorical knobs) or correlating (continuous knobs) one at a time against
-`annualized_IRR` is a legitimate signal, not just eyeballing the single best
-row. Prints a suggested config + caveats (single fixed backtest window,
-correlational not causal, small sample sizes) to the terminal. Purely
-read-only — no files written, `config.yaml` untouched. Needs at least 5
-trials to say anything.
+- Picks a random combination of essentially every prediction-affecting
+  `config.yaml` knob (~24 total) — the walk-forward windows
+  (`backtest.train_window_years` / `oos_window_months` / `step_months`),
+  recovery-model thresholds (`min_recovery_prob` / `p_quantile` /
+  `profit_margin` / `min_ticker_obs` / `min_bucket_obs` /
+  `label_max_horizon`), the liquidity/history gates
+  (`universe.liquidity_filter.*`), the downtrend gates, pricing knobs
+  (`overbought_rsi_max` / `ceiling_tol` / `max_participation_pct` /
+  `corp_action_lookback`), and a coordinated RSI/high-prox bucket family
+  (sampled together so the gates and buckets stay mutually consistent).
+  Broker fees, `settle_days`, and the exchange `ceiling_limits` are
+  deliberately excluded — real fixed costs/rules, not a strategy choice.
+- Picks a random ~1-year backtest **slice** (any start date, not a calendar
+  year) drawn from the rolling actual `data.history_duration_years` (9) of
+  history, leaving room for that trial's training lookback.
+- Temporarily writes the sampled config to `config.yaml`, rebuilds and runs
+  `rebound_sim_include_held` on that slice, then **always restores the real
+  `config.yaml`** — verified to hold even under a real mid-build Ctrl+C.
+- Also computes a **benchmark**: what a plain buy-and-hold would have
+  returned over that exact same random slice (median across all symbols,
+  annualized by the slice's real day count). `excess_irr = trial's IRR −
+  benchmark_irr` is recorded alongside the raw result — this is what makes
+  trials comparable to each other at all, since raw IRR mixes "how good was
+  this random year" with "how good was this config," and a random slice
+  makes no attempt to hold the window fixed across trials.
+- Appends `(config, window, result, benchmark_irr, excess_irr)` to
+  `reports/tuning/rebound_include_held_search.jsonl` (gitignored).
 
-`self_correct_prompt.md` runs this suggest script as part of its own
-self-correction pass (Step 6a) as one input into its `config.yaml` edit
-proposals.
+`run_config_suggest.bat` runs `scripts/rebound_config_suggest.py`, which
+reads that accumulated JSONL and layers two analyses:
+
+1. **Per-knob marginal analysis** (from 5 trials on): since the tuner
+   samples every knob independently and jointly, grouping (categorical
+   knobs) or correlating (continuous knobs) one at a time against IRR is a
+   legitimate signal — not just eyeballing the single best row.
+2. **LightGBM surrogate** (from 50 trials on): a model trained on
+   `excess_irr` that can see knob *combinations*, not just one at a time.
+   Prints an honest holdout R² (near-zero means "no real signal yet, treat
+   as noise"), feature importances, and the top 5 candidate configs (sampled
+   via the tuner's own knob-sampling functions, so ranges/coordination never
+   drift out of sync between the two scripts) it predicts would score well.
+
+Purely read-only either way — no files written, `config.yaml` untouched.
+
+`self_correct_prompt.md` runs the suggest script as part of its own
+self-correction pass (Step 6a) as the required evidence source for any
+`config.yaml` edit it proposes — it does not invent a config change from
+per-pick diagnosis alone.
 
 ## Universe coverage, cache, and `--warm-only`
 
