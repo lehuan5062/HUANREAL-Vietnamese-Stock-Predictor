@@ -46,7 +46,7 @@ universe:
     # 20 trading days. Counting active days (instead of averaging) stops a
     # single block-trade spike from sneaking a mostly-dead stock through — the
     # average is fooled by one huge day, the count is not.
-    min_adv_active_days: 15
+    min_adv_active_days: 20
     min_close_vnd: 5             # avoid penny stocks (5,000 VND)
     min_history_days: 250
     # Data-integrity gate (not a strategy knob): drop a candidate whose most
