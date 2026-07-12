@@ -45,6 +45,12 @@ TERCILE_MIN_TRIALS = 12
 ML_MIN_TRIALS = 50
 ML_CANDIDATE_SAMPLES = 5000
 ML_TOP_N = 5
+# Range-boundary check: a continuous knob is "at the edge" when the median of
+# the top-quartile trials sits within EDGE_FRACTION of the sampling span from
+# an endpoint; the ML surrogate's top candidates confirm within ML_EDGE_FRACTION.
+EDGE_FRACTION = 0.10
+ML_EDGE_FRACTION = 0.05
+TOP_QUANTILE = 0.75
 
 # Knobs whose config value is a small sorted LIST, not a scalar (the
 # coordinated RSI/high-prox bucket edges). Expanded into individual
@@ -156,15 +162,19 @@ def _flat_to_feature_row(flat: dict, scalar_knobs: list[str]) -> dict:
     return row
 
 
-def _run_ml_surrogate(df: pd.DataFrame, cat_knobs: list[str], con_knobs: list[str]) -> None:
+def _run_ml_surrogate(df: pd.DataFrame, cat_knobs: list[str], con_knobs: list[str]):
     """LightGBM surrogate: learns excess_irr from knob combinations (not just
     one knob at a time), reports honest holdout R², feature importances, and
     a handful of concrete candidate configs it predicts would score well.
-    Skips cleanly (prints why) if there's not enough usable data yet."""
+    Skips cleanly (prints why) if there's not enough usable data yet.
+
+    Returns the top predicted candidate configs (list of flat dicts) when the
+    holdout R² shows real signal, else None — consumed by the range-boundary
+    check as confirmation that an edge optimum isn't a marginal-analysis fluke."""
     if "excess_irr" not in df.columns:
         print(f"(ML surrogate: no trials have excess_irr yet - re-run the tuner "
               f"to accumulate some, then re-run this script)")
-        return
+        return None
 
     scalar_knobs = cat_knobs + con_knobs
     X = _feature_matrix(df, scalar_knobs)
@@ -175,7 +185,7 @@ def _run_ml_surrogate(df: pd.DataFrame, cat_knobs: list[str], con_knobs: list[st
     if len(X) < ML_MIN_TRIALS:
         print(f"(ML surrogate needs >= {ML_MIN_TRIALS} complete trials with "
               f"excess_irr; have {len(X)} - skipping for now)")
-        return
+        return None
 
     from lightgbm import LGBMRegressor
     from sklearn.metrics import r2_score
@@ -219,6 +229,102 @@ def _run_ml_surrogate(df: pd.DataFrame, cat_knobs: list[str], con_knobs: list[st
     for rank, i in enumerate(order, 1):
         print(f"\n  #{rank}  predicted excess_irr = {preds[i]:.4f}")
         print(json.dumps(candidates[int(i)], indent=4, default=str))
+
+    if r2 < 0.05:
+        return None
+    return [candidates[int(i)] for i in order]
+
+
+def _range_boundary_check(df: pd.DataFrame, cat_knobs: list[str],
+                          con_knobs: list[str], ml_top) -> None:
+    """Detect optima piling up at the edge of the tuner's sampling range —
+    the one thing neither the marginal analysis nor the ML surrogate can see,
+    because the surrogate only ever samples candidates INSIDE the range.
+
+    Continuous knobs: flag when the top-quartile trials (by excess_irr, so
+    window luck is already removed) have their median value within
+    EDGE_FRACTION of the range span from an endpoint. If the ML surrogate ran
+    with real signal, its top candidates must agree (median within
+    ML_EDGE_FRACTION of the same endpoint), otherwise the trial clustering
+    alone fires with a lower-confidence note.
+
+    Categorical knobs: flag when the best non-thin group is the smallest or
+    largest extendable value in the choice grid (sentinel values like
+    0 = disabled are never treated as an extendable endpoint)."""
+    from scripts.rebound_config_tuner import KNOB_BOUNDS
+
+    warnings_out = []
+
+    if "excess_irr" in df.columns:
+        for knob in con_knobs:
+            spec = KNOB_BOUNDS.get(knob)
+            if spec is None or spec["kind"] != "uniform":
+                continue
+            col = f"config.{knob}"
+            sub = df[[col, "excess_irr"]].dropna()
+            if len(sub) < TERCILE_MIN_TRIALS:
+                continue
+            span = spec["high"] - spec["low"]
+            top = sub[sub["excess_irr"] >= sub["excess_irr"].quantile(TOP_QUANTILE)]
+            top_median = top[col].median()
+            side = None
+            if top_median <= spec["low"] + EDGE_FRACTION * span:
+                side, endpoint = "lower", spec["low"]
+            elif top_median >= spec["high"] - EDGE_FRACTION * span:
+                side, endpoint = "upper", spec["high"]
+            if side is None or side in spec.get("no_extend", []):
+                continue
+            note = "(trial clustering only - ML surrogate not available/confident yet)"
+            if ml_top:
+                ml_vals = pd.Series([c[knob] for c in ml_top if knob in c])
+                if ml_vals.empty:
+                    continue
+                ml_median = ml_vals.median()
+                near = (abs(ml_median - endpoint) <= ML_EDGE_FRACTION * span)
+                if not near:
+                    continue  # trials cluster at the edge but the surrogate disagrees
+                note = "(confirmed by ML surrogate top candidates)"
+            warnings_out.append(
+                f"RANGE-BOUNDARY WARNING: {knob} optimum at {side} edge "
+                f"({endpoint:g} of range {spec['low']:g}-{spec['high']:g}) {note} - "
+                f"consider widening this knob's sampling range in "
+                f"scripts/rebound_config_tuner.py, then accumulate fresh trials.")
+
+    for knob in cat_knobs:
+        spec = KNOB_BOUNDS.get(knob)
+        if spec is None or spec["kind"] != "choice":
+            continue
+        extendable = [v for v in spec["values"] if v not in spec.get("sentinel", [])]
+        if len(extendable) < 2:
+            continue
+        grouped = _analyze_categorical(df, knob)
+        usable = grouped[~grouped["thin"]]
+        if usable.empty:
+            continue
+        best = usable.iloc[0][f"config.{knob}"]
+        side = None
+        if best == min(extendable):
+            side = "lower"
+        elif best == max(extendable):
+            side = "upper"
+        if side is None or side in spec.get("no_extend", []):
+            continue
+        warnings_out.append(
+            f"RANGE-BOUNDARY WARNING: {knob} best group is the {side} end of its "
+            f"choice grid ({best} of {extendable}) - consider extending the grid "
+            f"in scripts/rebound_config_tuner.py, then accumulate fresh trials.")
+
+    print()
+    print("=== Range-boundary check ===")
+    if warnings_out:
+        for w in warnings_out:
+            print(f"  {w}")
+        print("  (An edge optimum means the true best value may lie OUTSIDE the")
+        print("  current search space - the ML surrogate can never propose beyond")
+        print("  it. Widen the range in the tuner, not config.yaml directly.)")
+    else:
+        print("  No knob optimum sits at a sampling-range boundary - the current")
+        print("  search space looks wide enough.")
 
 
 def main():
@@ -274,7 +380,9 @@ def main():
         else:
             print(f"  {knob}: {res['read']} (not enough trials for a range yet)")
 
-    _run_ml_surrogate(df, cat_knobs, con_knobs)
+    ml_top = _run_ml_surrogate(df, cat_knobs, con_knobs)
+
+    _range_boundary_check(df, cat_knobs, con_knobs, ml_top)
 
     print()
     print("=== Caveats ===")

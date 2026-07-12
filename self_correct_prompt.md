@@ -327,6 +327,16 @@ don't second-guess or re-derive any of it.**
 - If its suggested direction contradicts an unmistakable Step 5 finding (e.g.
   loosen a gate vs clear falling-knife evidence) — don't propose the edit;
   surface the conflict and let the user decide.
+- **Range-boundary warnings:** the output ends with a `=== Range-boundary
+  check ===` section. If it prints a `RANGE-BOUNDARY WARNING` for a knob that a
+  Step 5 finding implicates, you may propose (normal Step 7 per-file approval)
+  an edit to `scripts/rebound_config_tuner.py` widening that knob's entry in
+  `KNOB_BOUNDS` — extend in the flagged direction by roughly the current span
+  (or add 1–2 grid values for a choice knob), stating the old → new range. Do
+  NOT simultaneously propose a `config.yaml` value outside the old range: the
+  widened range needs fresh tuner trials before any value out there has
+  evidence behind it. A warning for a knob no Step 5 finding implicates is
+  informational only — mention it in the report, propose nothing.
 
 **Edit-target priority:**
 1. **`config.yaml`** — the primary lever, but ONLY per the Step 6a gate above;
@@ -377,6 +387,11 @@ For a portfolio-level check they can re-run
 `.venv\Scripts\python.exe -m scripts.rebound_portfolio_sim`; if a
 backtest-window or recovery-model knob changed, also suggest accumulating more
 `scripts.rebound_config_tuner` trials for future Step 6a passes.
+
+If a tuner sampling range was widened (Step 6a range-boundary warning): prior
+trials still feed the ML surrogate, but that knob's group/tercile stats now mix
+old and new ranges — tell the user to accumulate a batch of fresh trials before
+trusting suggestions in the newly opened region of that knob.
 
 ## What NOT to do
 

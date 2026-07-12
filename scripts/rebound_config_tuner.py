@@ -53,30 +53,48 @@ WINDOW_YEARS = 1           # each trial backtests a random 1-year slice
 
 
 # --- knob specs -------------------------------------------------------------
-# Each entry: (dotted config path, zero-arg sampler). Independent scalar knobs
-# only. Coordinated families (RSI, high-prox) are sampled separately below
-# because their values must stay mutually consistent.
-SIMPLE_KNOBS = [
-    ("backtest.train_window_years", lambda: random.choice([1, 2, 3, 4])),
-    ("backtest.oos_window_months", lambda: random.choice([3, 6, 9, 12])),
-    ("backtest.step_months", lambda: random.choice([1, 2, 3, 6])),
-    ("strategy.recovery.min_recovery_prob", lambda: round(random.uniform(0.70, 0.99), 4)),
-    ("strategy.recovery.p_quantile", lambda: round(random.uniform(0.50, 0.85), 4)),
-    ("strategy.recovery.profit_margin", lambda: round(random.uniform(0.002, 0.02), 5)),
-    ("strategy.recovery.min_ticker_obs", lambda: random.choice([50, 100, 150, 200])),
-    ("strategy.recovery.min_bucket_obs", lambda: random.choice([25, 50, 75, 100])),
-    ("strategy.recovery.label_max_horizon", lambda: random.choice([120, 180, 250])),
-    ("universe.liquidity_filter.min_close_vnd", lambda: random.choice([3, 5, 7, 10])),
-    ("universe.liquidity_filter.min_adv_active_days", lambda: random.choice([5, 10, 15, 18, 20])),
-    ("universe.liquidity_filter.min_adv_vnd", lambda: random.choice([500_000, 1_000_000, 2_000_000, 5_000_000])),
-    ("universe.liquidity_filter.min_history_days", lambda: random.choice([120, 180, 250, 400])),
-    ("strategy.downtrend.mom20_max", lambda: round(random.uniform(-0.05, 0.05), 4)),
-    ("strategy.downtrend.high_prox_max", lambda: round(random.uniform(-0.15, -0.02), 4)),
-    ("pricing.overbought_rsi_max", lambda: random.choice([0, 70, 75, 80, 85])),
-    ("pricing.ceiling_tol", lambda: round(random.uniform(0.005, 0.03), 4)),
-    ("pricing.max_participation_pct", lambda: round(random.uniform(0.5, 3.0), 3)),
-    ("pricing.corp_action_lookback", lambda: random.choice([15, 20, 25])),
-]
+# KNOB_BOUNDS is the single source of truth for the independent scalar knobs'
+# search space. Each spec is either
+#   {"kind": "choice",  "values": [...]}                         — discrete grid
+#   {"kind": "uniform", "low": x, "high": y, "digits": n}        — continuous
+# Optional "sentinel": [...] marks special values (e.g. 0 = feature disabled)
+# that rebound_config_suggest's range-boundary check must not treat as an
+# extendable endpoint; optional "no_extend": ["lower"|"upper"] marks a side
+# that physically cannot be widened (so the boundary check stays silent on
+# it). Coordinated families (RSI, high-prox) are sampled
+# separately below because their values must stay mutually consistent.
+KNOB_BOUNDS = {
+    # train_window_years can't shrink below 1y; oos_window_months can't exceed
+    # the 1-year trial slice (WINDOW_YEARS) — those sides are not widenable.
+    "backtest.train_window_years": {"kind": "choice", "values": [1, 2, 3, 4], "no_extend": ["lower"]},
+    "backtest.oos_window_months": {"kind": "choice", "values": [3, 6, 9, 12], "no_extend": ["upper"]},
+    "backtest.step_months": {"kind": "choice", "values": [1, 2, 3, 6]},
+    "strategy.recovery.min_recovery_prob": {"kind": "uniform", "low": 0.70, "high": 0.99, "digits": 4},
+    "strategy.recovery.p_quantile": {"kind": "uniform", "low": 0.50, "high": 0.85, "digits": 4},
+    "strategy.recovery.profit_margin": {"kind": "uniform", "low": 0.002, "high": 0.02, "digits": 5},
+    "strategy.recovery.min_ticker_obs": {"kind": "choice", "values": [50, 100, 150, 200]},
+    "strategy.recovery.min_bucket_obs": {"kind": "choice", "values": [25, 50, 75, 100]},
+    "strategy.recovery.label_max_horizon": {"kind": "choice", "values": [120, 180, 250]},
+    "universe.liquidity_filter.min_close_vnd": {"kind": "choice", "values": [3, 5, 7, 10]},
+    "universe.liquidity_filter.min_adv_active_days": {"kind": "choice", "values": [5, 10, 15, 18, 20]},
+    "universe.liquidity_filter.min_adv_vnd": {"kind": "choice", "values": [500_000, 1_000_000, 2_000_000, 5_000_000]},
+    "universe.liquidity_filter.min_history_days": {"kind": "choice", "values": [120, 180, 250, 400]},
+    "strategy.downtrend.mom20_max": {"kind": "uniform", "low": -0.05, "high": 0.05, "digits": 4},
+    "strategy.downtrend.high_prox_max": {"kind": "uniform", "low": -0.15, "high": -0.02, "digits": 4},
+    "pricing.overbought_rsi_max": {"kind": "choice", "values": [0, 70, 75, 80, 85], "sentinel": [0]},
+    "pricing.ceiling_tol": {"kind": "uniform", "low": 0.005, "high": 0.03, "digits": 4},
+    "pricing.max_participation_pct": {"kind": "uniform", "low": 0.5, "high": 3.0, "digits": 3},
+    "pricing.corp_action_lookback": {"kind": "choice", "values": [15, 20, 25]},
+}
+
+
+def _make_sampler(spec: dict):
+    if spec["kind"] == "choice":
+        return lambda: random.choice(spec["values"])
+    return lambda: round(random.uniform(spec["low"], spec["high"]), spec["digits"])
+
+
+SIMPLE_KNOBS = [(path, _make_sampler(spec)) for path, spec in KNOB_BOUNDS.items()]
 
 
 def _sample_rsi_family() -> dict:

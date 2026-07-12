@@ -252,6 +252,13 @@ reads that accumulated JSONL and layers two analyses:
    as noise"), feature importances, and the top 5 candidate configs (sampled
    via the tuner's own knob-sampling functions, so ranges/coordination never
    drift out of sync between the two scripts) it predicts would score well.
+3. **Range-boundary check** (always): flags when a knob's optimum clusters at
+   the edge of the tuner's sampling range — a signal that the true best value
+   may lie outside. When the ML surrogate has real signal, it confirms whether
+   the edge optimum is genuine. These are reported separately (RANGE-BOUNDARY
+   WARNING) so `self_correct_prompt.md` can propose widening the range in
+   `scripts/rebound_config_tuner.py` (via `KNOB_BOUNDS`), then accumulating
+   fresh trials to explore the newly opened region.
 
 Purely read-only either way — no files written, `config.yaml` untouched.
 
