@@ -39,6 +39,11 @@ import pandas as pd
 from stockpredict import PROJECT_ROOT
 
 RESULTS_PATH = PROJECT_ROOT / "reports" / "tuning" / "rebound_include_held_search.jsonl"
+# Incremental parse cache: the JSONL only ever grows (tuner appends), so we
+# keep a parquet of the already-flattened rows plus a byte offset and only
+# json_normalize the lines appended since the last run.
+CACHE_PATH = RESULTS_PATH.with_suffix(".cache.parquet")
+CACHE_META_PATH = RESULTS_PATH.with_suffix(".cache.meta.json")
 MIN_TRIALS = 5
 MIN_GROUP_SIZE = 3
 TERCILE_MIN_TRIALS = 12
@@ -81,11 +86,53 @@ CONTINUOUS_KNOBS = [
 ]
 
 
+def _parse_lines(text: str) -> pd.DataFrame:
+    rows = [json.loads(l) for l in text.splitlines() if l.strip()]
+    return pd.json_normalize(rows, sep=".")
+
+
+def _read_cache() -> tuple[pd.DataFrame, int] | None:
+    try:
+        offset = json.loads(CACHE_META_PATH.read_text(encoding="utf-8"))["byte_offset"]
+        return pd.read_parquet(CACHE_PATH), int(offset)
+    except Exception:
+        return None
+
+
+def _write_cache(df: pd.DataFrame, offset: int) -> None:
+    try:
+        df.to_parquet(CACHE_PATH, index=False)
+        CACHE_META_PATH.write_text(json.dumps({"byte_offset": offset}), encoding="utf-8")
+    except Exception:
+        # A locked/unwritable cache must never break the run; next run just
+        # falls back to a full re-parse.
+        CACHE_META_PATH.unlink(missing_ok=True)
+
+
 def _load_trials() -> pd.DataFrame:
     if not RESULTS_PATH.exists():
         return pd.DataFrame()
-    rows = [json.loads(l) for l in RESULTS_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
-    return pd.json_normalize(rows, sep=".")
+    file_size = RESULTS_PATH.stat().st_size
+    cached = _read_cache()
+    if cached is not None and cached[1] <= file_size:
+        df, offset = cached
+        with open(RESULTS_PATH, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+        # Only consume complete lines, in case the tuner is mid-append.
+        end = chunk.rfind(b"\n") + 1
+        if end > 0:
+            new_df = _parse_lines(chunk[:end].decode("utf-8"))
+            if not new_df.empty:
+                df = pd.concat([df, new_df], ignore_index=True)
+            _write_cache(df, offset + end)
+        return df
+    # No cache, corrupt cache, or the JSONL shrank (rewritten): full re-parse.
+    raw = RESULTS_PATH.read_bytes()
+    end = raw.rfind(b"\n") + 1
+    df = _parse_lines(raw[:end].decode("utf-8"))
+    _write_cache(df, end)
+    return df
 
 
 def _analyze_categorical(df: pd.DataFrame, knob: str) -> pd.DataFrame:
