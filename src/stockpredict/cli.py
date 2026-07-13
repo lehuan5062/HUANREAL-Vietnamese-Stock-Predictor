@@ -626,6 +626,7 @@ def run_cmd(mode: str, n_picks: int | None,
         results = {s: 0 for s in syms}
         ok = len(results)
         err = 0
+        no_data = 0
     else:
         click.echo(f"updating data ({len(_VALID_SOURCES)} workers, shared queue "
                    f"across sources: {', '.join(_VALID_SOURCES)})...")
