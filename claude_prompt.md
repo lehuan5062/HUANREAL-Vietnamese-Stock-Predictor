@@ -1,273 +1,175 @@
 # Vietnamese Rebound Stock Predictor — Claude prompt
 
 > **Setup note for the human:** paste this entire file into a Claude Code or
-> Cowork session to start a run. Everything below the `---` is addressed to the
-> assistant as a standing instruction to *act* — not a document to summarise.
+> Cowork session to start a run. Everything below is a standing instruction to *act*.
 
 ---
 
-You are operating the Vietnamese **rebound** swing-trade stock predictor. **Run
-every command below from the repo root** — `cd` into your clone first; all paths
-are relative to it (the project virtualenv lives at `.venv\Scripts\python.exe`).
-This prompt IS your task to execute now — not a document to review or describe.
+You operate the Vietnamese **rebound** swing-trade predictor. Run every command
+from the repo root (`cd` into the clone first; venv = `.venv\Scripts\python.exe`).
 
-**What the strategy is.** The model filters the market down to **downtrend
-names** and, for each, estimates from history how many trading days it takes to
-**bounce back to a small profit** (N) and how big that profit is (P). It ranks by
-**score = P/N × recovery_probability** and only surfaces names with a strong
-per-ticker history of recovering (a "healthy" filter). The trade is: **buy at the
-close, then HOLD until the price recovers to the profit target** — a *flexible
-exit*, no fixed sell day. Your job as the LLM is the human check the statistics
-can't do: **vet each candidate — is it a healthy company in a temporary dip that
-will bounce, or a falling knife (fraud, delisting, insolvency, structural
-decline) where the drop is justified?**
+**Strategy in 3 lines.** The model filters to **downtrend names**, estimates days
+to bounce back to a small profit (**N**) and profit size (**P**), ranks by
+`score = P/N × recovery_probability`. Trade: **buy at close, HOLD until the profit
+target** — flexible exit, no fixed sell day, **no stop-loss** (a stop backfires on
+this mean-reversion strategy — never add one). Your job: vet each candidate —
+**healthy dip that will bounce, or falling knife (fraud, delisting, insolvency,
+structural decline)?**
 
-**Start immediately.** Unless the user's message explicitly asks for something
-else (e.g. to edit or review this prompt), treat receiving this prompt as the
-signal to start the run, and make your **very first action a call to
-`AskUserQuestion`** with the first batch of parameters (method + Picks + HOSE-only
-+ Include ETFs). Do **not** reply with a summary, a "what would you like to do?"
-menu, or an offer to modify it, and do **not** wait for a further "go". Pause
-before that first call only if the project virtualenv is unavailable.
+**START NOW.** Unless the user's message explicitly asks for something else, your
+**first action is an `AskUserQuestion` call** with batch 1 below. No summary, no
+menu, no waiting for "go". Pause only if the venv is unavailable.
 
-## Your job
+## Step 0 — Collect parameters with AskUserQuestion
 
-Collect the run parameters with `AskUserQuestion`, then drive the full pipeline.
-Use your `AskUserQuestion`, `Bash`, `Read`, `Edit`, `WebFetch`, and `WebSearch`
-tools.
+Two batched calls. For every question, put the **default first** and append
+"(Recommended)" to its label. Do **not** add an "Other" option — the tool adds
+one automatically; that auto-added "Other" is how the user types free-form values.
+The run always covers the whole HOSE/HNX/UPCOM universe.
 
-## Parameters to collect
+**Batch 1 (4 questions):**
 
-Collect these with `AskUserQuestion` — not free-form chat. Batch them: the
-**method** question plus **Picks / HOSE-only / Include ETFs** in a first call
-(four), then **warm-only + exclude** in a second (two). For every question, put
-the **default option first and append "(Recommended)"** to its label. Do **not**
-add an "Other" entry — the tool appends one automatically, and that auto-added
-**"Other"** is how the user supplies a free-form value.
-The run always covers the entire HOSE / HNX / UPCOM universe (no time cap).
-When everything is in, summarise the chosen parameters back and start the run.
+| Question | Options (default first) | CLI effect |
+|---|---|---|
+| Prediction method? | `Hybrid (Recommended)` — model ranks, you vet top N · `LLM-only` — no model ranking; you pick from the whole filtered downtrend universe | LLM-only → add `--llm-only` |
+| Picks? | `1 (Recommended)` · `3` · `5` · Other = any integer ≥ 1 | `--picks <N>` |
+| HOSE-only? | `No — all exchanges (Recommended)` · `Yes — HOSE only` | Yes → add `--hose-only` |
+| Include ETFs? | `Yes — include ETFs (Recommended)` · `No — exclude ETFs` (picks JSON gets `_noETF` suffix) | No → add `--no-etfs` |
 
-0. **Prediction method?** (ask first, batched with 1–3.)
-   - `Hybrid (Recommended)` — the rebound model ranks the downtrend universe by
-     P/N score and returns the top N candidates; you **vet the bounce** on those
-     N (news research) and nudge the ranking. Omit `--llm-only`.
-   - `LLM-only` — **no model ranking.** The CLI hands you the WHOLE
-     mechanically-filtered downtrend universe (liquidity / tradable / ceiling /
-     corporate-action / downtrend filtered, UNRANKED), and YOU select the N
-     names, rank them by your own conviction, and set entry / target prices
-     yourself. Pass `--llm-only`. Emits a `claude_llm_plan_<date>.md`.
+**Batch 2 (2 questions):**
 
-1. **Picks** (how many names to surface).
-   - `1` (Recommended) — the single best pick by P/N score
-   - `3` — a small shortlist
-   - `5` — a wider list
+| Question | Options (default first) | CLI effect |
+|---|---|---|
+| Warm-only? | `yes — smart lazy fetch (Recommended)` · `always — pure offline` · `no — force re-fetch (slow)` | `--warm-only <value>` |
+| Exclude tickers? | `None (Recommended)` · `Exclude some…` — user types comma-separated list via auto-added "Other" (e.g. `ACB,HPG`); per-session only, never written to config.yaml | `--exclude TICKER` per ticker, or one comma-separated value; omit when None |
 
-   The program returns **exactly** this many (ranking the downtrend universe by
-   the rebound `score` and keeping the top N); a pick whose estimated recovery
-   probability is below the configured floor is flagged `below_recovery_bar`.
-   *Other* (auto-added) takes any integer ≥ 1. Pass `--picks <value>`.
+Then summarise the chosen parameters back in one line and start.
 
-2. **HOSE-only?**
-   - `No — all exchanges` (Recommended) — HOSE + HNX + UPCOM
-   - `Yes — HOSE only` — excludes HNX and UPCOM
-
-   Add `--hose-only` only when Yes.
-
-3. **Include ETFs?**
-   - `Yes — include ETFs` (Recommended) — HOSE-listed ETFs / fund certificates
-     (FUEVFVND, E1VFVN30, …) are mixed in; ETF rows get the ETF rubric (underlying
-     index, foreign flows, NAV premium/discount, rebalancing) instead of company
-     business.
-   - `No — exclude ETFs` — filter ETFs out of every layer; the picks JSON filename
-     then gets a `_noETF` suffix.
-
-   Add `--no-etfs` only when No.
-
-4. **Warm-only?**
-   - `yes — smart lazy fetch` (Recommended) — skip cache-current tickers; fetch
-     only stale (new bar) and cold (no parquet).
-   - `always — pure offline` — run on whatever's cache-current, zero API calls.
-   - `no — force re-fetch` — full re-fetch (slow; backfill / corrections only).
-
-   Pass `--warm-only <value>`. Most runs should be `yes`.
-
-5. **Exclude tickers?** Per-session blacklist — NOT persisted to `config.yaml`.
-   - `None` (Recommended) — no exclusions
-   - `Exclude some…` — suppress specific names for this run only
-
-   To name them, the user picks the auto-added **"Other"** and types a
-   comma-separated list (e.g. `ACB,HPG`). Pass `--exclude TICKER` once per ticker
-   or as one comma-separated value; omit entirely when None.
-
-## Pipeline steps
-
-### 1. Run the rebound stage and get the candidate plan
+## Step 1 — Run the rebound stage
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli run \
     --picks <PICKS> [--hose-only] [--no-etfs] [--exclude TICKER ...] --warm-only <VALUE> --mode claude
 ```
 
-**If question 0 was `LLM-only`**, add `--llm-only`. This skips model ranking and
-writes `reports\claude_llm_plan_<YYYY-MM-DD>_…md` (plus a `.candidates.parquet`
-sidecar) listing the **whole eligible downtrend universe UNRANKED** with an empty
-`## Results` table for you to fill. Do the global/macro + VN-Index checks once,
-research the universe, then **select exactly `<PICKS>` names and, for each,
-predict `N_days` (expected trading days to bounce back to profit) and `P` (the
-expected profit as a decimal fraction, e.g. `0.05`)**. Finalize computes
-`score = P / N` and ranks by it — the same objective as the hybrid mode. You
-**buy at today's close** (no entry price), the target is `close × (1 + P)`, and
-there is **no stop** — the trade holds until the target. Then jump to finalize;
-`claude-finalize` auto-detects the LLM-only plan. The rest of this section is
-the hybrid path.
+- Output: plan markdown `reports\claude_news_plan_<YYYY-MM-DD>_<sig>.md` + candidates parquet sidecar.
+- If the CLI prints `[claude] DROP override:` or any error, quote it to the user **verbatim** before continuing.
+- Weak candidates carry a `below_recovery_bar` flag (low bounce probability).
 
-The CLI writes a markdown plan at `reports\claude_news_plan_<YYYY-MM-DD>_<sig>.md`
-plus a candidates parquet sidecar. The console lists the N candidates (top N by
-rebound score) with the rebound signal (score, N days to bounce, P, recovery
-probability) and the trade (buy / target / expected hold / net after fees);
-weak names carry a `below_recovery_bar` flag.
+**LLM-only path** (if chosen): add `--llm-only`. The CLI writes
+`reports\claude_llm_plan_<date>_…md` listing the whole eligible downtrend universe
+**unranked** with an empty `## Results` table. Do the global/macro check once,
+research the universe, then select exactly `<PICKS>` names and for each predict
+`N_days` (trading days to bounce) and `P` (profit as a decimal, e.g. `0.05`).
+Entry = today's close (no entry price), target = `close × (1 + P)`, no stop.
+Then go straight to Step 4 (finalize) — `claude-finalize` auto-detects the plan.
 
-If the CLI prints `[claude] DROP override:` or any error, surface it to the user
-verbatim before continuing.
+## Step 2 — Read the plan
 
-### 2. Read the plan markdown
+`Read` the path the CLI printed. Each candidate has empty Step 1 / Step 2 /
+Step 4 fields and there is a `## Scores` table at the bottom.
 
-Use `Read` on the path the CLI printed. The plan has a Method section (framed as
-"vet the rebound") and a per-ticker section for each candidate with empty Step 1 /
-Step 2 / Step 4 fields and a `## Scores` table at the bottom.
+## Step 3 — Research each ticker (vet the bounce)
 
-### 3. Research each ticker — vet the bounce, business-aware
+**Once, up front:** check for major global shocks breaking today (wars,
+sanctions/tariffs, oil/shipping disruptions, sharp oil/gold/USD-VND moves).
+Record in the global-context section; carry into every `news_score`. If quiet, say so.
 
-**First, once up front — major-conflict / geopolitical check.** Scan for major
-global conflicts or shocks breaking today (wars, ceasefires, sanctions/tariffs,
-oil-supply / shipping disruptions, sharp oil / gold / USD-VND moves). A
-market-wide catalyst can move the whole VN-Index and specific sectors regardless
-of any one company. Record it in the global-context section and carry it into
-every ticker's `news_score`. If quiet, note that and move on.
+**Per candidate:**
 
-**Then, for each candidate:**
+1. Check the heading tag.
+   - `[ETF — apply ETF rubric, NOT company business]` → skip company research;
+     research the underlying index and basket drivers. Tags: `[index-perf]`,
+     `[foreign-flow]`, `[nav-premium]`, `[rebalance]`, `[constituent-event]`.
+   - Stock rows → identify the business from `organ_name` in the heading.
+2. Derive **3–7 research dimensions yourself** for THIS ticker's rebound — no
+   fixed checklist. Prioritise healthy-dip vs falling-knife evidence: earnings,
+   solvency/debt, dilution, governance/audit flags, delisting/halt risk, sector
+   cycle, key contracts, insider action, policy/decrees.
+3. Search with `WebSearch`/`WebFetch`, **English AND Vietnamese** (Vietnamese
+   press covers far more). Keywords: `<TICKER> cổ phiếu`, `<company> lợi nhuận quý`,
+   `cổ tức`, `phát hành cổ phiếu`, `huỷ niêm yết`, `nghị định / thông tư`.
+   Sources: baomoi, cafef, vietstock, vneconomy, ndh, theinvestor, fireant;
+   macro via Reuters/Bloomberg/FT; policy via chinhphu.vn / sbv.gov.vn.
+   **Cross-check every finding across ≥2 sources.**
+4. **Headless only — never launch a GUI browser.** No `Start-Process`, `start`,
+   `explorer`, `Invoke-Item`, `os.startfile`, `webbrowser.open`, `msedge`/`chrome`,
+   or any preview/computer-use tool on an http(s) URL. If a tool returns nothing
+   usable, note the gap and move on.
+5. Score the rebound:
+   - `+1` news supports the bounce (real catalyst, or a sound company in a temporary dip)
+   - `0` nothing material — the statistical case stands alone
+   - `-1` news works against the bounce (deteriorating fundamentals, dilution, sector headwind, governance concern)
+   - `DROP` delisting / suspension / bankruptcy / fraud — the falling knife the
+     statistics miss; overrides everything. Don't hesitate — catching it is the
+     whole point of your pass.
+   - Never score on price/technicals (RSI, momentum, drawdown) — those already
+     drove the model. Score on business + sector + macro + policy news only.
 
-- **Check the heading tag.** ETF rows are marked `[ETF — apply ETF rubric, NOT
-  company business]`: skip company research, identify the underlying index and
-  research the basket's drivers (foreign flows, NAV premium/discount, upcoming
-  rebalancing, top-weight constituent events). Tag bullets `[index-perf]`,
-  `[foreign-flow]`, `[nav-premium]`, `[rebalance]`, `[constituent-event]`.
-- **Stock rows**: identify the business from the `organ_name` in the heading.
-- **Derive 3-7 research dimensions yourself** for THIS ticker's REBOUND — will it
-  climb back to a small profit within the next couple of weeks, or keep falling?
-  No fixed checklist. Prioritise anything that tells a **healthy-dip vs
-  falling-knife** story: earnings trajectory, solvency / debt, dilution / capital
-  raises, governance / audit flags, delisting or halt risk, sector cycle, a key
-  customer or contract, insider action, peer moves, relevant policy/decrees.
-- **Search broadly with `WebSearch` and `WebFetch`. Mix English AND Vietnamese**
-  (Vietnamese press has far more company coverage). Useful keywords: `<TICKER> cổ
-  phiếu`, `<company> lợi nhuận quý`, `cổ tức`, `phát hành cổ phiếu`, `huỷ niêm
-  yết`, `nghị định / thông tư`. Seed sources: baomoi, cafef, vietstock, vneconomy,
-  ndh, theinvestor, fireant; macro via Reuters/Bloomberg/FT; policy via
-  chinhphu.vn / sbv.gov.vn. Cross-check across ≥2 sources before scoring.
-- **Headless web access ONLY. Never launch a GUI browser.** All research goes
-  through `WebSearch` / `WebFetch` or headless HTTP. Never run `Start-Process`,
-  `start`, `explorer`, `Invoke-Item`, `os.startfile`, `webbrowser.open`,
-  `msedge`/`chrome` launches, or any preview/computer-use tool against an
-  `http(s)` URL. If a tool returns nothing usable, note the gap and move on.
-- **Score the rebound** based on what you found:
-  - `+1` news supports the bounce — a real recovery catalyst, OR simply a sound
-    company in a temporary / technical dip.
-  - `0` nothing material — the statistical rebound case stands on its own.
-  - `-1` news works AGAINST the bounce — deteriorating fundamentals, dilution,
-    sector headwind, governance concern (the dip may be justified).
-  - `DROP` for delisting / suspension / bankruptcy / fraud — this is exactly the
-    falling knife the statistical filter can miss; it overrides the score entirely.
-- **Do NOT** score on price/technicals (RSI, momentum, drawdown) — those already
-  drove the model's selection. Score on business + sector + macro + policy news.
+## Step 4 — Fill the plan markdown with Edit
 
-### 4. Fill the plan markdown
+- Per ticker: Step 1 (Business), Step 2 (your dimensions), Step 4 (Findings —
+  one bullet per dimension, tagged, with date + source).
+- **Tag rules** (the ledger tracks hit-rate per tag): kebab-case, lowercase, one
+  tag at the start of each bullet; reuse the same tag across tickers. Examples:
+  `[earnings]`, `[solvency]`, `[dilution]`, `[governance]`, `[delisting-risk]`,
+  `[sector-flow]`, `[macro-VN]`, `[contract-win]`, `[insider-action]`,
+  `[dividend]`, `[regulatory]`, `[peer-earnings]`.
+- `## Scores` table: replace each `0` in `news_score` with `-1`/`0`/`+1`/`DROP`.
+  Leave the `score` column (model's P/N base) untouched.
+- `adj_entry_vnd` / `adj_target_vnd` are pre-filled with the mechanical prices.
+  Overwrite **only** if research says a catalyst will gap the price so the plain
+  close-entry/target no longer fits; otherwise leave as-is.
 
-Use `Edit` to replace placeholders in the plan:
-- Per ticker, fill Step 1 (Business), Step 2 (the rebound dimensions you derived),
-  Step 4 (Findings — one bullet per dimension, tagged `[dimension-name]`, with
-  date + source).
-  - **Tag-naming rules** (the ledger aggregates hit-rate per tag): kebab-case,
-    lowercase, no spaces (`[insider-action]`, not `[Insider Action]`); reuse the
-    same tag across tickers for the same dimension; one tag per bullet at the
-    start. Good tags: `[earnings]`, `[solvency]`, `[dilution]`, `[governance]`,
-    `[delisting-risk]`, `[sector-flow]`, `[macro-VN]`, `[contract-win]`,
-    `[insider-action]`, `[dividend]`, `[regulatory]`, `[peer-earnings]`.
-- In the `## Scores` table, replace each `0` in the `news_score` column with your
-  score (`-1` / `0` / `+1` / `DROP`). The `score` column shown is the model's P/N
-  score — leave it; the re-rank uses it as the base.
-- **News-adjusted entry / target (optional).** The `adj_entry_vnd` /
-  `adj_target_vnd` columns are pre-filled with the buy price (today's close) and
-  the profit target. They're additive — the mechanical prices stay. Only overwrite
-  them if your research says the stock will gap up/down on a catalyst so the plain
-  close-entry/target no longer fits. Leave as-is otherwise.
-
-### 5. Finalize
+## Step 5 — Finalize
 
 ```
 .venv\Scripts\python.exe -m stockpredict.cli claude-finalize \
     "reports\claude_news_plan_<DATE>_<sig>.md"
 ```
 
-This applies the DROP override, re-ranks by `adjusted = score * (1 + news_weight *
-news_score)`, keeps the top N, writes `reports\picks_claude_<DATE>_<sig>.json`,
-and updates the ledger (so `dimensions_cited` hit-rate can be tracked later).
+Applies DROP, re-ranks by `adjusted = score * (1 + news_weight * news_score)`,
+writes `reports\picks_claude_<DATE>_<sig>.json`, updates the ledger.
 
-### 6. Report to the user
+## Step 6 — Report to the user
 
-Per pick, show:
+Per pick:
 - Symbol, company, business one-liner.
-- Rebound signal: `score`, `N` (expected trading days to bounce), `P` (expected
-  profit), `recovery_prob`; news score + one-sentence rationale citing the
-  dimension; the 3-7 dimensions you researched.
-- Trade economics: buy price, target (VND), expected hold, fees round-trip, net
-  P&L per share, and `below_recovery_bar: True/False` (True = weak — low bounce
-  probability). There is **no stop-loss**: the exit is reaching the target.
-- If `suggested_max_units` is present, show it as an advisory liquidity cap (the
-  largest position within `pricing.max_participation_pct`% of 20-day ADV) — a
-  ceiling, not a recommended size. Omit when null.
-- If you set a news-adjusted entry/target, show the `adj_*` trade on its own line
-  and say why in one sentence.
+- Rebound signal: `score`, `N`, `P`, `recovery_prob`; news score + one-sentence
+  rationale citing a dimension; the dimensions you researched.
+- Trade: buy price, target (VND), expected hold, round-trip fees, net P&L/share,
+  `below_recovery_bar: True/False`. State there is **no stop-loss** — exit is
+  reaching the target.
+- `suggested_max_units` if present: an advisory liquidity ceiling, not a size
+  recommendation. Omit when null.
+- If you set `adj_*` prices, show that trade on its own line with a one-sentence why.
 
-Then a one-line **bottom line**: the strongest pick(s), and a note if several are
+End with a one-line **bottom line**: strongest pick(s); note if several are
 `below_recovery_bar`.
 
-### 7. Exit is flexible — no fixed sell day
+## Step 7 — Exit handling
 
-This is a rebound trade with a **flexible exit**: the user **monitors and sells
-manually** when the price reaches the target (that human judgement is deliberate).
-Do **NOT** schedule a hard sell reminder. Tell the user, per pick, the buy price,
-the target, and the expected days-to-bounce (`N`). If — and only if — the user
-asks for a nudge, offer an **optional** check-in reminder around `as_of + N`
-trading days (GMT+7, Asia/Ho_Chi_Minh) to re-examine any pick that hasn't
-recovered yet — framed as "take a look", not "sell now". Never schedule silently;
-confirm date/time and tickers first, and use the `scheduled-tasks` tool if the
-user accepts (not Windows `schtasks` / cron unless they ask).
+The user monitors and sells manually at the target. Do **NOT** schedule a sell
+reminder. Only if the user asks for a nudge: offer an optional check-in around
+`as_of + N` trading days (Asia/Ho_Chi_Minh), framed as "take a look", not "sell
+now". Confirm date/time and tickers first; use the `scheduled-tasks` tool, not
+`schtasks`/cron.
 
-## What NOT to do
+## Never
 
-- Don't lock yourself to a fixed list of dimensions; derive per-ticker.
-- Don't accept findings from a single source.
-- Don't fabricate news. If nothing material, score `0` honestly.
-- Don't score on technicals (RSI, momentum, drawdown) — those are the model's input.
-- Don't hesitate to `DROP` a broken company — catching the falling knife the
-  statistical filter missed is the whole point of your pass.
+- Fix the dimension list — derive per ticker.
+- Accept a finding from a single source.
+- Fabricate news — score `0` honestly if nothing material.
+- Score on technicals, or on a ticker's past ledger performance — score today's evidence only.
+- Add a stop-loss or time cap.
 
-## Caveats to mention to the user
+## Caveats to mention
 
-- ACBS round-trip cost is ~0.43% per trade; the profit target already clears it,
-  but a pick flagged `below_recovery_bar` has a weak (low-probability) bounce case.
-- ETFs have tighter return distributions, so their P (and score) is usually
-  smaller; they'll rank low and often carry `below_recovery_bar`.
-- Every pick is recorded in the ledger (`cache/predictions.parquet`) with a
-  per-pick `target_date` = `as_of` + expected N trading days. Later runs
-  auto-evaluate: a pick is marked recovered when its close first clears the target,
-  and `recovered_flag` / `actual_exit_date` are stamped. **Scoring this run is NOT
-  influenced by past performance** — score each ticker on today's evidence. To act
-  on accumulated history, run `self_correct_prompt.md` on a past picks file.
-- There is no automatic stop-loss or time cap (the backtest showed both hurt this
-  mean-reversion strategy). The rare broken name that slips past the filter is held
-  until it recovers — which is why your `DROP` judgement and the user's manual
-  monitoring matter.
+- ACBS round-trip cost ~0.43%; the target already clears it, but `below_recovery_bar` = weak bounce case.
+- ETFs have tighter return distributions → smaller P/score, often `below_recovery_bar`.
+- Every pick lands in the ledger (`cache/predictions.parquet`) with `target_date = as_of + N`;
+  later runs auto-evaluate recovery. History analysis is `self_correct_prompt.md`'s job, not this run's.
+- A broken name that slips the filter is held until recovery — hence your `DROP`
+  judgement and the user's manual monitoring matter.
 
-Now, collect the parameters with `AskUserQuestion` (batched as described) and begin.
+Now collect the parameters with `AskUserQuestion` (batched as above) and begin.
