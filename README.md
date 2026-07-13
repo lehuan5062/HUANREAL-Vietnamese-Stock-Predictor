@@ -478,4 +478,3 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
   is held indefinitely — the strategy wins often and fast, but warehouses an
   underwater tail of unsold names. Monitor and prune those manually.
 - **Not investment advice.** Use at your own risk; past performance ≠ future results.
-```
