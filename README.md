@@ -260,7 +260,10 @@ reads that accumulated JSONL and layers two analyses:
    `scripts/rebound_config_tuner.py` (via `KNOB_BOUNDS`), then accumulating
    fresh trials to explore the newly opened region.
 
-Purely read-only either way — no files written, `config.yaml` untouched.
+Read-only with respect to `config.yaml` and the trials JSONL. For speed, it
+caches a flattened parquet of the accumulated trials (incremental parse — only
+new lines from the JSONL are parsed each run) — these cache files are
+gitignored and can be safely deleted to force a full re-parse.
 
 `self_correct_prompt.md` runs the suggest script as part of its own
 self-correction pass (Step 6a) as the required evidence source for any
