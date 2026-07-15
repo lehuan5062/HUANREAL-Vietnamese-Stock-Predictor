@@ -29,6 +29,7 @@ sync between the two scripts).
 from __future__ import annotations
 
 import json
+import sys
 import warnings
 from pathlib import Path
 
@@ -87,7 +88,22 @@ CONTINUOUS_KNOBS = [
 
 
 def _parse_lines(text: str) -> pd.DataFrame:
-    rows = [json.loads(l) for l in text.splitlines() if l.strip()]
+    # Skip (don't crash on) any corrupted line — e.g. a trial killed mid-write
+    # by the console window's X button. A bad line costs one trial, not the
+    # whole run. The caller's byte offset still advances past skipped lines, so
+    # they're never re-read and can't poison the parquet cache.
+    rows = []
+    bad = 0
+    for l in text.splitlines():
+        if not l.strip():
+            continue
+        try:
+            rows.append(json.loads(l))
+        except json.JSONDecodeError:
+            bad += 1
+    if bad:
+        print(f"warning: skipped {bad} corrupted line(s) in {RESULTS_PATH.name}",
+              file=sys.stderr)
     return pd.json_normalize(rows, sep=".")
 
 

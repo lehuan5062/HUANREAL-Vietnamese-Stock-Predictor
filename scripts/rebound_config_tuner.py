@@ -30,6 +30,7 @@ from __future__ import annotations
 import copy
 import datetime
 import json
+import os
 import random
 import statistics
 import warnings
@@ -250,8 +251,23 @@ def main():
         "benchmark_irr": benchmark_irr,
         "excess_irr": excess_irr,
     }
+    # A prior trial killed mid-write (e.g. the console window's X button sends
+    # CTRL_CLOSE_EVENT) can leave a partial line with no trailing newline. If we
+    # appended straight onto it, the two records would merge into one garbage
+    # line, destroying this good record too. So first ensure the file ends in a
+    # newline, isolating any truncated line as its own (skippable) bad line.
+    if RESULTS_PATH.exists() and RESULTS_PATH.stat().st_size > 0:
+        with open(RESULTS_PATH, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_newline = f.read(1) != b"\n"
+    else:
+        needs_newline = False
     with open(RESULTS_PATH, "a", encoding="utf-8") as f:
+        if needs_newline:
+            f.write("\n")
         f.write(json.dumps(record, default=str) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
     print()
     print("=== Trial result ===")
