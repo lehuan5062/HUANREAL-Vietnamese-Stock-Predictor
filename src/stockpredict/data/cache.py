@@ -173,10 +173,22 @@ def merge_ohlcv(symbol: str, new: pd.DataFrame, validate: bool = True) -> pd.Dat
 
     if validate and not existing.empty:
         new_sorted = new.sort_index()
-        closes = [(ts.date() if hasattr(ts, "date") else ts, float(c))
-                  for ts, c in new_sorted["close"].items()]
-        boundary_prev = float(existing["close"].iloc[-1])
-        _validate_no_impossible_move(symbol, closes, boundary_prev)
+        # Only validate rows STRICTLY AFTER the cached max. Sources sometimes
+        # ignore the requested start date and return history overlapping (or
+        # entirely before) the cache — e.g. delisted/suspended tickers where
+        # the API replays old bars. Seeding the check with existing's LAST
+        # close and walking from new's FIRST row would then compare
+        # non-adjacent dates (a 2024 close vs a 2022 close) and flag a bogus
+        # "impossible move" every single run. Overlapping rows are already
+        # covered by the concat + keep="last" dedup and need no boundary check.
+        cached_max = existing.index.max()
+        idx_norm = pd.DatetimeIndex(new_sorted.index).normalize()
+        after = new_sorted[idx_norm > cached_max]
+        if not after.empty:
+            closes = [(ts.date() if hasattr(ts, "date") else ts, float(c))
+                      for ts, c in after["close"].items()]
+            boundary_prev = float(existing["close"].iloc[-1])
+            _validate_no_impossible_move(symbol, closes, boundary_prev)
 
     if existing.empty:
         merged = new

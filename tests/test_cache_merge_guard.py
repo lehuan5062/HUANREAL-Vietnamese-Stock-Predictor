@@ -77,6 +77,51 @@ def test_merge_ohlcv_validate_false_allows_the_same_jump_through(monkeypatch, is
     assert float(merged["close"].iloc[-1]) == 16.52
 
 
+def test_merge_ohlcv_overlapping_replay_not_flagged(monkeypatch, isolated_cache):
+    """Regression test for the daily false-positive loop (ART/ATA incident):
+    a source that ignores the requested start date and replays OLD history
+    overlapping the cache must not trip the guard. Comparing existing's
+    LAST close (e.g. a 2024 tail) against new's FIRST row (e.g. a 2022 bar)
+    compares non-adjacent dates and flagged a bogus 'impossible move' on
+    every run, forcing a useless full re-fetch per symbol per day. Only new
+    rows STRICTLY AFTER the cached max are boundary-checked."""
+    _patch_universe(monkeypatch, {"ART": "HNX"})
+    existing = pd.DataFrame(
+        {"open": [4.2, 1.3], "high": [4.2, 1.3], "low": [4.2, 1.3],
+         "close": [4.2, 1.3], "volume": [1000, 1000]},
+        index=pd.DatetimeIndex(["2022-06-20", "2024-07-25"], name="date"),
+    )
+    cache.write_ohlcv("ART", existing)
+
+    # Replayed old bars only (all <= cached max): no rows to boundary-check.
+    replay = pd.DataFrame(
+        {"open": [4.2, 4.2], "high": [4.2, 4.2], "low": [4.2, 4.2],
+         "close": [4.2, 4.2], "volume": [1000, 1000]},
+        index=pd.DatetimeIndex(["2022-06-20", "2022-06-21"], name="date"),
+    )
+    merged = cache.merge_ohlcv("ART", replay, validate=True)
+    assert float(merged["close"].iloc[-1]) == 1.3
+
+    # Replay PLUS a genuinely-new out-of-band row: the new row is still
+    # checked against existing's last close and rejected.
+    replay_plus_bad = pd.DataFrame(
+        {"open": [4.2, 9.9], "high": [4.2, 9.9], "low": [4.2, 9.9],
+         "close": [4.2, 9.9], "volume": [1000, 1000]},
+        index=pd.DatetimeIndex(["2022-06-20", "2024-07-26"], name="date"),
+    )
+    with pytest.raises(SuspectedCorporateActionArtifact):
+        cache.merge_ohlcv("ART", replay_plus_bad, validate=True)
+
+    # Replay plus a normal in-band new row: accepted.
+    replay_plus_ok = pd.DataFrame(
+        {"open": [4.2, 1.3], "high": [4.2, 1.3], "low": [4.2, 1.3],
+         "close": [4.2, 1.3], "volume": [1000, 1000]},
+        index=pd.DatetimeIndex(["2022-06-20", "2024-07-26"], name="date"),
+    )
+    merged = cache.merge_ohlcv("ART", replay_plus_ok, validate=True)
+    assert merged.index.max() == pd.Timestamp("2024-07-26")
+
+
 def test_write_ohlcv_stable_sort_makes_new_data_win_the_dedup(monkeypatch, isolated_cache):
     """Regression test: sort_index()'s default (quicksort) is NOT stable, so
     when existing and new both have a row for the SAME date, the tie-break
