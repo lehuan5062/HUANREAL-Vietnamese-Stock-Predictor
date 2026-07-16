@@ -63,6 +63,13 @@ def simulate(data=None, start=START, end=None):
     → last bar, i.e. identical to prior behavior).
     """
     per_day, paths, days = data if data is not None else _build_data(start, end)
+    # IRR anchors: annualize over the FULL backtest window, not the first-to-
+    # last-trade span. A config that only trades a few days out of the window
+    # kept capital standing ready the whole time; annualizing a one-day round
+    # trip over its own span produced absurd IRRs (observed: 57,340 = 5.7M%).
+    # Clamped so the anchors always at least cover the traded days.
+    w_start = pd.Timestamp(start) if start is not None else None
+    w_end = pd.Timestamp(end) if end is not None else None
     if not days:
         # No anchor produced any candidate day in this window/config combo
         # (e.g. too little training data, or gates filtered every candidate
@@ -179,8 +186,12 @@ def simulate(data=None, start=START, end=None):
     final_val = cash + liq
     cashflows.append((last, final_val))
 
-    # Money-weighted IRR (daily), annualized.
-    t0 = days[0]
+    # Money-weighted IRR (daily), annualized over the backtest window.
+    t0 = min(w_start, days[0]) if w_start is not None else days[0]
+    t_final = max(w_end, days[-1]) if w_end is not None else days[-1]
+    # Final valuation sits at the window end: after the last trade the book is
+    # cash earning nothing, which correctly dilutes the annualized rate.
+    cashflows[-1] = (t_final, cashflows[-1][1])
     def npv(r):
         return sum(a / (1 + r) ** ((d - t0).days) for d, a in cashflows)
     lo, hi = -0.99, 2.0
@@ -195,6 +206,9 @@ def simulate(data=None, start=START, end=None):
     total = n_wins + n_forced
     return {
         "span": f"{days[0].date()}..{days[-1].date()} (~{(days[-1]-days[0]).days/365:.1f}y)",
+        # Marker read by rebound_config_suggest: records WITHOUT it were
+        # annualized over the traded span (pre-fix) and get filtered when short.
+        "irr_anchor": "window",
         "signals": n_signals,
         "missed_fills_gap_up": n_missed_fills,
         "fill_rate": (1 - n_missed_fills / n_signals) if n_signals else float("nan"),

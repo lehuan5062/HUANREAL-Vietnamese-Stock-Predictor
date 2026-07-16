@@ -234,7 +234,11 @@ def main():
         data = _build_data(start=window_start.strftime("%Y-%m-%d"),
                            end=window_end.strftime("%Y-%m-%d"))
         print("Running simulation...", flush=True)
-        result = simulate(data=data)
+        # Pass the trial window so the sim annualizes IRR over the whole
+        # window, not the (possibly tiny) traded span.
+        result = simulate(data=data,
+                          start=window_start.strftime("%Y-%m-%d"),
+                          end=window_end.strftime("%Y-%m-%d"))
         benchmark_irr = _benchmark_irr(data[1], window_start, window_end)
     finally:
         CONFIG_PATH.write_bytes(original_bytes)

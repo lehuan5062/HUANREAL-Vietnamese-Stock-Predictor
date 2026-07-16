@@ -229,6 +229,11 @@ you stop it (Ctrl+C). Each iteration:
 - Temporarily writes the sampled config to `config.yaml`, rebuilds and runs
   `rebound_sim_include_held` on that slice, then **always restores the real
   `config.yaml`** — verified to hold even under a real mid-build Ctrl+C.
+  The sim's IRR is annualized over the **full trial window**, not the
+  first-to-last-trade span (the final valuation is anchored at window end, so
+  a config that only trades a few days keeps its idle time in the
+  denominator — a one-day +1.5% round trip used to annualize to millions of
+  percent). Post-fix records carry `result.irr_anchor: "window"`.
 - Also computes a **benchmark**: what a plain buy-and-hold would have
   returned over that exact same random slice (median across all symbols,
   annualized by the slice's real day count). `excess_irr = trial's IRR −
@@ -240,7 +245,10 @@ you stop it (Ctrl+C). Each iteration:
   `reports/tuning/rebound_include_held_search.jsonl` (gitignored).
 
 `run_config_suggest.bat` runs `scripts/rebound_config_suggest.py`, which
-reads that accumulated JSONL and layers two analyses:
+reads that accumulated JSONL — first excluding pre-fix legacy trials (no
+`irr_anchor` marker) whose traded span was under 50% of the window, since
+their span-annualized IRRs are inflated and can't be recomputed — and layers
+two analyses:
 
 1. **Per-knob marginal analysis** (from 5 trials on): since the tuner
    samples every knob independently and jointly, grouping (categorical

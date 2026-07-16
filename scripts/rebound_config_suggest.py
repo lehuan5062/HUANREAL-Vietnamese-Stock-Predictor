@@ -47,6 +47,9 @@ CACHE_PATH = RESULTS_PATH.with_suffix(".cache.parquet")
 CACHE_META_PATH = RESULTS_PATH.with_suffix(".cache.meta.json")
 MIN_TRIALS = 5
 MIN_GROUP_SIZE = 3
+# Pre-fix trials (no result.irr_anchor) annualized IRR over the traded span;
+# drop them when that span is under this fraction of the trial window.
+LEGACY_MIN_SPAN_FRACTION = 0.5
 TERCILE_MIN_TRIALS = 12
 ML_MIN_TRIALS = 50
 ML_CANDIDATE_SAMPLES = 5000
@@ -390,8 +393,37 @@ def _range_boundary_check(df: pd.DataFrame, cat_knobs: list[str],
         print("  search space looks wide enough.")
 
 
+def _drop_span_inflated_legacy(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Drop pre-fix trials whose IRR was annualized over a short traded span.
+
+    Records written before the window-anchored IRR fix (no result.irr_anchor
+    marker) annualized over first-to-last-trade days; a config that traded only
+    a few days out of its 1-year window got its return compounded to absurdity
+    (observed: +57,340 from a one-day span, and -0.998 from the same defect in
+    reverse). Those trials can't be recomputed from what's recorded, so legacy
+    rows with a traded span under LEGACY_MIN_SPAN_FRACTION of the trial window
+    are excluded from every analysis below. Post-fix rows are always kept."""
+    if df.empty or "result.span" not in df.columns:
+        return df, 0
+    legacy = (df["result.irr_anchor"].isna() if "result.irr_anchor" in df.columns
+              else pd.Series(True, index=df.index))
+    span_dates = df["result.span"].astype(str).str.extract(
+        r"^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})")
+    traded_days = (pd.to_datetime(span_dates[1], errors="coerce")
+                   - pd.to_datetime(span_dates[0], errors="coerce")).dt.days
+    window_days = (pd.to_datetime(df.get("window_end"), errors="coerce")
+                   - pd.to_datetime(df.get("window_start"), errors="coerce")).dt.days
+    inflated = legacy & traded_days.notna() & window_days.notna() \
+        & (traded_days < LEGACY_MIN_SPAN_FRACTION * window_days)
+    return df[~inflated].reset_index(drop=True), int(inflated.sum())
+
+
 def main():
     df = _load_trials()
+    df, n_dropped = _drop_span_inflated_legacy(df)
+    if n_dropped:
+        print(f"excluded {n_dropped} pre-fix trial(s) with span-inflated IRR "
+              f"(traded span < {LEGACY_MIN_SPAN_FRACTION:.0%} of the window)")
     n = len(df)
     if n < MIN_TRIALS:
         print(f"Not enough trials yet (have {n}, need {MIN_TRIALS}). "
