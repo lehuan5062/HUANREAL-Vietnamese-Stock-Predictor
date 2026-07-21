@@ -11,7 +11,7 @@ def _bucket(prob, days, profit, n=100):
     return {"recovery_prob": prob, "days": days, "profit": profit, "n": n}
 
 
-def _panel(symbols):
+def _panel(symbols, realvol_20=0.5):
     # Two dates so latest_cross_section has history; all rows in a downtrend.
     dates = pd.date_range("2024-01-01", periods=2, freq="B")
     rows = []
@@ -23,6 +23,7 @@ def _panel(symbols):
                 "high_prox_20": -0.08, "atr_14": 0.5, "vol_z_20": 0.0,
                 "adv_vnd_20": 5_000_000.0, "adv_active_days_20": 20.0,
                 "ret_1d": -0.01, "close_at_high": False, "max_abs_ret_20": 0.03,
+                "realvol_20": realvol_20,
             })
     return pd.DataFrame(rows).set_index("date")
 
@@ -95,6 +96,50 @@ def test_rebound_rank_healthy_gate_drops_low_prob(monkeypatch):
     syms = set(out["symbol"])
     assert "HEALTHY" in syms
     assert "KNIFE" not in syms
+
+
+def test_rebound_rank_vol_penalty_demotes_choppy_name(monkeypatch):
+    """With vol_penalty.k > 0, two names with IDENTICAL pred_profit/pred_days/
+    pred_recovery_prob must be ordered by realvol_20 -- the choppier one
+    ranks lower, and the vol_penalty column matches 1/(1 + k*realvol_20)."""
+    panel = _panel(["LOWVOL"], realvol_20=0.3)
+    panel = pd.concat([panel, _panel(["HIGHVOL"], realvol_20=1.5)])
+    model = _model(panel)
+    _stub_predict(model, monkeypatch, {
+        "LOWVOL": (0.96, 3.0, 0.06), "HIGHVOL": (0.96, 3.0, 0.06)})
+    monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(predict_mod, "load_config",
+                        lambda: type("Cfg", (), {"strategy": {"recovery": {
+                            "min_recovery_prob": 0.5,
+                            "vol_penalty": {"k": 1.0, "measure": "realvol_20"}}}})())
+
+    out = predict_mod.rank_today(recovery_model=model, n_picks=2, panel=panel)
+    assert list(out["symbol"]) == ["LOWVOL", "HIGHVOL"]
+    lowvol = out[out["symbol"] == "LOWVOL"].iloc[0]
+    highvol = out[out["symbol"] == "HIGHVOL"].iloc[0]
+    assert abs(lowvol["vol_penalty"] - 1.0 / (1.0 + 1.0 * 0.3)) < 1e-9
+    assert abs(highvol["vol_penalty"] - 1.0 / (1.0 + 1.0 * 1.5)) < 1e-9
+    base = (0.06 / 3.0) * 0.96
+    # add_recovery_price_suggestions rounds score to 6 decimals for display.
+    assert abs(lowvol["score"] - base * lowvol["vol_penalty"]) < 1e-6
+
+
+def test_rebound_rank_vol_penalty_off_by_default_ordering_unchanged(monkeypatch):
+    """k=0 (the _model default config injected elsewhere) must reproduce plain
+    P/N ordering -- the guard that keeps existing tests unaffected."""
+    panel = _panel(["LOWVOL"], realvol_20=0.3)
+    panel = pd.concat([panel, _panel(["HIGHVOL"], realvol_20=1.5)])
+    model = _model(panel)
+    _stub_predict(model, monkeypatch, {
+        "LOWVOL": (0.96, 3.0, 0.06), "HIGHVOL": (0.96, 3.0, 0.09)})
+    monkeypatch.setattr(predict_mod, "tradable_symbols", lambda: None)
+    monkeypatch.setattr(predict_mod, "load_config",
+                        lambda: type("Cfg", (), {"strategy": {"recovery": {"min_recovery_prob": 0.5}}})())
+
+    out = predict_mod.rank_today(recovery_model=model, n_picks=2, panel=panel)
+    # No vol_penalty configured -> pure P/N: HIGHVOL (0.09/3) beats LOWVOL (0.06/3).
+    assert list(out["symbol"]) == ["HIGHVOL", "LOWVOL"]
+    assert out["vol_penalty"].isna().all()
 
 
 def test_rebound_rank_empty_without_model(monkeypatch):

@@ -916,7 +916,8 @@ def status_cmd() -> None:
             click.echo(f"recovery model:  present  ({rm})  "
                        f"{rec.train_rows:,} downtrend rows  "
                        f"{len(rec.buckets)} state buckets  "
-                       f"{len(getattr(rec, 'ticker_stats', {}))} tickers")
+                       f"{len(getattr(rec, 'ticker_stats', {}))} tickers  "
+                       f"{len(getattr(rec, 'ticker_bucket_stats', {}))} ticker x bucket cells")
         except Exception as e:
             click.echo(f"recovery model:  present but unreadable ({e}) — retrain.")
     else:

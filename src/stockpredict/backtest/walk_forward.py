@@ -21,6 +21,7 @@ from ..config import load_config, reports_dir
 from ..dataset import build_panel
 from ..filters import (ceiling_lock_mask, corporate_action_mask, downtrend_mask,
                        liquidity_mask, overbought_mask)
+from ..model.predict import rebound_score
 from ..model.target import resolve_exit, settle_days
 from ..model.train import train_recovery
 from ..pricing import profit_threshold
@@ -95,7 +96,8 @@ def _run_rebound(panel: pd.DataFrame, start, end, top_k, train_years,
     slightly past it. OOS returns here are therefore mildly optimistic; treat
     the rebound-vs-legacy comparison as indicative, not exact."""
     thr = profit_threshold()
-    min_prob = float(dict(getattr(load_config(), "strategy", {}) or {})
+    cfg = load_config()
+    min_prob = float(dict(getattr(cfg, "strategy", {}) or {})
                      .get("recovery", {}).get("min_recovery_prob", 0.0) or 0.0)
 
     # Per-symbol forward close path (sorted), for the flexible-exit sim.
@@ -135,10 +137,7 @@ def _run_rebound(panel: pd.DataFrame, start, end, top_k, train_years,
                 day = day[day["pred_recovery_prob"] >= min_prob]
                 if day.empty:
                     continue
-            day["score"] = (
-                (day["pred_profit"] / day["pred_days"].clip(lower=1.0))
-                * day["pred_recovery_prob"]
-            )
+            day["score"], _ = rebound_score(day, cfg)
             picks = day.sort_values("score", ascending=False).head(top_k)
             for sym, row in picks.iterrows():
                 symbol = str(row.get("symbol", sym))

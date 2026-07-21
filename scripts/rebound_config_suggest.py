@@ -76,6 +76,8 @@ LIST_KNOBS = [
 CATEGORICAL_KNOBS = [
     "backtest.train_window_years", "backtest.oos_window_months", "backtest.step_months",
     "strategy.recovery.min_ticker_obs", "strategy.recovery.min_bucket_obs",
+    "strategy.recovery.min_ticker_bucket_obs",
+    "strategy.recovery.vol_penalty.k", "strategy.recovery.vol_penalty.measure",
     "strategy.recovery.label_max_horizon",
     "universe.liquidity_filter.min_close_vnd", "universe.liquidity_filter.min_adv_active_days",
     "universe.liquidity_filter.min_adv_vnd", "universe.liquidity_filter.min_history_days",

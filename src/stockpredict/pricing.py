@@ -117,10 +117,18 @@ def add_recovery_price_suggestions(df: pd.DataFrame) -> pd.DataFrame:
     # was removed), so ``close_vnd`` is the single buy price.
     close_v = (close_k * 1000.0).round(0)
     target_v = (close_v * (1.0 + pred_profit.clip(lower=0.0))).round(0)
-    # LLM-only picks carry no statistical recovery probability (the LLM's
-    # DROP/selection vetting IS its probability judgement) — treat a missing
-    # prob as 1.0 so score reduces to plain P/N and the prob gate is skipped.
-    score = (pred_profit / pred_days.clip(lower=1.0)) * pred_prob.fillna(1.0)
+    if "score" in out.columns:
+        # Caller (e.g. rank_today) already ranked by its own score -- possibly
+        # volatility-penalized -- before calling here; preserve it rather than
+        # silently recomputing a different (unpenalized) number under the same
+        # column name. LLM-only picks (modes/claude.py::finalize_llm) never
+        # carry a pre-existing "score", so they still get it computed below.
+        score = out["score"].astype(float)
+    else:
+        # LLM-only picks carry no statistical recovery probability (the LLM's
+        # DROP/selection vetting IS its probability judgement) — treat a missing
+        # prob as 1.0 so score reduces to plain P/N and the prob gate is skipped.
+        score = (pred_profit / pred_days.clip(lower=1.0)) * pred_prob.fillna(1.0)
 
     gross_reward = target_v - close_v
     _, _, fees_total, _ = _broker_costs(close_v, target_v, broker)

@@ -104,6 +104,14 @@ strategy:
     # downtrend rows; thinner tickers fall back to the RSI x drawdown bucket,
     # then to the pooled all-downtrend estimate.
     min_ticker_obs: 100
+    # A ticker x (RSI band x drawdown band) CELL is used when it holds at least
+    # this many of that ticker's own downtrend rows — more specific than the
+    # flat per-ticker aggregate (min_ticker_obs), so a ticker's estimate tracks
+    # its CURRENT state instead of a state-blind lifetime average (a name can be
+    # a reliable bouncer in a shallow dip and a chronic decliner once far below
+    # its recent high). Thinner cells fall back to the ticker aggregate, then
+    # the cross-sectional bucket, then pooled.
+    min_ticker_bucket_obs: 30
     # A state bucket must hold at least this many historical downtrend rows to be
     # trusted; thinner buckets fall back to the pooled all-downtrend estimate.
     min_bucket_obs: 50
@@ -114,6 +122,15 @@ strategy:
     state_buckets:
       rsi_edges: [30, 40, 50]
       high_prox_edges: [-0.20, -0.10, -0.05]
+    # Volatility penalty on the rebound score. pred_profit mechanically scales
+    # with a ticker's characteristic volatility (bigger daily moves => bigger
+    # first-crossing overshoot), and recovery_prob carries no vol signal, so the
+    # raw score over-promotes choppy/thin names. Discount the score by
+    # 1/(1 + k*vol). k=0 disables (never touches the vol column). k~1.0
+    # roughly flattens the measured profit/volatility slope.
+    vol_penalty:
+      k: 1.0
+      measure: realvol_20   # or atr_pct (= atr_14/close)
 
 backtest:
   start: "2020-01-01"

@@ -38,6 +38,7 @@ import pandas as pd
 from stockpredict.backtest.walk_forward import _rebound_filters
 from stockpredict.config import load_config
 from stockpredict.dataset import build_panel
+from stockpredict.model.predict import rebound_score
 from stockpredict.model.target import resolve_exit
 from stockpredict.model.train import train_recovery
 from stockpredict.pricing import (add_recovery_price_suggestions,
@@ -139,8 +140,7 @@ def _daily_candidates(panel: pd.DataFrame, start: str, end=None) -> tuple[dict, 
                 day = day[day["pred_recovery_prob"] >= min_prob]
                 if day.empty:
                     continue
-            day["score"] = ((day["pred_profit"] / day["pred_days"].clip(lower=1.0))
-                            * day["pred_recovery_prob"])
+            day["score"], _ = rebound_score(day, cfg)
             day = day.sort_values("score", ascending=False)
             priced = add_recovery_price_suggestions(day)
             cands = []

@@ -30,6 +30,7 @@ def _make_panel(n_days: int = 900) -> pd.DataFrame:
         df["adv_vnd_20"] = 5_000_000_000.0
         df["adv_active_days_20"] = 20.0
         df["atr_14"] = 1.0
+        df["realvol_20"] = 0.5  # exercises the real (non-short-circuit) vol-penalty path
         rec = recovery_episode(df, thr=thr, max_horizon=60)
         df["target_days_to_recover"] = rec["target_days_to_recover"]
         df["target_recovery_return"] = rec["target_recovery_return"]

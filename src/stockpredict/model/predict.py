@@ -32,6 +32,43 @@ def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) ->
     return last
 
 
+def rebound_score(df: pd.DataFrame, cfg=None) -> tuple[pd.Series, pd.Series | None]:
+    """Return (score, vol_penalty) for a frame carrying ``pred_profit``,
+    ``pred_days``, ``pred_recovery_prob`` (and, when the penalty is enabled,
+    ``realvol_20`` or ``close``/``atr_14``).
+
+    ``score = (pred_profit / pred_days) * pred_recovery_prob``, optionally
+    discounted by ``1 / (1 + k * vol)``. ``pred_profit`` is the 75th-percentile
+    magnitude of a first-crossing overshoot, which mechanically scales with a
+    ticker's raw volatility (measured correlation ~0.5) while
+    ``pred_recovery_prob`` -- the score's supposed risk-adjustment -- carries
+    ~no volatility signal. Left unpenalized, the score systematically promotes
+    thin, choppy names. ``strategy.recovery.vol_penalty.k`` (default 0)
+    disables the penalty entirely and never touches the volatility column, so
+    callers/tests that omit it are unaffected. ``vol_penalty`` is returned as
+    ``None`` when disabled (or the configured volatility column is absent),
+    else the per-row ``(0, 1]`` discount factor for auditability."""
+    base = (df["pred_profit"] / df["pred_days"].clip(lower=1.0)) * df["pred_recovery_prob"]
+    if cfg is None:
+        cfg = load_config()
+    rec = dict(getattr(cfg, "strategy", {}) or {}).get("recovery", {}) or {}
+    vp_cfg = dict(rec.get("vol_penalty", {}) or {})
+    k = float(vp_cfg.get("k", 0.0) or 0.0)
+    if k <= 0:
+        return base, None
+    measure = vp_cfg.get("measure", "realvol_20")
+    if measure == "atr_pct":
+        vol = df.get("atr_14")
+        vol = vol / df["close"].replace(0, np.nan) if vol is not None else None
+    else:
+        vol = df.get("realvol_20")
+    if vol is None:
+        return base, None
+    vol = pd.to_numeric(vol, errors="coerce").fillna(0.0).clip(lower=0.0)
+    penalty = 1.0 / (1.0 + k * vol)
+    return base * penalty, penalty
+
+
 def _try_load_recovery_model() -> RecoveryKMModel | None:
     """Return the cached Kaplan-Meier recovery head, or None if it hasn't been
     trained yet / the pickle is unreadable. A soft fallback so a cold install
@@ -80,10 +117,7 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
         snap = snap[snap["pred_recovery_prob"] >= min_prob].copy()
         if snap.empty:
             return snap.iloc[0:0]
-    snap["score"] = (
-        (snap["pred_profit"] / snap["pred_days"].clip(lower=1.0))
-        * snap["pred_recovery_prob"]
-    )
+    snap["score"], snap["vol_penalty"] = rebound_score(snap, load_config())
     snap["rank"] = snap["score"].rank(ascending=False, method="dense").astype(int)
     ordered = snap.sort_values("score", ascending=False)
     out = add_recovery_price_suggestions(ordered.head(int(n_picks)))
@@ -93,7 +127,7 @@ def rank_today(recovery_model: RecoveryKMModel | None = None,
             "gross_reward_vnd", "fees_round_trip_vnd", "net_reward_vnd",
             "breakeven_pct", "below_recovery_bar", "suggested_max_units", "rank",
             "rsi_14", "mom_5", "mom_20", "high_prox_20", "vol_z_20",
-            "adv_vnd_20", "atr_14"]
+            "adv_vnd_20", "atr_14", "realvol_20", "vol_penalty"]
     cols = [c for c in cols if c in out.columns]
     return out[cols].reset_index().rename(columns={"date": "as_of"})
 

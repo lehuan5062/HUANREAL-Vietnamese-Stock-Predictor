@@ -4,10 +4,11 @@
 The sole head is the **Kaplan-Meier recovery estimator** (``RecoveryKMModel``):
 per downtrend candidate it estimates, from history, the eventual recovery
 probability, the days-to-recovery (N), and the profit at recovery (P). The
-strongest signal is the ticker's OWN downtrend-recovery history (reliable
-bouncers cluster near recovery_prob ~1.0, chronic decliners near 0.0), with a
-coarse RSI × distance-below-high bucket and a pooled all-downtrend fallback for
-thin tickers.
+strongest signal is the ticker's OWN downtrend-recovery history WITHIN ITS
+CURRENT STATE (a ticker × RSI-band × distance-below-high cell), falling back to
+the ticker's flat lifetime average, then a coarse cross-sectional RSI ×
+distance-below-high bucket, then a pooled all-downtrend fallback, as each tier
+thins out.
 """
 from __future__ import annotations
 
@@ -112,6 +113,17 @@ class RecoveryKMModel:
     # older pickles still load.
     ticker_stats: dict = field(default_factory=dict)
     min_ticker_obs: int = 100
+    # Per-ticker × state stats {(symbol, ri, hi): {recovery_prob, days, profit,
+    # n}} — more specific than ``ticker_stats``, which blends a ticker's ENTIRE
+    # downtrend history into one flat number regardless of how deep the current
+    # dip is. A ticker can be a reliable bouncer in a shallow dip and a chronic
+    # decliner once it's fallen far below its recent high (or vice versa); once
+    # a ticker clears ``min_ticker_obs`` the flat aggregate stops looking at
+    # state at all, so this cell is checked FIRST and the flat aggregate is
+    # only a fallback for states too thin to trust on their own. Optional (read
+    # via getattr) so older pickles still load.
+    ticker_bucket_stats: dict = field(default_factory=dict)
+    min_ticker_bucket_obs: int = 30
 
     def _bucket_key(self, rsi: float, high_prox: float) -> tuple[int, int]:
         ri = int(np.digitize([float(rsi)], self.rsi_edges)[0])
@@ -119,7 +131,16 @@ class RecoveryKMModel:
         return (ri, hi)
 
     def _lookup(self, symbol: str, rsi: float, high_prox: float) -> dict:
-        # 1) per-ticker (strongest health signal) when it has enough history.
+        # 0) ticker x state cell (most specific) when it has enough history.
+        if np.isfinite(rsi) and np.isfinite(high_prox):
+            tbstats = getattr(self, "ticker_bucket_stats", None) or {}
+            key = (str(symbol),) + self._bucket_key(rsi, high_prox)
+            tb = tbstats.get(key)
+            min_tb = int(getattr(self, "min_ticker_bucket_obs", 30))
+            if tb is not None and int(tb.get("n", 0)) >= min_tb:
+                return tb
+        # 1) per-ticker flat aggregate (strongest health signal) when it has
+        # enough history but no reliable state-specific cell.
         tstats = getattr(self, "ticker_stats", None) or {}
         t = tstats.get(str(symbol))
         if t is not None and int(t.get("n", 0)) >= int(getattr(self, "min_ticker_obs", 100)):
@@ -178,8 +199,9 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
 
     Filters the panel to downtrend rows (the rebound candidates) with a defined
     recovery episode, buckets them by (RSI band x distance-below-high band), and
-    fits a KM survival curve per bucket plus a pooled all-downtrend fallback.
-    Reads its knobs from ``strategy.recovery``."""
+    fits a KM survival curve per bucket, per ticker, per ticker x bucket cell,
+    plus a pooled all-downtrend fallback. Reads its knobs from
+    ``strategy.recovery``."""
     if panel.empty:
         raise ValueError("empty training panel")
     from ..filters import downtrend_mask  # local import to avoid a cycle at load
@@ -199,6 +221,7 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
     high_prox_edges = list(buckets_cfg.get("high_prox_edges", [-0.20, -0.10, -0.05]))
     min_bucket_obs = int(recovery.get("min_bucket_obs", 50))
     min_ticker_obs = int(recovery.get("min_ticker_obs", 100))
+    min_ticker_bucket_obs = int(recovery.get("min_ticker_bucket_obs", 30))
 
     dt_rows = panel[downtrend_mask(panel)].copy()
     dt_rows = dt_rows.dropna(subset=["target_days_to_recover"])
@@ -218,9 +241,14 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
     # signal. A chronic decliner (e.g. LCC) lands near recovery_prob 0; a name
     # that reliably bounces near 1.0.
     ticker_stats: dict[str, dict] = {}
+    ticker_bucket_stats: dict[tuple[str, int, int], dict] = {}
     if "symbol" in dt_rows.columns:
         for sym, sub in dt_rows.groupby("symbol"):
             ticker_stats[str(sym)] = _bucket_stats(sub, p_quantile)
+        # Ticker x state cells — the same per-ticker history, but split by the
+        # ticker's OWN state at pick time (see RecoveryKMModel.ticker_bucket_stats).
+        for (sym, rk, hk), sub in dt_rows.groupby(["symbol", "__ri__", "__hi__"]):
+            ticker_bucket_stats[(str(sym), int(rk), int(hk))] = _bucket_stats(sub, p_quantile)
 
     pooled = _bucket_stats(dt_rows, p_quantile)
 
@@ -235,6 +263,8 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
         train_rows=int(len(dt_rows)),
         ticker_stats=ticker_stats,
         min_ticker_obs=min_ticker_obs,
+        ticker_bucket_stats=ticker_bucket_stats,
+        min_ticker_bucket_obs=min_ticker_bucket_obs,
     )
 
 
