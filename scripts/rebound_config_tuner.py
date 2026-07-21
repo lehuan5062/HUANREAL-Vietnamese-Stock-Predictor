@@ -28,6 +28,7 @@ settle_days, and exchange ceiling_limits.
 from __future__ import annotations
 
 import copy
+import ctypes
 import datetime
 import json
 import os
@@ -37,6 +38,23 @@ import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
+
+try:
+    # Run at Idle priority so this loop doesn't compete with foreground work.
+    # Self-demoting (rather than launching via `start /low`) keeps this process
+    # a normal child of the launching console, so Ctrl+C still works — `start`'s
+    # /b flag puts the child in its own process group, which Windows excludes
+    # from console Ctrl+C broadcasts.
+    import ctypes.wintypes as _wintypes
+
+    _kernel32 = ctypes.windll.kernel32
+    _kernel32.GetCurrentProcess.restype = _wintypes.HANDLE
+    _kernel32.SetPriorityClass.argtypes = [_wintypes.HANDLE, _wintypes.DWORD]
+    _kernel32.SetPriorityClass.restype = _wintypes.BOOL
+    IDLE_PRIORITY_CLASS = 0x00000040
+    _kernel32.SetPriorityClass(_kernel32.GetCurrentProcess(), IDLE_PRIORITY_CLASS)
+except (AttributeError, OSError):
+    pass  # not on Windows, or the call failed — not worth failing the trial over
 
 import numpy as np
 import pandas as pd

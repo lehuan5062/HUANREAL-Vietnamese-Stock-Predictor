@@ -21,5 +21,5 @@ set /a TRIAL=0
 set /a TRIAL+=1
 echo.
 echo ==================== Trial %TRIAL% ====================
-start "" /low /wait /b .venv\Scripts\python.exe -m scripts.rebound_config_tuner
+.venv\Scripts\python.exe -m scripts.rebound_config_tuner
 goto :loop
