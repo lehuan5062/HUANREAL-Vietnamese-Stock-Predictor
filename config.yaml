@@ -72,7 +72,7 @@ strategy:
   downtrend:
     # A candidate is "in a downtrend" (and therefore a rebound candidate) when
     # ALL enabled conditions hold. Loosen these to widen the candidate pool.
-    mom20_max: 0.0           # require mom_20 < this (log-return; 0 = 20-day decline)
+    mom20_max: -0.03         # require mom_20 < this (log-return; 0 = 20-day decline)
     high_prox_max: -0.05     # require close <= this fraction below the 20-day high
     rsi_floor: 10            # require rsi_14 >= this (excludes free-falling knives). 0 disables.
     rsi_ceil: 50             # require rsi_14 <= this (not already recovered hard)
