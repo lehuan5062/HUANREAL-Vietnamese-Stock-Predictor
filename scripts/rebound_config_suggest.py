@@ -196,16 +196,32 @@ def _analyze_continuous(df: pd.DataFrame, knob: str) -> dict:
     return out
 
 
+def _encode_knob_value(knob: str, value, bounds: dict):
+    """Map a choice knob's string values to a stable numeric code (index into
+    KNOB_BOUNDS' canonical order) so LightGBM can consume it. Numeric knobs
+    and nulls (e.g. vol_penalty.measure when vol_penalty.k's sentinel 0
+    disables it) pass through unchanged."""
+    if pd.isna(value):
+        return value
+    spec = bounds.get(knob)
+    if spec and spec["kind"] == "choice" and any(isinstance(v, str) for v in spec["values"]):
+        return spec["values"].index(value)
+    return value
+
+
 def _feature_matrix(df: pd.DataFrame, scalar_knobs: list[str]) -> pd.DataFrame:
-    """ML feature matrix from a trials dataframe: scalar knob columns as-is,
+    """ML feature matrix from a trials dataframe: scalar knob columns as-is
+    (string-valued choice knobs numerically encoded via _encode_knob_value),
     LIST_KNOBS (rsi_edges/high_prox_edges) expanded into individual
     positional columns (edge__0, edge__1, edge__2) since a model can't take
     a list-valued cell directly."""
+    from scripts.rebound_config_tuner import KNOB_BOUNDS
+
     cols = {}
     for k in scalar_knobs:
         col = f"config.{k}"
         if col in df.columns:
-            cols[k] = df[col]
+            cols[k] = df[col].map(lambda v: _encode_knob_value(k, v, KNOB_BOUNDS))
     for k in LIST_KNOBS:
         col = f"config.{k}"
         if col in df.columns:
@@ -219,10 +235,12 @@ def _flat_to_feature_row(flat: dict, scalar_knobs: list[str]) -> dict:
     """Same expansion as _feature_matrix, but for one freshly-sampled
     candidate config (rebound_config_tuner._sample_flat() output) instead of
     a historical trials dataframe row."""
+    from scripts.rebound_config_tuner import KNOB_BOUNDS
+
     row = {}
     for k in scalar_knobs:
         if k in flat:
-            row[k] = flat[k]
+            row[k] = _encode_knob_value(k, flat[k], KNOB_BOUNDS)
     for k in LIST_KNOBS:
         if k in flat:
             for i, v in enumerate(flat[k]):
