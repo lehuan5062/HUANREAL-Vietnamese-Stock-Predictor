@@ -56,7 +56,7 @@ def _format_picks(picks) -> str:
 
 
 def _format_picks_explained(picks) -> str:
-    """Verbose paragraph-per-pick view used by claude/gemini modes when the
+    """Verbose paragraph-per-pick view used by claude mode when the
     LLM has produced business + key_news + rationale per ticker."""
     if picks is None or len(picks) == 0:
         return "(no picks)"
@@ -207,7 +207,7 @@ def _print_sell_reminder(picks, *, mode_label="") -> None:
         tgt_s = f"{int(tgt):,}" if pd.notna(tgt) else "?"
         hold_s = f", expected ≈ {int(round(hold))}d" if pd.notna(hold) else ""
         click.echo(f"    {r['symbol']}: target {tgt_s} VND{hold_s}")
-    if mode_label in ("claude", "gemini"):
+    if mode_label == "claude":
         click.echo(f"    {mode_label.title()}: there is NO fixed sell day — do not "
                    f"schedule a hard sell alarm. Offer an optional check-in only if asked.")
 
@@ -310,7 +310,7 @@ def backtest_cmd(start: str | None, end: str | None, top: int | None) -> None:
                    "Default: every mode found in the ledger.")
 def compare_modes_cmd(window: int, as_of: str | None, modes: str | None) -> None:
     """Head-to-head realized performance of the prediction methods (base /
-    hybrid / LLM-only / gemini), pooled over comparable runs — same day AND
+    hybrid / LLM-only), pooled over comparable runs — same day AND
     same params (picks/horizon/hose-only/etfs/exclude). Advisory: tells you
     which method to PREFER, not a knob to tune."""
     from .analyze import mode_compare
@@ -356,7 +356,7 @@ def compare_picks_accountability_cmd(as_of: str) -> None:
 
 
 @cli.command("predict")
-@click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
+@click.option("--mode", type=click.Choice(["base", "claude"]), default="base")
 @click.option("--picks", "-n", "n_picks", type=int, default=None,
               help="How many picks to surface (exactly this many, top by score). "
                    "Defaults to pricing.default_picks in config.yaml.")
@@ -381,16 +381,6 @@ def predict_cmd(mode: str, n_picks: int | None, on: str | None) -> None:
         # Claude mode only emits the interactive plan; the sell reminder lands
         # at claude-finalize, not here.
         click.echo("Next: ask Claude to fill the plan, then run claude-finalize.")
-    elif mode == "gemini":
-        from .modes import gemini
-        result, out, tag = gemini.run(on=on, n_picks=n_picks)
-        click.echo(_format_picks(result))
-        if _has_explanations(result):
-            click.echo("")
-            click.echo(_format_picks_explained(result))
-        click.echo(f"\nsaved -> {out}  (path: {tag})")
-        if tag == "prompt-only":
-            click.echo("Paste the prompt file's contents into Gemini Pro with browsing.")
 
 
 @cli.command("claude-finalize")
@@ -424,34 +414,11 @@ def claude_finalize_cmd(plan_path: str) -> None:
         pass
 
 
-@cli.command("gemini-finalize")
-@click.argument("prompt_path", type=click.Path(exists=True))
-@click.option("--response", "response_path", type=click.Path(exists=True), default=None,
-              help="Path to the JSON response from Gemini Chat. "
-                   "Defaults to reports/gemini_response_<date>.json next to the prompt.")
-def gemini_finalize_cmd(prompt_path: str, response_path: str | None) -> None:
-    """Merge Gemini Chat's JSON response with the saved candidates and produce
-    the final explained picks. Save Gemini's response as JSON first."""
-    from .modes import gemini
-    picks, out = gemini.finalize(prompt_path, response_path=response_path)
-    click.echo(_format_picks(picks))
-    if _has_explanations(picks):
-        click.echo("")
-        click.echo(_format_picks_explained(picks))
-    click.echo(f"\nsaved -> {out}")
-    try:
-        payload = json.loads(Path(out).read_text(encoding="utf-8"))
-        _print_pick_warnings(picks, payload.get("requested_picks") or len(picks))
-        _print_sell_reminder(picks, mode_label="gemini")
-    except Exception:
-        pass
-
-
 # ---------------------------- one-shot run --------------------------------
 
 
 @cli.command("run")
-@click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default="base")
+@click.option("--mode", type=click.Choice(["base", "claude"]), default="base")
 @click.option("--picks", "-n", "n_picks", type=int, default=None,
               help="How many picks to surface. The program always returns "
                    "EXACTLY this many — it ranks the whole scored universe by "
@@ -773,23 +740,6 @@ def run_cmd(mode: str, n_picks: int | None,
             click.echo("    1. Ask Claude to fetch every URL in the plan and fill the score table.")
         click.echo("    2. Then run:")
         click.echo(f"       python -m stockpredict.cli claude-finalize \"{out}\"")
-    elif mode == "gemini":
-        from .modes import gemini
-        result, out, tag = gemini.run(n_picks=requested_n,
-                                       symbols=pred_syms,
-                                       hose_only=hose_only,
-                                       include_etfs=include_etfs,
-                                       exclude=exclude_list)
-        click.echo("")
-        click.echo(_format_picks(result))
-        _print_pick_warnings(result, requested_n)
-        if _has_explanations(result):
-            click.echo("")
-            click.echo(_format_picks_explained(result))
-        click.echo(f"\nsaved -> {out}  (path: {tag})")
-        if tag == "prompt-only":
-            click.echo("")
-            click.echo("==> NEXT: paste the prompt file's contents into Gemini Pro with browsing.")
 
     elapsed = (_time.time() - started) / 60.0
     click.echo(f"\nelapsed: {elapsed:.1f} min")
@@ -862,7 +812,7 @@ def evaluate_cmd(refresh_data: bool) -> None:
         click.echo(updated[cols].to_string(index=False))
 
     click.echo("\n=== recent performance (last 90 days) ===")
-    for mode in ("base", "claude", "gemini", None):
+    for mode in ("base", "claude", None):
         label = mode or "ALL"
         perf = recent_performance(window_days=90, mode=mode)
         if perf.get("n", 0) == 0:
@@ -874,7 +824,7 @@ def evaluate_cmd(refresh_data: bool) -> None:
 
 
 @cli.command("track")
-@click.option("--mode", type=click.Choice(["base", "claude", "gemini"]), default=None)
+@click.option("--mode", type=click.Choice(["base", "claude"]), default=None)
 @click.option("--limit", type=int, default=20)
 def track_cmd(mode: str | None, limit: int) -> None:
     """Print the most recent prediction ledger entries."""

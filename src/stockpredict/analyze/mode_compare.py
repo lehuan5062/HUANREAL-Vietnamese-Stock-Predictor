@@ -1,7 +1,7 @@
 """Head-to-head comparison of prediction methods over the ledger.
 
 Compares the realized performance of different modes — base (pure ML),
-claude (ML/LLM hybrid), claude_llm (LLM-only), gemini — restricted to
+claude (ML/LLM hybrid), claude_llm (LLM-only) — restricted to
 *comparable* runs: same trading day AND same run parameters (horizon /
 hose-only / etfs / exclude). A single day is far too noisy (often 1-3
 picks per mode), so the verdict pools over a window of days; the named-day
@@ -31,7 +31,6 @@ MODE_LABELS = {
     "base": "base (pure ML)",
     "claude": "hybrid (ML + news)",
     "claude_llm": "LLM-only",
-    "gemini": "gemini (ML + news)",
 }
 
 
@@ -420,7 +419,7 @@ def format_picks_comparison(result: dict) -> str:
     # LLM rationales
     rationales = result.get("mode_rationales", {})
     if rationales:
-        lines.append("## LLM rationales (claude/gemini/claude_llm only)")
+        lines.append("## LLM rationales (claude/claude_llm only)")
         lines.append("")
         for mode in sorted(rationales.keys()):
             if mode in ("base",):
@@ -491,7 +490,7 @@ def mode_accountability(as_of: str | dt.date) -> dict:
         recovered = row.get("recovered_flag", False)
 
         picked_by = sorted(list(all_modes.get(sym, set())))
-        all_possible_modes = {"base", "claude", "claude_llm", "gemini"}
+        all_possible_modes = {"base", "claude", "claude_llm"}
         avoided_by = sorted(list(all_possible_modes - all_modes.get(sym, set())))
 
         picks_by_outcome[sym] = {
@@ -577,10 +576,9 @@ def format_mode_accountability(result: dict) -> str:
         for modes, syms in sorted(loss_patterns.items()):
             if not modes:
                 diagnosis = "No modes picked this (data error?)"
-            elif set(modes) == {"base", "claude", "claude_llm", "gemini"} or \
-                 set(modes) == {"base", "claude", "claude_llm"}:
+            elif set(modes) == {"base", "claude", "claude_llm"}:
                 diagnosis = "All modes agreed → **shared ML model issue** (recovery-prob, P/N, filters)"
-            elif all(m in ("claude", "claude_llm", "gemini") for m in modes):
+            elif all(m in ("claude", "claude_llm") for m in modes):
                 diagnosis = "Only LLM modes → **LLM vetting issue** (tighten claude_prompt.md)"
             elif set(modes) == {"base"}:
                 diagnosis = "Only base → **base's distinctive picks are weak** (filters too loose)"

@@ -181,14 +181,12 @@ pricing:
 modes:
   claude:
     news_weight: 0.10
-  gemini:
-    news_weight: 0.05
 
 news:
   # These are STARTING POINTS, not an exhaustive list. The Claude interactive
-  # plan and Gemini prompt both tell the LLM to use these to seed a search,
-  # then go broader (WebSearch / google_search grounding) for any other
-  # relevant Vietnamese press, sector reports, or macro coverage.
+  # plan tells the LLM to use these to seed a search, then go broader
+  # (WebSearch / google_search grounding) for any other relevant Vietnamese
+  # press, sector reports, or macro coverage.
   vn_sources:
     baomoi:           "https://baomoi.com/tim-kiem/{symbol}.epi"
     google_news_vn:   "https://www.google.com/search?q=%22{symbol}%22+co+phieu+chung+khoan&tbm=nws"

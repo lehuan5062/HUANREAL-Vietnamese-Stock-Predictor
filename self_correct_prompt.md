@@ -126,7 +126,7 @@ Summarise back, then Step 2.
 `exclude`, `run_signature`, `requested_picks`, `n_picks`, and the `picks` array
 (each has `symbol`, `score`, `pred_days`, `pred_profit`, `pred_recovery_prob`,
 `entry_vnd`, `target_vnd`, `hold_days`, `below_recovery_bar`, `rsi_14`, `mom_5`,
-`mom_20`, `high_prox_20`; claude/gemini also carry `news_score`, `business`,
+`mom_20`, `high_prox_20`; claude also carries `news_score`, `business`,
 `dimensions_cited`, `rationale`). If a `plan_file` is set, `Read` it for the
 per-ticker reasoning. Also try the sidecar `<plan_file>.candidates.parquet`.
 
@@ -346,7 +346,7 @@ don't second-guess or re-derive any of it.**
      this mean-reversion strategy (it sells right before the bounce) — off is
      deliberate. Don't propose turning it on without a strong, user-endorsed
      reason. (There is no time cap — the strategy holds until profit.)
-2. **`claude_prompt.md`** (claude/gemini only) — tighten the DROP /
+2. **`claude_prompt.md`** (claude only) — tighten the DROP /
    falling-knife vetting guidance when the LLM missed a broken name. Additive,
    narrowly scoped.
 3. **Source files** — only for a concrete structural defect (parser bug, wrong

@@ -2,7 +2,7 @@
 research plan per ticker.
 
 Important: this is intentionally a NON-EXHAUSTIVE inspiration list, not a
-mandatory checklist. The prompts ask Claude / Gemini to derive the
+mandatory checklist. The prompts ask Claude to derive the
 research dimensions for each ticker themselves, based on what the company
 actually does and what news categories actually move it on a 2-day
 horizon. They are free to skip categories below that don't apply, and to

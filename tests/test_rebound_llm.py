@@ -1,4 +1,4 @@
-"""Claude/Gemini finalize must re-rank rebound picks by `score` (not pred_mean),
+"""Claude finalize must re-rank rebound picks by `score` (not pred_mean),
 which rebound frames don't have. Regression test for the pred_mean KeyError."""
 import json
 

@@ -5,7 +5,7 @@ with the fields needed to evaluate it later. When OHLCV for the target date
 becomes available, `evaluate_pending` fills in the realized return so the
 ledger always reflects the latest known truth.
 
-Recent performance is then exposed to the LLM modes so Claude/Gemini can
+Recent performance is then exposed to the LLM modes so Claude can
 factor in "what has been working / failing" when re-ranking new candidates.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ _LEDGER_COLUMNS = [
     # at the start of each finding bullet). Lets recent_performance aggregate
     # hit-rate by dimension so Claude can learn which research categories
     # have actually predicted returns vs. been noise. Empty string = no
-    # dimensions cited (e.g. base/gemini mode picks, or a Claude pick with
+    # dimensions cited (e.g. base mode picks, or a Claude pick with
     # no Step 4 findings at all).
     "dimensions_cited",
     # Low-prediction fields. ``pred_low`` is the model's predicted next-
@@ -787,7 +787,7 @@ def _by_dimension(df: pd.DataFrame) -> dict:
     (so a row can land in multiple buckets).
 
     Returns ``{}`` when no row has any cited dimension — typical of pre-
-    feature ledgers, base/gemini-only ledgers, or fresh installs where
+    feature ledgers, base-only ledgers, or fresh installs where
     Claude hasn't yet completed Step 4 on a finished prediction.
     """
     if "dimensions_cited" not in df.columns:

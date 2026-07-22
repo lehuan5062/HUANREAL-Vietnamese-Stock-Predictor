@@ -2,7 +2,7 @@
 
 The Listing API gives us `organ_name` (e.g., "Cong ty co phan Tap doan FPT").
 That's enough for an LLM to infer the business — combined with the ticker
-mention in the prompt, Claude/Gemini will identify the industry, the typical
+mention in the prompt, Claude will identify the industry, the typical
 2-day-horizon news drivers (commodity prices for producers, central bank
 policy for banks, real estate inventory for developers, etc.), and search
 accordingly.

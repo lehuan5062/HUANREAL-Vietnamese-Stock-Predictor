@@ -24,12 +24,11 @@ are baked into the prediction, the target, and the reported net P&L.
 
 ## Two ways to run
 
-### A. Double-click a .bat file (base / gemini)
+### A. Double-click a .bat file (base)
 
 | File | What it does |
 | ---- | ------------ |
 | [`predict_base.bat`](predict_base.bat) | Pure model: downtrend filter + Kaplan-Meier recovery ranking. No news. |
-| [`predict_gemini.bat`](predict_gemini.bat) | Model ranks, then writes a prompt you paste into Gemini Chat (web, with browsing) to vet the candidates. |
 | [`evaluate.bat`](evaluate.bat) | Refreshes data and stamps the outcome of any pick that has since recovered. |
 
 Each predict `.bat` asks for picks / hose-only / etfs / exclude / warm-only and runs the entire universe.
@@ -75,7 +74,7 @@ Claude's research.
 .venv\Scripts\python -m stockpredict.cli track --limit 20
 .venv\Scripts\python -m stockpredict.cli backtest --start 2024-01-01
 .venv\Scripts\python -m stockpredict.cli status       # what's cached / trained
-# Which METHOD has picked better (base vs hybrid vs LLM-only vs gemini),
+# Which METHOD has picked better (base vs hybrid vs LLM-only),
 # pooled over comparable same-day runs. Advisory — writes reports/mode_comparison_<date>.md
 .venv\Scripts\python -m stockpredict.cli compare-modes --window 90
 ```
@@ -87,7 +86,7 @@ Claude's research.
 | `--picks N`, `-n N` | How many picks to surface. Returns **exactly N** — the top N downtrend candidates by rebound `score`. A pick whose estimated recovery probability is below the healthy floor is flagged `below_recovery_bar` (counted in a `==> QUALITY` warning); if the eligible universe is smaller than N a `==> SHORTFALL` prints. | `pricing.default_picks` (1) |
 | `--hose-only` | Restrict to HOSE-listed tickers. | `False` |
 | `--include-etfs` / `--no-etfs` | Include HOSE ETFs (`E1VFVN30`, `FUEVFVND`, …). | included |
-| `--mode {base,claude,gemini}` | which pipeline | `base` |
+| `--mode {base,claude}` | which pipeline | `base` |
 | `--llm-only` | **claude only.** No model ranking — the whole downtrend universe is handed to Claude, which picks / ranks by `conviction` / sets a `target_vnd` (buy at close, no stop). Emits `claude_llm_plan_<date>.md`. | off |
 | `--skip-train` | reuse `models/recovery_latest.pkl` instead of retraining | off |
 | `--warm-only {yes,always,no}` | cache-fetch strategy (see below) | `yes` |
@@ -144,7 +143,7 @@ For each pick the program prints a compact table and writes
 | `suggested_max_units` | advisory liquidity cap = `floor(max_participation_pct% × adv_vnd_20 / close)`. Informational; never feeds selection. |
 
 Diagnostic columns (`rsi_14`, `mom_5`, `mom_20`, `high_prox_20`, `vol_z_20`,
-`adv_vnd_20`) ride along. Claude/Gemini modes add `news_score`, `adjusted`,
+`adv_vnd_20`) ride along. Claude mode adds `news_score`, `adjusted`,
 `business`, `dimensions`, `key_news`, and optional `adj_entry_vnd` /
 `adj_target_vnd` overrides for a gap catalyst.
 
@@ -363,7 +362,7 @@ approval-gated edit per finding:
 2. **P/N accuracy** — realized days/profit vs predicted; lever = `state_buckets` /
    `p_quantile` (empirical, mostly self-correcting — high bar to touch).
 3. **Falling-knife check** — unrecovered / long-open picks; chart-check them and,
-   for claude/gemini, tighten the DROP guidance in `claude_prompt.md`.
+   for claude, tighten the DROP guidance in `claude_prompt.md`.
 4. **Pred_days calibration (checkpoint misses)** — picks that reached their
    predicted `pred_days` without hitting target; same `state_buckets` / `p_quantile`
    lever as #2, but caught earlier — before final resolution.
@@ -421,7 +420,7 @@ All knobs in [`config.yaml`](config.yaml). Key rebound knobs:
   `pricing.corp_action_lookback` (20) — universe hygiene gates.
 - `pricing.max_participation_pct` (1.0) — advisory `suggested_max_units` cap.
 - `broker:` — ACBS fee model. `backtest:` — walk-forward windows + `cost_bps`.
-- `modes.{claude,gemini}.news_weight` — how much the LLM's `news_score` nudges the
+- `modes.claude.news_weight` — how much the LLM's `news_score` nudges the
   P/N score.
 
 There is **no** stop-loss or time-cap knob — the strategy holds until profit.
@@ -432,7 +431,6 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
 <repo root>/
   setup.bat                double-click: create/update .venv + install dependencies
   predict_base.bat         double-click: model-only picks
-  predict_gemini.bat       double-click: model + Gemini vetting prompt
   claude_prompt.md         paste into Claude Desktop for model + Claude vetting
   self_correct_prompt.md   paste into Claude Code to diagnose + tune the program
   evaluate.bat             double-click: stamp recovered picks
@@ -452,8 +450,8 @@ There is **no** stop-loss or time-cap knob — the strategy holds until profit.
       predict.py           downtrend filter + P/N ranking
     pricing.py             recovery pricing (buy=close, target from P) + fee model
     backtest/              flexible-exit walk-forward simulator
-    news/                  claude / claude-llm plan builders + gemini prompt/response
-    modes/                 base / claude / gemini orchestrators
+    news/                  claude / claude-llm plan builders
+    modes/                 base / claude orchestrators
 
   scripts/                 portfolio simulators + one-off diagnostics (cache repair, config tuner)
   tests/                   pytest, synthetic data only
