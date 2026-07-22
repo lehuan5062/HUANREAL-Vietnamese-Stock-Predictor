@@ -103,15 +103,31 @@ def test_lookup_backward_compatible_without_new_fields():
 # ---------------------------------------------------------------------------
 
 def _split_panel(n_benign=40, n_knife=40):
-    """One symbol, SPLIT: n_benign rows in the benign cell (rsi 45, high_prox
-    -0.15 -> bucket (2,1)), all recovered quickly; n_knife rows in the knife
-    cell (rsi 45, high_prox -0.25 -> bucket (2,0)), all censored (never
-    recovered). The blended per-ticker aggregate should land near 0.5 while
-    the two cells disagree sharply (~1.0 vs ~0.0)."""
+    """One symbol, SPLIT: n_benign single-day downtrend episodes in the benign
+    cell (rsi 45, high_prox -0.15 -> bucket (2,1)), each recovered quickly;
+    n_knife single-day episodes in the knife cell (rsi 45, high_prox -0.25 ->
+    bucket (2,0)), each censored (never recovered). The blended per-ticker
+    aggregate should land near 0.5 while the two cells disagree sharply (~1.0
+    vs ~0.0).
+
+    Every real row is preceded by a non-downtrend filler row (mom_20=0.0 fails
+    the mom20_max=-0.03 gate) so each real row is its own separate,
+    single-day downtrend run -- train_recovery collapses a CONTIGUOUS
+    downtrend run to one observation, so without the fillers this whole
+    fixture would collapse to a single episode instead of exercising
+    n_benign/n_knife independent trials."""
     rows = []
-    dates = pd.date_range("2020-01-01", periods=n_benign + n_knife, freq="B")
+    dates = pd.date_range("2020-01-01", periods=2 * (n_benign + n_knife), freq="B")
     di = iter(dates)
+
+    def _filler():
+        rows.append({
+            "date": next(di), "symbol": "SPLIT", "mom_20": 0.0,
+            "rsi_14": _RSI, "high_prox_20": _HP_CELL,
+        })
+
     for _ in range(n_benign):
+        _filler()
         rows.append({
             "date": next(di), "symbol": "SPLIT", "mom_20": -0.10,
             "rsi_14": _RSI, "high_prox_20": _HP_CELL,
@@ -119,12 +135,28 @@ def _split_panel(n_benign=40, n_knife=40):
             "target_recovery_return": 0.05,
         })
     for _ in range(n_knife):
+        _filler()
         rows.append({
             "date": next(di), "symbol": "SPLIT", "mom_20": -0.10,
             "rsi_14": _RSI, "high_prox_20": _HP_KNIFE,
             "target_days_to_recover": 50.0, "target_recovered": False,
             "target_recovery_return": float("nan"),
         })
+    return pd.DataFrame(rows).set_index("date")
+
+
+def _one_long_run_panel(n_rows=80):
+    """One symbol, SPLIT: a single UNBROKEN n_rows-day downtrend run (no
+    filler rows) -- the shape the old (pre-fix) _split_panel used to produce.
+    Regression fixture for the row-vs-episode bug: this must collapse to
+    exactly one episode, not n_rows."""
+    dates = pd.date_range("2020-01-01", periods=n_rows, freq="B")
+    rows = [{
+        "date": d, "symbol": "SPLIT", "mom_20": -0.10,
+        "rsi_14": _RSI, "high_prox_20": _HP_CELL,
+        "target_days_to_recover": 2.0, "target_recovered": True,
+        "target_recovery_return": 0.05,
+    } for d in dates]
     return pd.DataFrame(rows).set_index("date")
 
 
@@ -182,3 +214,19 @@ def test_train_recovery_thin_cell_defers_to_aggregate(monkeypatch):
     got = model._lookup("SPLIT", _RSI, _HP_KNIFE)
     aggregate = model.ticker_stats["SPLIT"]
     assert got is aggregate  # thin cell (n=10 < 30) defers to the flat aggregate
+
+
+def test_train_recovery_collapses_one_long_run_to_a_single_episode(monkeypatch):
+    # Regression test for the row-vs-episode bug: a single 80-day-long
+    # contiguous downtrend must count as ONE trial, not 80 -- otherwise a
+    # ticker stuck in one long decline looks like it has 80 independent,
+    # reliably-recovering observations instead of one (still-uncertain) one.
+    panel = _one_long_run_panel(n_rows=80)
+    cfg = _fake_cfg(min_ticker_bucket_obs=30)
+    monkeypatch.setattr(train_mod, "load_config", lambda: cfg)
+    monkeypatch.setattr(filters_mod, "load_config", lambda: cfg)
+
+    model = train_recovery(panel)
+
+    assert model.ticker_stats["SPLIT"]["n"] == 1
+    assert model.ticker_bucket_stats[("SPLIT", 2, 1)]["n"] == 1

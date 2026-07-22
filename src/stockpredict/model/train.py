@@ -223,7 +223,26 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
     min_ticker_obs = int(recovery.get("min_ticker_obs", 100))
     min_ticker_bucket_obs = int(recovery.get("min_ticker_bucket_obs", 30))
 
-    dt_rows = panel[downtrend_mask(panel)].copy()
+    # A multi-day downtrend produces one row per calendar day, but consecutive
+    # days of the SAME decline are not independent trials -- they're one event
+    # sampled repeatedly (a 20-day decline would otherwise outweigh a genuine
+    # 2-day dip 10:1 in every stat below, and a still-open decline racks up one
+    # near-duplicate "censored" row per day it stays open instead of counting
+    # once). Collapse each contiguous downtrend run, per symbol, down to its
+    # entry-day row -- which already carries that episode's own correctly
+    # resolved (or still-censored) outcome from target.py -- before any of the
+    # aggregations below see it.
+    panel_sorted = panel.sort_index(kind="stable")
+    full_mask = downtrend_mask(panel_sorted).to_numpy()
+    grp_arr = (panel_sorted["symbol"].to_numpy() if "symbol" in panel_sorted.columns
+              else np.zeros(len(panel_sorted), dtype=int))
+    run_tbl = pd.DataFrame({"mask": full_mask, "grp": grp_arr})
+    prev_mask = run_tbl.groupby("grp")["mask"].shift(1, fill_value=False)
+    run_start = run_tbl["mask"] & ~prev_mask
+    episode_num = run_start.groupby(run_tbl["grp"]).cumsum()
+
+    dt_rows = panel_sorted[full_mask].copy()
+    dt_rows["__episode__"] = episode_num[full_mask].to_numpy()
     dt_rows = dt_rows.dropna(subset=["target_days_to_recover"])
     if dt_rows.empty:
         raise ValueError("no downtrend rows with a recovery label in the panel")
@@ -233,8 +252,11 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
     dt_rows["__ri__"] = ri
     dt_rows["__hi__"] = hi
 
+    group_cols = ["symbol", "__episode__"] if "symbol" in dt_rows.columns else ["__episode__"]
+    episodes = dt_rows.groupby(group_cols, as_index=False).first()
+
     buckets: dict[tuple[int, int], dict] = {}
-    for (rk, hk), sub in dt_rows.groupby(["__ri__", "__hi__"]):
+    for (rk, hk), sub in episodes.groupby(["__ri__", "__hi__"]):
         buckets[(int(rk), int(hk))] = _bucket_stats(sub, p_quantile)
 
     # Per-ticker recovery reliability — the primary "healthy vs falling knife"
@@ -242,15 +264,15 @@ def train_recovery(panel: pd.DataFrame) -> RecoveryKMModel:
     # that reliably bounces near 1.0.
     ticker_stats: dict[str, dict] = {}
     ticker_bucket_stats: dict[tuple[str, int, int], dict] = {}
-    if "symbol" in dt_rows.columns:
-        for sym, sub in dt_rows.groupby("symbol"):
+    if "symbol" in episodes.columns:
+        for sym, sub in episodes.groupby("symbol"):
             ticker_stats[str(sym)] = _bucket_stats(sub, p_quantile)
         # Ticker x state cells — the same per-ticker history, but split by the
         # ticker's OWN state at pick time (see RecoveryKMModel.ticker_bucket_stats).
-        for (sym, rk, hk), sub in dt_rows.groupby(["symbol", "__ri__", "__hi__"]):
+        for (sym, rk, hk), sub in episodes.groupby(["symbol", "__ri__", "__hi__"]):
             ticker_bucket_stats[(str(sym), int(rk), int(hk))] = _bucket_stats(sub, p_quantile)
 
-    pooled = _bucket_stats(dt_rows, p_quantile)
+    pooled = _bucket_stats(episodes, p_quantile)
 
     return RecoveryKMModel(
         buckets=buckets,

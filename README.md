@@ -106,14 +106,25 @@ For each downtrend candidate it estimates, from history:
 - `pred_days` (N) — median days-to-recovery (Kaplan-Meier),
 - `pred_profit` (P) — the median profit of recovered episodes.
 
-The dominant signal is the **ticker's own** downtrend-recovery history (reliable
-bouncers cluster near prob 1.0, chronic decliners near 0.0); a coarse
-RSI × distance-below-high bucket and a pooled all-downtrend curve are the
-fallbacks for thin tickers. It's a transparent empirical estimator — no
-LightGBM, no gradient boosting.
+Every statistic is built from one observation **per contiguous downtrend
+episode**, not per calendar day — a 20-day decline is one trial, not 20
+autocorrelated ones, and a still-open decline contributes exactly one
+censored observation regardless of how long it's stayed open.
+
+The lookup cascade, most to least specific: the ticker's own history **within
+its current state** (a ticker × RSI-band × distance-below-high cell), falling
+back to the ticker's flat lifetime average, then a coarse cross-sectional
+RSI × distance-below-high bucket, then a pooled all-downtrend curve, as each
+tier thins out below its `min_*_obs` floor. Reliable bouncers cluster near
+prob 1.0, chronic decliners near 0.0. It's a transparent empirical estimator —
+no LightGBM, no gradient boosting.
 
 ### Ranking + healthy gate ([`model.predict.rank_today`](src/stockpredict/model/predict.py))
-`score = pred_profit / pred_days × pred_recovery_prob`. Names below
+`score = (pred_profit / pred_days × pred_recovery_prob) × 1/(1 + k·realvol_20)` —
+the volatility penalty (`strategy.recovery.vol_penalty`) discounts thin,
+choppy names whose profit term correlates with raw volatility while
+recovery_prob carries no risk-adjustment of its own; it demotes the *rank*
+only; `pred_recovery_prob` itself is unaffected. Names below
 `strategy.recovery.min_recovery_prob` (default 0.85) are dropped up front — this
 is the healthy filter that screens out falling knives.
 
@@ -398,7 +409,7 @@ known-good reference, not a lockfile.
 .venv\Scripts\python -m pytest -q
 ```
 
-153 tests, all synthetic — no network. Coverage spans the downtrend filter,
+180 tests, all synthetic — no network. Coverage spans the downtrend filter,
 recovery targets + Kaplan-Meier estimator, P/N ranking + healthy gate, recovery
 pricing, the ledger + flexible-exit evaluator, the walk-forward backtest, the
 LLM-overlay finalize, the trading calendar, cache freshness + watermarks, the
@@ -414,7 +425,8 @@ All knobs in [`config.yaml`](config.yaml). Key rebound knobs:
 - `strategy.recovery.min_recovery_prob` (0.85) — the **healthy filter**; higher =
   only more-reliable bouncers.
 - `strategy.recovery.{profit_margin, p_quantile, label_max_horizon,
-  min_ticker_obs, min_bucket_obs, state_buckets}` — the recovery estimator shape.
+  min_ticker_obs, min_bucket_obs, min_ticker_bucket_obs, state_buckets,
+  vol_penalty}` — the recovery estimator shape.
 - `pricing.default_picks` (1) — how many picks (or `--picks N`).
 - `pricing.overbought_rsi_max` (0 = off), `pricing.ceiling_limits` / `ceiling_tol`,
   `pricing.corp_action_lookback` (20) — universe hygiene gates.
