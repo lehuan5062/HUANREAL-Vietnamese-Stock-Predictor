@@ -91,7 +91,7 @@ KNOB_BOUNDS = {
     "strategy.recovery.min_recovery_prob": {"kind": "uniform", "low": 0.70, "high": 0.99, "digits": 4},
     "strategy.recovery.p_quantile": {"kind": "uniform", "low": 0.50, "high": 0.85, "digits": 4},
     "strategy.recovery.profit_margin": {"kind": "uniform", "low": 0.002, "high": 0.02, "digits": 5},
-    "strategy.recovery.min_ticker_obs": {"kind": "choice", "values": [50, 100, 150, 200]},
+    "strategy.recovery.min_ticker_obs": {"kind": "choice", "values": [50, 100, 150, 200, 300, 400]},
     "strategy.recovery.min_bucket_obs": {"kind": "choice", "values": [25, 50, 75, 100]},
     "strategy.recovery.min_ticker_bucket_obs": {"kind": "choice", "values": [15, 20, 30, 50, 75]},
     "strategy.recovery.vol_penalty.k": {"kind": "choice", "values": [0, 0.5, 1.0, 1.5, 2.0], "sentinel": [0]},

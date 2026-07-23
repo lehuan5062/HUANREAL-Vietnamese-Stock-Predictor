@@ -74,7 +74,7 @@ strategy:
     # ALL enabled conditions hold. Loosen these to widen the candidate pool.
     mom20_max: -0.03         # require mom_20 < this (log-return; 0 = 20-day decline)
     high_prox_max: -0.05     # require close <= this fraction below the 20-day high
-    rsi_floor: 10            # require rsi_14 >= this (excludes free-falling knives). 0 disables.
+    rsi_floor: 20            # require rsi_14 >= this (excludes free-falling knives). 0 disables.
     rsi_ceil: 50             # require rsi_14 <= this (not already recovered hard)
   recovery:
     # "Profitable point" = first future day whose close beats entry by
@@ -111,7 +111,7 @@ strategy:
     # a reliable bouncer in a shallow dip and a chronic decliner once far below
     # its recent high). Thinner cells fall back to the ticker aggregate, then
     # the cross-sectional bucket, then pooled.
-    min_ticker_bucket_obs: 30
+    min_ticker_bucket_obs: 50
     # A state bucket must hold at least this many historical downtrend rows to be
     # trusted; thinner buckets fall back to the pooled all-downtrend estimate.
     min_bucket_obs: 50

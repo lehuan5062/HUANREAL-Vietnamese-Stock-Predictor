@@ -100,9 +100,12 @@ Record in the global-context section; carry into every `news_score`. If quiet, s
    - `+1` news supports the bounce (real catalyst, or a sound company in a temporary dip)
    - `0` nothing material — the statistical case stands alone
    - `-1` news works against the bounce (deteriorating fundamentals, dilution, sector headwind, governance concern)
-   - `DROP` delisting / suspension / bankruptcy / fraud — the falling knife the
-     statistics miss; overrides everything. Don't hesitate — catching it is the
-     whole point of your pass.
+   - `DROP` delisting / suspension / bankruptcy / fraud — including a
+     pump-and-dump or insider-distribution pattern (price ramped ahead of a
+     major holder's exit, insiders selling into the dip) — the falling knife
+     the statistics miss; overrides everything. If your own research documents
+     such a pattern, DROP — never score it `0`. Don't hesitate — catching it is
+     the whole point of your pass.
    - Never score on price/technicals (RSI, momentum, drawdown) — those already
      drove the model. Score on business + sector + macro + policy news only.
 
