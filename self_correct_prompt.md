@@ -96,7 +96,7 @@ Classify each report:
 - **Some/all `recovered` (evaluated=True), and `unsellable == 0` for those** →
   **ready to diagnose** (the more genuinely resolved, the stronger the read).
 - **`checkpoint > 0`** (open picks past their `pred_days` date without
-  recovering) → **checkpoint ready** — actionable evidence for Step 4d, not just
+  recovering) → **checkpoint ready** — actionable evidence for Step 4c, not just
   "too early."
 - **All still open, `checkpoint == 0`** → not yet useful; offer an older report
   or waiting.
@@ -147,6 +147,17 @@ For each resolved pick compute **realized days-to-recover** =
 vs `pred_profit`. For open picks, note how long they've been open. Hold these as
 working evidence — quote specific numbers inside findings; no standalone tables.
 
+Exclude any picks Step 1 marked **unsellable** from the resolved-evidence set —
+treat them as still open even though the ledger says `evaluated=True`.
+
+**Scope note — execution realism.** Ledger `realized_return` assumes entry at
+the signal-day close, which is a lookahead ceiling (the signal needs the close
+that only exists after the market closes; realistic next-morning fills return
+much less). That's fine here: self-correction tunes **signal quality**, not
+execution. Fill/execution realism is owned by `scripts/rebound_final_sim.py` —
+don't diagnose it here, and don't over-read a "winning" report as fully
+capturable money.
+
 ## Step 4 — Cross-reference the broader ledger (required: all sub-steps)
 
 Pull the 90-day pool stats:
@@ -155,10 +166,10 @@ Pull the 90-day pool stats:
 .venv\Scripts\python.exe -c "from stockpredict.tracking import recent_performance; import json; print(json.dumps(recent_performance(window_days=90), indent=2, default=str))"
 ```
 
-Then run **all four sub-steps (4b, 4c, 4d, 4e)** regardless of interim findings —
+Then run **all four sub-steps (4a, 4b, 4c, 4d)** regardless of interim findings —
 they feed Step 5's diagnosis.
 
-### Step 4b — Recovery-filter calibration (Focus 1, mandatory comparison)
+### Step 4a — Recovery-filter calibration (Focus 1, mandatory comparison)
 
 The highest-value question: **are picks bouncing at the predicted rate?** Over
 resolved picks (this report + the 90-day pool), compare the realized recovered
@@ -169,7 +180,7 @@ predicted, the healthy filter is too loose — levers:
   `high_prox_max` less deep) to exclude free-falling knives.
 If recovery is at or above the predicted rate, the filter is fine — don't touch it.
 
-### Step 4c — P/N accuracy (Focus 2, mandatory comparison)
+### Step 4b — P/N accuracy (Focus 2, mandatory comparison)
 
 Compare realized days-to-recover vs `pred_days` and realized profit vs
 `pred_profit` across resolved picks; note any systematic bias (e.g. bounces take
@@ -179,7 +190,7 @@ Compare realized days-to-recover vs `pred_days` and realized profit vs
 **require a clear n≥5 systematic bias before proposing a bucket change; don't
 over-tune to one report.**
 
-### Step 4d — Falling-knife check + checkpoint misses (mandatory, both resolved and open picks)
+### Step 4c — Falling-knife check + checkpoint misses (mandatory, both resolved and open picks)
 
 Check every unrecovered pick (open, or `recovered_flag=False`). Pull its price
 action — never assume it's just "slow to bounce":
@@ -208,7 +219,7 @@ whether the close ever reached the target (`target_vnd`, or
 Hold the count and specifics (symbol, pred_days, days elapsed, target vs actual
 price) for Focus 4 in Step 5.
 
-### Step 4e — Cross-method comparison (required, but advisory for edits)
+### Step 4d — Cross-method comparison (required, but advisory for edits)
 
 Compare what **different modes picked on the same day** (`as_of`), in two parts:
 
@@ -250,8 +261,13 @@ switching the default method off a few days' evidence.
 ## Step 5 — Diagnose (four focuses only)
 
 Diagnose only: **(1) recovery-filter calibration**, **(2) P/N accuracy**, **(3)
-falling knives**, **(4) pred_days calibration**. For each finding, use the Step
-4e(1b) mode-accountability data to identify the root cause — ask: **Did all
+falling knives**, **(4) pred_days calibration**. One conditional exception: if
+Step 1's scan flagged `unsellable > 0` on this report AND at least one other
+recent report, write it as an additional finding (root cause: `resolve_exit()`
+in `src/stockpredict/model/target.py` has no minimum-hold gate) routed to Step
+6's edit-target priority 3 — flag it for a separate code task, don't propose
+the code edit yourself. For each finding, use the Step
+4d(1b) mode-accountability data to identify the root cause — ask: **Did all
 modes make this error, or only some?**
 - **All modes** (or base + most) picked the knife → **shared ML model** problem
   (recovery-prob calibration, P/N estimation, downtrend filters)
@@ -265,7 +281,7 @@ modes make this error, or only some?**
 
 ### Focus 4 — Pred_days calibration (checkpoint misses)
 
-Using Step 4d's checkpoint-miss data: are picks passing `pred_days` without
+Using Step 4c's checkpoint-miss data: are picks passing `pred_days` without
 hitting target? If so, the bounce-timing estimate is systematically too
 optimistic (or the target too high for the timeframe).
 - **Evidence threshold**: ≥3 checkpoint misses on this report, or an n≥5
@@ -276,6 +292,10 @@ optimistic (or the target too high for the timeframe).
   `pred_days`; bucket knobs), same n≥5 bar.
 - Don't conflate with Focus 3: a miss hovering near entry is a **timing**
   problem; a miss that's also cratering is **both** — cite under both foci.
+- Boundary vs Focus 2: Focus 2 measures timing/profit bias on **resolved**
+  picks; Focus 4 covers **open** picks past their checkpoint. If both fire on
+  the same lever (`p_quantile` / bucket knobs), merge them into ONE proposed
+  edit citing both foci — never two separate edits to the same knob.
 
 Write findings as a numbered list; **every finding must drive at least one
 proposed edit** — if a pattern suggests no concrete edit, skip it.
@@ -352,6 +372,11 @@ don't second-guess or re-derive any of it.**
 3. **Source files** — only for a concrete structural defect (parser bug, wrong
    formula, missing column). Default to NOT touching code; write the finding,
    stop, and let the user trigger a separate code task.
+4. **`self_correct_prompt.md` (this file)** — only for a workflow defect the
+   CURRENT run actually hit: a step that misled the analysis, a command that
+   broke, or a classification the steps couldn't express. Additive and narrow;
+   same per-file approval as everything else in Step 7. Never rewrite steps
+   speculatively.
 
 Each proposed edit lists: the motivating finding, file + line range, the exact
 diff (before/after), and a one-sentence expected effect.
