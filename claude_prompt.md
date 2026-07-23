@@ -41,7 +41,7 @@ The run always covers the whole HOSE/HNX/UPCOM universe.
 | Question | Options (default first) | CLI effect |
 |---|---|---|
 | Warm-only? | `yes — smart lazy fetch (Recommended)` · `always — pure offline` · `no — force re-fetch (slow)` | `--warm-only <value>` |
-| Exclude tickers? | `None (Recommended)` · `Exclude some…` — user types comma-separated list via auto-added "Other" (e.g. `ACB,HPG`); per-session only, never written to config.yaml | `--exclude TICKER` per ticker, or one comma-separated value; omit when None |
+| Exclude tickers? | Exactly two literal options (the tool rejects 1-option questions — never drop the second one): `None (Recommended)` · `Exclude some — pick "Other" and type e.g. ACB,HPG`. The free-form list itself arrives via the auto-added "Other"; if the user selects the second option without typing tickers, follow up asking for the comma-separated list. Per-session only, never written to config.yaml | `--exclude TICKER` per ticker, or one comma-separated value; omit when None |
 
 Then summarise the chosen parameters back in one line and start.
 
