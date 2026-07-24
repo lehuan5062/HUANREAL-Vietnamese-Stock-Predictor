@@ -89,8 +89,8 @@ Exclude those picks from Step 3's resolved evidence (treat as still-open) even
 though the ledger marks them `evaluated=True`. This can happen on clean data:
 `resolve_exit()` in `src/stockpredict/model/target.py` has no minimum-hold gate
 (unlike `scripts/rebound_final_sim.py`'s backtest). If it recurs across several
-reports, note it as a source-code fix candidate per Step 6's edit-target
-priority 3 — flag it, don't propose it silently.
+reports, write it as a finding and propose the code fix per Step 6's
+edit-target priority 3 (with Step 7's separate code-edit approval).
 
 Classify each report:
 - **Some/all `recovered` (evaluated=True), and `unsellable == 0` for those** →
@@ -265,8 +265,8 @@ falling knives**, **(4) pred_days calibration**. One conditional exception: if
 Step 1's scan flagged `unsellable > 0` on this report AND at least one other
 recent report, write it as an additional finding (root cause: `resolve_exit()`
 in `src/stockpredict/model/target.py` has no minimum-hold gate) routed to Step
-6's edit-target priority 3 — flag it for a separate code task, don't propose
-the code edit yourself. For each finding, use the Step
+6's edit-target priority 3, where you propose the code fix like any other
+edit. For each finding, use the Step
 4d(1b) mode-accountability data to identify the root cause — ask: **Did all
 modes make this error, or only some?**
 - **All modes** (or base + most) picked the knife → **shared ML model** problem
@@ -369,9 +369,16 @@ don't second-guess or re-derive any of it.**
 2. **`claude_prompt.md`** (claude only) — tighten the DROP /
    falling-knife vetting guidance when the LLM missed a broken name. Additive,
    narrowly scoped.
-3. **Source files** — only for a concrete structural defect (parser bug, wrong
-   formula, missing column). Default to NOT touching code; write the finding,
-   stop, and let the user trigger a separate code task.
+3. **Source files** — propose the code edit when the diagnosis identifies a
+   concrete defect or mechanism in the code that affects results (parser bug,
+   wrong formula, missing column, missing gate like the T+2 sellable floor).
+   Same evidence bar as any finding. Keep it a minimal, targeted diff — fix
+   the diagnosed mechanism only, no refactors, no drive-by cleanups — and
+   state how to verify it (which test to run or add, or which command's
+   output changes). What stays off-limits: hand-tuning numeric thresholds in
+   code (that's Step 6a's job via config), and speculative "improvements"
+   with no diagnosed finding behind them. Applying still requires Step 7's
+   separate explicit "yes, change code here".
 4. **`self_correct_prompt.md` (this file)** — only for a workflow defect the
    CURRENT run actually hit: a step that misled the analysis, a command that
    broke, or a classification the steps couldn't express. Additive and narrow;
@@ -390,6 +397,11 @@ append the declined line. Never apply multiple edits with one approval; never
 apply a source-code edit without a separate explicit "yes, change code here".
 
 ## Step 8 — Sanity-check suggestion
+
+**If a source file was edited**: run the test suite yourself before handing
+back (`.venv\Scripts\python.exe -m pytest -q`), plus the specific verification
+named in the proposal. Report the result; if tests fail, say so plainly and
+offer to revert that edit.
 
 After edits, suggest a dry pass (don't run it for them):
 
