@@ -28,9 +28,9 @@ from ..tracking import _read
 
 # Friendly labels for the report; unknown modes fall through to themselves.
 MODE_LABELS = {
-    "base": "base (pure ML)",
-    "claude": "hybrid (ML + news)",
-    "claude_llm": "LLM-only",
+    "momentum": "momentum (short-term trend-following)",
+    "rebound": "rebound (mean-reversion bounce)",
+    "dividend": "dividend (long-term hold)",
 }
 
 
@@ -490,7 +490,7 @@ def mode_accountability(as_of: str | dt.date) -> dict:
         recovered = row.get("recovered_flag", False)
 
         picked_by = sorted(list(all_modes.get(sym, set())))
-        all_possible_modes = {"base", "claude", "claude_llm"}
+        all_possible_modes = {"momentum", "rebound", "dividend"}
         avoided_by = sorted(list(all_possible_modes - all_modes.get(sym, set())))
 
         picks_by_outcome[sym] = {
@@ -576,14 +576,10 @@ def format_mode_accountability(result: dict) -> str:
         for modes, syms in sorted(loss_patterns.items()):
             if not modes:
                 diagnosis = "No modes picked this (data error?)"
-            elif set(modes) == {"base", "claude", "claude_llm"}:
-                diagnosis = "All modes agreed → **shared ML model issue** (recovery-prob, P/N, filters)"
-            elif all(m in ("claude", "claude_llm") for m in modes):
-                diagnosis = "Only LLM modes → **LLM vetting issue** (tighten claude_prompt.md)"
-            elif set(modes) == {"base"}:
-                diagnosis = "Only base → **base's distinctive picks are weak** (filters too loose)"
+            elif set(modes) == {"momentum", "rebound", "dividend"}:
+                diagnosis = "All modes agreed → shared universe issue (mechanical gates too loose)"
             else:
-                diagnosis = "Mixed modes → mode-divergence signal"
+                diagnosis = "Mixed modes → mode-divergence signal (tighten agent_prompt.md rubric)"
 
             symbols_str = ", ".join([s for s, _ in syms])
             lines.append(f"- {diagnosis}")

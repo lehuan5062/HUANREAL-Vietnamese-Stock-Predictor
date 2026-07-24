@@ -12,5 +12,13 @@
 ## Data
 - Never run a bare `update-data` (full-universe refetch). Use `evaluate` or
   `update-data -s <SYM>` for specific symbols.
+- Same rule for dividends: never run a bare `update-dividends`. Use
+  `update-dividends -s <SYM>` for specific symbols.
 - `reports/` is gitignored output-only — never put scripts there; one-off analysis
   scripts go in `scripts/`.
+
+## Architecture (2026-07-27 refactor)
+- The program is 100% LLM-agent-driven — no ML/DL model anywhere in the live
+  path. Three modes: `momentum`, `rebound`, `dividend` (see `agent_prompt.md`
+  and `README.md`). `self_correct_prompt.md` and `claude_prompt.md` were
+  retired; `agent_prompt.md` is the only prompt file now.

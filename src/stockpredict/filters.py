@@ -1,4 +1,12 @@
-"""Liquidity / quality gating applied before ranking."""
+"""Mechanical gates applied before handing the universe to the LLM agent.
+
+Per the LLM-agent-only architecture, only TRUE mechanical gates live here —
+things that make a name literally unbuyable or its data literally unusable.
+Judgment thresholds (liquidity size, overbought RSI, downtrend shape) are no
+longer gates: their underlying columns (``adv_vnd_20``, ``adv_active_days_20``,
+``close``, ``rsi_14``, ``history_days``) are simply included as plain data in
+the universe frame handed to the LLM agent, which reasons over them itself.
+"""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -6,24 +14,6 @@ from functools import lru_cache
 import pandas as pd
 
 from .config import load_config
-
-
-def liquidity_mask(df: pd.DataFrame) -> pd.Series:
-    """Boolean Series aligned to df.index: True where the row passes the filter.
-    Expects df to have columns [close, adv_active_days_20] and a date index per
-    symbol.
-
-    The traded-value gate counts how many of the last 20 days actually cleared
-    the per-day bar (``min_adv_vnd``) and requires at least
-    ``min_adv_active_days`` of them. This rejects mostly-dead stocks that only
-    pass a mean-ADV test because of a single block-trade spike (e.g. VMS, whose
-    median day prints a single frozen lot)."""
-    cfg = load_config().universe["liquidity_filter"]
-    cond = (
-        (df["close"] >= cfg["min_close_vnd"])
-        & (df["adv_active_days_20"] >= cfg.get("min_adv_active_days", 15))
-    )
-    return cond.fillna(False)
 
 
 def staleness_mask(df: pd.DataFrame, on: pd.Timestamp) -> pd.Series:
@@ -45,66 +35,6 @@ def staleness_mask(df: pd.DataFrame, on: pd.Timestamp) -> pd.Series:
     ref = np.datetime64(pd.Timestamp(on).normalize(), "D")
     age = np.busday_count(dates, ref)
     return pd.Series(age <= max_stale, index=df.index)
-
-
-def has_enough_history(df: pd.DataFrame) -> bool:
-    cfg = load_config().universe["liquidity_filter"]
-    return len(df) >= cfg["min_history_days"]
-
-
-def overbought_mask(df: pd.DataFrame) -> pd.Series:
-    """Boolean Series aligned to df.index: True where the row is NOT overbought.
-
-    Excludes candidates whose ``rsi_14`` exceeds ``pricing.overbought_rsi_max``.
-    An overbought blow-off (price run too far) tends to reverse, so buying the
-    top is a poor T+2 entry — historically RSI>80 names win far less often. The
-    knob ``0`` (or a missing ``rsi_14`` column) disables the gate (all True).
-    This is the exhaustion guard; the liquidity ``min_adv_active_days`` filter is
-    a separate volume-spike/tradability guard."""
-    level = float(load_config().pricing.get("overbought_rsi_max", 0) or 0)
-    if level <= 0 or "rsi_14" not in df.columns:
-        return pd.Series(True, index=df.index)
-    overbought = df["rsi_14"].astype(float) > level
-    return ~overbought.fillna(False)
-
-
-def downtrend_mask(df: pd.DataFrame) -> pd.Series:
-    """Boolean Series aligned to df.index: True where the row is in a downtrend
-    (i.e. a rebound candidate).
-
-    The rebound strategy only bets on names that have pulled back, so this gate
-    keeps rows that are BOTH trending down over the medium term and sitting a
-    meaningful distance below their recent high, within an RSI band that
-    excludes free-falling knives (too low) and already-recovered names (too
-    high). All thresholds come from ``strategy.downtrend`` in config:
-
-        mom_20        < mom20_max        (log-return; 0 => a 20-day decline)
-        high_prox_20 <= high_prox_max    (fraction below the 20-day high, e.g. -0.05)
-        rsi_14       >= rsi_floor         (0 disables this leg)
-        rsi_14       <= rsi_ceil
-
-    A missing column, or a disabled leg, is treated as passing (True) so the
-    gate degrades gracefully. When the ``strategy.downtrend`` block is absent
-    entirely the gate is a no-op (all True), preserving legacy behaviour."""
-    cfg = load_config()
-    strat = dict(getattr(cfg, "strategy", {}) or {})
-    dt = dict(strat.get("downtrend", {}) or {})
-    if not dt:
-        return pd.Series(True, index=df.index)
-
-    cond = pd.Series(True, index=df.index)
-    if "mom_20" in df.columns and dt.get("mom20_max") is not None:
-        cond &= df["mom_20"].astype(float) < float(dt["mom20_max"])
-    if "high_prox_20" in df.columns and dt.get("high_prox_max") is not None:
-        cond &= df["high_prox_20"].astype(float) <= float(dt["high_prox_max"])
-    if "rsi_14" in df.columns:
-        floor = float(dt.get("rsi_floor", 0) or 0)
-        if floor > 0:
-            cond &= df["rsi_14"].astype(float) >= floor
-        ceil = dt.get("rsi_ceil")
-        if ceil is not None:
-            cond &= df["rsi_14"].astype(float) <= float(ceil)
-    return cond.fillna(False)
 
 
 @lru_cache(maxsize=1)
@@ -181,5 +111,3 @@ def corporate_action_mask(df: pd.DataFrame) -> pd.Series:
         return pd.Series(True, index=df.index)
     artifact = df["max_abs_ret_20"].astype(float) > _row_band_threshold(df)
     return ~artifact.fillna(False)
-
-

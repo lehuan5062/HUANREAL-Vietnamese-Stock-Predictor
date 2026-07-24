@@ -18,9 +18,12 @@ from __future__ import annotations
 import warnings
 from typing import Iterable
 
+import pandas as pd
+
 from .data.cache import cached_symbols
 from .data.universe import (filter_exchanges, is_etf, load_universe,
                              tradable_symbols)
+from .filters import ceiling_lock_mask, corporate_action_mask, staleness_mask
 
 
 # ---- curated bluechips (kept in code so single-file deploys still work) ----
@@ -192,3 +195,101 @@ def select(target: int,
         pass
 
     return out[:target]
+
+
+# ---------------------------------------------------------------------------
+# Eligible universe — the pure-filter (no model) cross-section handed to the
+# LLM agent. Moved here from the retired ``model/predict.py``.
+# ---------------------------------------------------------------------------
+
+
+def latest_cross_section(panel: pd.DataFrame, on: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Return one row per symbol at the most recent date in `panel` (or `on` if given)."""
+    if panel.empty:
+        return panel
+    if on is not None:
+        snap = panel[panel.index <= pd.to_datetime(on)]
+    else:
+        snap = panel
+    snap = snap.reset_index().sort_values(["symbol", "date"])
+    last = snap.groupby("symbol", as_index=False).tail(1).set_index("date")
+    return last
+
+
+def eligible_universe(on: str | pd.Timestamp | None = None,
+                      panel: pd.DataFrame | None = None,
+                      symbols: list[str] | None = None) -> pd.DataFrame:
+    """Return the mechanically-gated cross-section of tradable names on the
+    given date — UNCAPPED, with NO model scoring, NO ranking, and NO
+    liquidity/overbought/downtrend gating.
+
+    Applies only the true mechanical gates: ``latest_cross_section ->
+    tradable_symbols -> staleness_mask -> ceiling_lock_mask ->
+    corporate_action_mask``. Judgment thresholds (liquidity size, overbought
+    RSI, downtrend shape) are NOT gates any more — the underlying columns
+    (``adv_vnd_20``, ``adv_active_days_20``, ``close``, ``rsi_14``,
+    ``history_days``, plus the technical reference columns ``mom_5``,
+    ``mom_20``, ``high_prox_20``, ``atr_14``, ``vol_z_20``, ``realvol_20``)
+    are simply included as plain data for the LLM agent to reason over.
+
+    Used by all three modes (momentum / rebound / dividend) to build the
+    universe frame handed to the agent's plan markdown.
+    """
+    from .dataset import build_panel
+
+    if panel is None:
+        panel = build_panel(symbols=symbols, require_target=False)
+    elif symbols is not None:
+        panel = panel[panel["symbol"].astype(str).str.upper().isin(
+            {s.upper() for s in symbols}
+        )]
+    if panel.empty:
+        return panel
+
+    # Informational history-depth column — how many cached bars this symbol
+    # has, at all (not a gate; the agent judges whether that's "enough").
+    hist_days = panel.groupby("symbol").size().rename("history_days")
+    panel = panel.join(hist_days, on="symbol")
+
+    snap = latest_cross_section(panel, on=on)
+    if snap.empty:
+        return snap
+
+    # Drop tickers vnstock no longer lists as tradable (DELISTED, etc.) — the
+    # OHLCV cache keeps a parquet file for every ticker ever fetched, so
+    # without this guard a stale cache entry (e.g. a delisted name) could
+    # re-surface as a candidate. ``tradable_symbols()`` returns None on a
+    # cold start (universe parquet missing); skip the filter rather than wipe
+    # the cross-section.
+    tradable = tradable_symbols()
+    if tradable is not None:
+        snap = snap[snap["symbol"].astype(str).str.upper().isin(tradable)]
+    if snap.empty:
+        return snap
+
+    # Drop names whose most recent cached bar is stale relative to the pick
+    # date: they'd be scored on a months-old close and that close recorded as
+    # the entry price. Data-integrity gate, not a judgment call.
+    ref = pd.to_datetime(on) if on is not None else pd.Timestamp(snap.index.max())
+    fresh = staleness_mask(snap, ref)
+    if not fresh.all():
+        stale_syms = sorted(snap.loc[~fresh, "symbol"].astype(str))
+        shown = (", ".join(stale_syms) if len(stale_syms) <= 20
+                 else ", ".join(stale_syms[:20]) + f", ... +{len(stale_syms) - 20} more")
+        print(f"[filters] dropped {len(stale_syms)} stale-data candidate(s) "
+              f"(last bar too old for {ref.date()}): {shown}")
+        snap = snap[fresh].copy()
+    if snap.empty:
+        return snap
+
+    # Drop names locked limit-up: they closed at the daily ceiling, so the buy
+    # session opens with a queue and no sellers and a limit-buy can't fill.
+    snap = snap[ceiling_lock_mask(snap)].copy()
+    if snap.empty:
+        return snap
+
+    # Drop names whose recent history holds a band-breaking 1-day move: that's
+    # an unadjusted corporate action (split / rights / special dividend), not
+    # a real crash, and it poisons mom_*/atr_14/rsi_14.
+    snap = snap[corporate_action_mask(snap)].copy()
+    return snap

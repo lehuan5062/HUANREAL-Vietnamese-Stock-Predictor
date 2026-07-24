@@ -19,8 +19,7 @@ import pandas as pd
 
 from .config import cache_dir, load_config
 from .data.cache import read_ohlcv
-from .model.target import resolve_exit, settle_days
-from .pricing import profit_threshold
+from .pricing import profit_threshold, resolve_exit, settle_days
 
 
 _LEDGER_FILE = "predictions.parquet"
@@ -661,7 +660,14 @@ def evaluate_pending(today: dt.date | None = None) -> pd.DataFrame:
                     changed = True
 
         # --- Stage 2b: legacy fixed-horizon realized-return stamping -----
+        # Dividend picks are a HOLD with no target/no T+N exit — there is
+        # nothing to resolve here (a real "realized outcome" for a dividend
+        # thesis is "did the payout keep coming", not a price target; that's
+        # a future enhancement, not modeled by this ledger yet). Leave them
+        # pending forever rather than mis-stamping a fictional T+1 exit.
+        is_dividend_row = str(row.get("mode", "")) == "dividend"
         needs_tN = (not is_rebound_row
+                    and not is_dividend_row
                     and not bool(row["evaluated"])
                     and pd.Timestamp(row["target_date"]).normalize() <= today_ts)
         if needs_tN:

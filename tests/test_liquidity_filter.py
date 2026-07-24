@@ -1,26 +1,27 @@
-"""Tests for the active-days liquidity gate.
+"""Tests for the active-days liquidity column (informational, not a gate).
 
-The gate counts how many of the last 20 days actually traded >= min_adv_vnd and
-requires >= min_adv_active_days of them, so a single block-trade spike can't
-sneak a mostly-dead stock (e.g. VMS) through a mean-ADV test.
+``adv_active_days_20`` counts how many of the last 20 days actually traded
+>= the active-day VND threshold, so a single block-trade spike can't make a
+mostly-dead stock (e.g. VMS) look active on a mean-ADV test. This column used
+to drive a hard-coded liquidity gate (``liquidity_mask``); the LLM-agent-only
+architecture retired that gate — the agent now sees this column as plain data
+and judges tradability itself — but the calendar-aware counting logic itself
+is unchanged and still worth testing directly.
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from stockpredict.features.microstructure import (
     active_days_above,
     active_days_calendar,
-    add_all,
 )
-from stockpredict.filters import liquidity_mask
 
 
 def _frame(values_mvnd, close=20.0):
     """Build a 20-row OHLCV frame whose daily traded value (close*volume, in
     thousand-VND-shares) matches `values_mvnd` (a list of per-day values in the
-    same kVND-shares unit min_adv_vnd uses)."""
+    same kVND-shares unit the active-day threshold uses)."""
     idx = pd.date_range("2026-01-01", periods=len(values_mvnd), freq="B")
     vol = [v / close for v in values_mvnd]
     return pd.DataFrame(
@@ -37,36 +38,13 @@ def test_active_days_counts_days_over_threshold():
     assert s.iloc[-1] == 12
 
 
-def test_spike_fooled_stock_is_rejected():
-    """One huge block day + 19 dead days: mean would pass, active-days fails.
+def test_spike_does_not_fool_active_day_count():
+    """One huge block day + 19 dead days: mean would pass a naive mean-ADV
+    test, but the active-day count correctly shows only 1 real trading day.
     This is the VMS failure mode."""
     vals = [50_000_000] + [50_000] * 19   # mean ~2.5M (>1M) but only 1 active day
-    df = add_all(_frame(vals))
-    mask = liquidity_mask(df)
-    assert bool(mask.iloc[-1]) is False
-    # Sanity: the spike really does inflate the mean over the bar.
-    assert df["adv_vnd_20"].iloc[-1] >= 1_000_000
-
-
-def test_consistently_traded_stock_passes():
-    """Clears the bar on >= 15 of 20 days → passes."""
-    vals = [2_000_000] * 16 + [10] * 4
-    df = add_all(_frame(vals))
-    assert bool(liquidity_mask(df).iloc[-1]) is True
-
-
-def test_borderline_below_active_days_is_rejected():
-    """Clears the bar on only 14 of 20 days → just misses the 15-day rule."""
-    vals = [2_000_000] * 14 + [10] * 6
-    df = add_all(_frame(vals))
-    assert bool(liquidity_mask(df).iloc[-1]) is False
-
-
-def test_penny_stock_rejected_even_if_active():
-    """min_close still applies regardless of activity."""
-    vals = [2_000_000] * 20
-    df = add_all(_frame(vals, close=3.0))   # 3,000 VND < min_close 5
-    assert bool(liquidity_mask(df).iloc[-1]) is False
+    s = active_days_above(_frame(vals), threshold=1_000_000, window=20)
+    assert s.iloc[-1] == 1
 
 
 # ---------------------------------------------------------------------------

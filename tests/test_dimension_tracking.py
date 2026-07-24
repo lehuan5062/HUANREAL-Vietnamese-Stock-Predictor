@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from stockpredict import tracking
-from stockpredict.news import claude_runner
+from stockpredict.news import llm_plan_runner
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +23,7 @@ def test_extract_tags_kebab_case():
         "[sector-flow] Oil & gas led the market on May 5",
         "[governance] HoSE warning since 22/9/2025",
     ]
-    tags = claude_runner._extract_dimension_tags(findings)
+    tags = llm_plan_runner._extract_dimension_tags(findings)
     assert tags == ["insider-action", "sector-flow", "governance"]
 
 
@@ -36,7 +36,7 @@ def test_extract_tags_dedupes_keeping_first_seen_order():
         "[insider-action] insider buy",
         "[macro-VN] another macro point",
     ]
-    tags = claude_runner._extract_dimension_tags(findings)
+    tags = llm_plan_runner._extract_dimension_tags(findings)
     assert tags == ["macro-VN".lower(), "insider-action"]
 
 
@@ -48,13 +48,13 @@ def test_extract_tags_skips_pure_numeric_and_sentinels():
         "[insider-action] real dimension",
         "**Net: +1** — pooled commentary",
     ]
-    tags = claude_runner._extract_dimension_tags(findings)
+    tags = llm_plan_runner._extract_dimension_tags(findings)
     assert tags == ["insider-action"]
 
 
 def test_extract_tags_empty_input():
-    assert claude_runner._extract_dimension_tags([]) == []
-    assert claude_runner._extract_dimension_tags(["", "no tags here"]) == []
+    assert llm_plan_runner._extract_dimension_tags([]) == []
+    assert llm_plan_runner._extract_dimension_tags(["", "no tags here"]) == []
 
 
 def test_extract_tags_handles_multiple_per_bullet():
@@ -63,33 +63,32 @@ def test_extract_tags_handles_multiple_per_bullet():
     findings = [
         "[dim-a] [dim-b] cross-cutting finding tagged twice",
     ]
-    tags = claude_runner._extract_dimension_tags(findings)
+    tags = llm_plan_runner._extract_dimension_tags(findings)
     assert set(tags) == {"dim-a", "dim-b"}
 
 
 # ---------------------------------------------------------------------------
-# 2. parse_plan emits a dimensions_cited column
+# 2. parse_llm_plan emits a dimensions_cited column
 # ---------------------------------------------------------------------------
 
 def test_parse_plan_populates_dimensions_cited(tmp_path):
     plan = tmp_path / "p.md"
     plan.write_text(
         "# Test plan\n\n"
-        "## Candidates (ranked by ML)\n\n"
+        "## Universe (UNRANKED — the full mechanically-gated set)\n\n"
         "### AAA  —  Test Co\n\n"
         "**Step 1 — Business**: \n- Plastic widget maker.\n\n"
         "**Step 2 — Research dimensions**:\n- one\n- two\n\n"
-        "**Step 3 — Research findings per dimension**:\n- [src1](http://x)\n\n"
         "**Step 4 — Findings**:\n"
         "- [insider-action] CEO bought 500k shares\n"
         "- [sector-flow] Plastics sector tailwind\n\n"
-        "## Scores\n\n"
-        "| symbol | pred_mean | news_score |\n"
-        "| --- | --- | --- |\n"
-        "| AAA | +0.0500 | +1 |\n",
+        "## Results — fill this with your chosen picks\n\n"
+        "| rank | symbol | N_days | P |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 1 | AAA | 3 | 0.05 |\n",
         encoding="utf-8",
     )
-    df = claude_runner.parse_plan(plan)
+    df = llm_plan_runner.parse_llm_plan(plan)
     assert len(df) == 1
     row = df.iloc[0]
     assert row["dimensions_cited"] == "insider-action,sector-flow"
@@ -102,16 +101,16 @@ def test_parse_plan_dimensions_cited_empty_when_no_tags(tmp_path):
     plan = tmp_path / "p.md"
     plan.write_text(
         "# Test plan\n\n"
-        "## Candidates (ranked by ML)\n\n"
+        "## Universe (UNRANKED — the full mechanically-gated set)\n\n"
         "### AAA  —  Test Co\n\n"
         "**Step 4 — Findings**:\n- something happened, no tag\n\n"
-        "## Scores\n\n"
-        "| symbol | pred_mean | news_score |\n"
-        "| --- | --- | --- |\n"
-        "| AAA | +0.0500 | 0 |\n",
+        "## Results — fill this with your chosen picks\n\n"
+        "| rank | symbol | N_days | P |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 1 | AAA | 3 | 0.05 |\n",
         encoding="utf-8",
     )
-    df = claude_runner.parse_plan(plan)
+    df = llm_plan_runner.parse_llm_plan(plan)
     assert df.iloc[0]["dimensions_cited"] == ""
 
 

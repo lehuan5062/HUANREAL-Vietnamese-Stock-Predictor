@@ -76,7 +76,7 @@ def add_all(df: pd.DataFrame) -> pd.DataFrame:
     # actually traded >= the per-day liquidity bar. Row-based fallback for
     # single-symbol callers; build_panel overwrites it with the calendar-aware
     # count (active_days_calendar) once the full set of market dates is known.
-    min_adv = load_config().universe["liquidity_filter"]["min_adv_vnd"]
+    min_adv = load_config().universe["active_day_vnd_threshold"]
     out["adv_active_days_20"] = active_days_above(df, min_adv, 20)
     # Gate-support columns (not model features) for the ceiling-lock filter:
     # the 1-day close-to-close return and whether the bar closed at its high.

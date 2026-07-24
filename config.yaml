@@ -1,5 +1,11 @@
-# Vietnamese T+2 Stock Predictor - configuration
-# All knobs live here so the code stays declarative.
+# Vietnamese stock predictor - configuration
+#
+# The program is 100% LLM-agent-driven now (no ML/DL, no coded scoring
+# model). Only TRUE mechanical gates and data-plumbing knobs live here.
+# Everything that used to be a judgment threshold (liquidity size,
+# overbought RSI, downtrend shape, recovery-probability minimum, etc.) is
+# now a plain data column the agent sees directly and reasons over itself
+# — see selector.eligible_universe() and the mode plan markdown.
 
 data:
   cache_dir: cache           # parquet cache root
@@ -37,23 +43,22 @@ data:
     KBS: 60
 
 universe:
+  # Defines what counts as an "active" trading day for the informational
+  # adv_active_days_20 column (traded value >= this bar, in thousand-VND —
+  # vnstock prices are thousand-VND units). NOT a gate any more — the column
+  # is handed to the LLM agent as plain data; it judges liquidity itself.
+  active_day_vnd_threshold: 1_000_000
   liquidity_filter:
-    # vnstock returns prices in thousand-VND units, so all VND thresholds below
-    # are also in thousand-VND. close >= 5 means 5,000 VND, adv >= 1_000_000
-    # thousand-VND-shares means ~1B VND of daily traded value (~$40k).
-    min_adv_vnd: 1_000_000       # per-day "active day" bar, in thousand-VND-shares (~1B VND)
-    # Require the stock to clear min_adv_vnd on at least this many of the last
-    # 20 trading days. Counting active days (instead of averaging) stops a
-    # single block-trade spike from sneaking a mostly-dead stock through — the
-    # average is fooled by one huge day, the count is not.
-    min_adv_active_days: 20
-    min_close_vnd: 5             # avoid penny stocks (5,000 VND)
-    min_history_days: 250
     # Data-integrity gate (not a strategy knob): drop a candidate whose most
     # recent cached bar is more than this many business days older than the
     # pick date. A dormant/illiquid name whose cache ended months ago would
     # otherwise be scored on a stale close and that close silently recorded as
     # the entry price (VTS/DCH, July 2026). Generous vs. real holiday gaps.
+    # This is the ONE liquidity_filter key that remains a hard gate — size
+    # (min_adv_vnd / min_adv_active_days / min_close_vnd / min_history_days)
+    # is no longer a coded gate; the raw columns (adv_vnd_20,
+    # adv_active_days_20, close, history_days) are handed to the LLM agent as
+    # plain data and it judges tradability/size itself.
     max_staleness_days: 5
 
 features:
@@ -63,85 +68,6 @@ features:
   atr_period: 14
   volume_zscore_window: 20
   realized_vol_window: 20
-
-strategy:
-  # The rebound / mean-reversion strategy: filter to downtrend names, predict
-  # days-to-recovery (N) and the profit at recovery (P), rank by P/N × recovery
-  # probability, and hold until the position first turns profitable (flexible
-  # exit — no fixed sell day).
-  downtrend:
-    # A candidate is "in a downtrend" (and therefore a rebound candidate) when
-    # ALL enabled conditions hold. Loosen these to widen the candidate pool.
-    mom20_max: -0.03         # require mom_20 < this (log-return; 0 = 20-day decline)
-    high_prox_max: -0.05     # require close <= this fraction below the 20-day high
-    rsi_floor: 20            # require rsi_14 >= this (excludes free-falling knives). 0 disables.
-    rsi_ceil: 50             # require rsi_14 <= this (not already recovered hard)
-  recovery:
-    # "Profitable point" = first future day whose close beats entry by
-    # (round-trip cost + profit_margin). See pricing.profit_threshold().
-    profit_margin: 0.005     # extra return above fees to call a day "profitable"
-    p_quantile: 0.75         # per-bucket P summary (0.75 = 75th percentile — slower, more realistic bounces)
-    # Earliest tradable exit day (T+2 settlement: shares bought today can't be
-    # sold until this many trading days later). A "recovery" cannot be labeled
-    # before this day, since it isn't executable. See target.recovery_episode.
-    settle_days: 2
-    # Cap (trading days) on the historical recovery-labeling scan. NOT a trading
-    # policy cap (the strategy holds until recovery) — it only bounds labeling so
-    # it stays O(H) per symbol. Rows not recovered within it are right-censored.
-    label_max_horizon: 250
-    # There is no stop-loss and no time cap: the strategy holds each pick until
-    # it recovers to the profit target. (Backtests showed a stop hurts this
-    # mean-reversion bet, and the min_recovery_prob healthy filter is what keeps
-    # chronic decliners out in the first place.)
-    # Healthy-ticker gate: drop candidates whose estimated recovery probability
-    # is below this. The estimate is dominated by the ticker's OWN historical
-    # downtrend-recovery rate (chronic decliners ~0, reliable bouncers ~1), so
-    # this screens out falling knives that would otherwise be held forever under
-    # the no-stop / no-cap flexible exit. 0 disables. ~0.90 keeps only the most
-    # reliable bouncers, reducing knife incidence at cost of lower pick count.
-    min_recovery_prob: 0.95
-    # A candidate uses its OWN recovery history once it has at least this many
-    # downtrend rows; thinner tickers fall back to the RSI x drawdown bucket,
-    # then to the pooled all-downtrend estimate.
-    min_ticker_obs: 100
-    # A ticker x (RSI band x drawdown band) CELL is used when it holds at least
-    # this many of that ticker's own downtrend rows — more specific than the
-    # flat per-ticker aggregate (min_ticker_obs), so a ticker's estimate tracks
-    # its CURRENT state instead of a state-blind lifetime average (a name can be
-    # a reliable bouncer in a shallow dip and a chronic decliner once far below
-    # its recent high). Thinner cells fall back to the ticker aggregate, then
-    # the cross-sectional bucket, then pooled.
-    min_ticker_bucket_obs: 50
-    # A state bucket must hold at least this many historical downtrend rows to be
-    # trusted; thinner buckets fall back to the pooled all-downtrend estimate.
-    min_bucket_obs: 50
-    # Coarse state buckets the Kaplan-Meier recovery estimator conditions on.
-    # A candidate's (RSI band x distance-below-high band) picks its bucket; the
-    # estimator reads that bucket's historical recovery curve. Thin/empty
-    # buckets fall back to the pooled (all-downtrend) curve.
-    state_buckets:
-      rsi_edges: [30, 40, 50]
-      high_prox_edges: [-0.20, -0.10, -0.05]
-    # Volatility penalty on the rebound score. pred_profit mechanically scales
-    # with a ticker's characteristic volatility (bigger daily moves => bigger
-    # first-crossing overshoot), and recovery_prob carries no vol signal, so the
-    # raw score over-promotes choppy/thin names. Discount the score by
-    # 1/(1 + k*vol). k=0 disables (never touches the vol column). k~1.0
-    # roughly flattens the measured profit/volatility slope.
-    vol_penalty:
-      k: 1.0
-      measure: realvol_20   # or atr_pct (= atr_14/close)
-
-backtest:
-  start: "2020-01-01"
-  train_window_years: 2
-  oos_window_months: 6
-  step_months: 6
-  top_k: 5
-  # round-trip cost in basis points — derived from `broker:` below
-  # (ACBS default: 0.15% commission × 2 sides + 10% VAT on commission
-  # + 0.10% PIT on sell ~= 43 bps). Override here only for sensitivity tests.
-  cost_bps: 43
 
 broker:
   # ACBS. All percentages are absolute (i.e. 0.15 means 0.15%, not 15%).
@@ -154,17 +80,20 @@ broker:
   # gate (rr / net) is size-invariant.
 
 pricing:
-  # How many picks to return. The program surfaces EXACTLY this many names —
-  # the top `default_picks` downtrend candidates by rebound score (P/N ×
-  # recovery_prob). Override per-run with `--picks N`.
+  # How many picks to return. The program surfaces EXACTLY this many names.
+  # Override per-run with `--picks N`.
   default_picks: 1
-  # Overbought hard gate (RSI-only). Drop any candidate whose rsi_14 exceeds this
-  # level before ranking. 0 disables (the downtrend filter already excludes
-  # high-RSI names, so this is usually redundant and left off).
-  overbought_rsi_max: 0
+  # Momentum/rebound "profitable point" = round-trip cost + this margin (see
+  # pricing.profit_threshold()). The LLM's predicted P must clear this bar or
+  # the pick is flagged `below_recovery_bar` (weak edge).
+  profit_margin: 0.005
+  # Earliest tradable exit day (T+2 settlement: shares bought today can't be
+  # sold until this many trading days later).
+  settle_days: 2
   # Per-exchange daily price-band limits (fractions) + tolerance, used to detect
   # ceiling-locked bars (a name that closed at its ceiling can't be bought next
-  # session) and corporate-action glitches.
+  # session) and corporate-action glitches. Hard-gate arithmetic, not a
+  # judgment threshold.
   ceiling_limits: {HSX: 0.07, HNX: 0.10, UPCOM: 0.15}
   ceiling_tol: 0.015
   # Corporate-action guard. A 1-day close-to-close move beyond the exchange band
@@ -173,20 +102,22 @@ pricing:
   # ticker is dropped while such a band-break sits inside this lookback window.
   # Set to 0 to disable.
   corp_action_lookback: 20
-  # Advisory position-size cap: suggested_max_units = max_participation_pct/100 ×
-  # adv_vnd_20_in_VND / buy_price, so a position can be entered/exited without
-  # dominating the tape. Purely informational. Set to 0 to disable.
-  max_participation_pct: 1.0
 
-modes:
-  claude:
-    news_weight: 0.10
+strategy:
+  dividend:
+    # How many years of dividend-event history the deterministic fetcher pulls
+    # per symbol (data-plumbing, not a judgment threshold — the LLM decides
+    # what counts as "enough" history when it sees years_paid_consecutive).
+    history_years: 10
+    # How many of the most recent payout years the yield-trend calculation
+    # (payout_trend: rising/flat/declining) compares.
+    trend_lookback_years: 3
 
 news:
-  # These are STARTING POINTS, not an exhaustive list. The Claude interactive
-  # plan tells the LLM to use these to seed a search, then go broader
-  # (WebSearch / google_search grounding) for any other relevant Vietnamese
-  # press, sector reports, or macro coverage.
+  # These are STARTING POINTS, not an exhaustive list. The agent prompt tells
+  # the LLM to use these to seed a search, then go broader (WebSearch /
+  # google_search grounding) for any other relevant Vietnamese press, sector
+  # reports, or macro coverage.
   vn_sources:
     baomoi:           "https://baomoi.com/tim-kiem/{symbol}.epi"
     google_news_vn:   "https://www.google.com/search?q=%22{symbol}%22+co+phieu+chung+khoan&tbm=nws"

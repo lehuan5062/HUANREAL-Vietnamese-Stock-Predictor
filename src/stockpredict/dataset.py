@@ -7,8 +7,7 @@ from tqdm import tqdm
 from .config import load_config
 from .data.cache import cached_symbols, read_ohlcv
 from .features import microstructure, technical
-from .filters import corporate_action_mask, has_enough_history
-from .model.target import attach_target
+from .filters import corporate_action_mask
 
 
 FEATURE_COLS = [
@@ -25,16 +24,22 @@ FEATURE_COLS = [
 ]
 
 
+# Minimum bars needed to compute the rolling technical indicators (longest
+# window is the 20-day ones + a buffer) — a data-computability floor, not a
+# strategy/liquidity judgment threshold (those are plain columns the LLM
+# agent reasons over itself; see selector.eligible_universe).
+_MIN_BARS_FOR_FEATURES = 60
+
+
 def engineer_one(symbol: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Compute features + recovery targets for a single symbol's OHLCV."""
+    """Compute technical/microstructure features for a single symbol's OHLCV."""
     if df is None:
         df = read_ohlcv(symbol)
-    if df.empty or not has_enough_history(df):
+    if df.empty or len(df) < _MIN_BARS_FOR_FEATURES:
         return pd.DataFrame()
     cfg = load_config().features
     out = technical.add_all(df, cfg)
     out = microstructure.add_all(out)
-    out = attach_target(out)
     out["symbol"] = symbol
     return out
 
@@ -64,11 +69,13 @@ def _drop_corporate_action_rows(panel: pd.DataFrame) -> pd.DataFrame:
 def build_panel(symbols: list[str] | None = None,
                 start: str | None = None,
                 end: str | None = None,
-                require_target: bool = True) -> pd.DataFrame:
+                require_target: bool = False) -> pd.DataFrame:
     """Concatenate per-symbol feature frames into a long panel.
 
-    Each row = one (symbol, date). Filters: optional date window, drop rows where
-    any required feature is NaN, optionally drop rows without a target.
+    Each row = one (symbol, date). Filters: optional date window, drop rows
+    where any required feature is NaN. ``require_target`` is accepted for
+    backward compatibility with older call sites but is a no-op — there is no
+    more ML target to require now that no model is trained.
     """
     syms = symbols or cached_symbols()
     frames = []
@@ -89,15 +96,11 @@ def build_panel(symbols: list[str] | None = None,
     # didn't trade as zero volume), now that the panel reveals the full set of
     # market dates. Overwrites the per-symbol row-based fallback from add_all.
     if {"close", "volume", "symbol"}.issubset(panel.columns):
-        min_adv = load_config().universe["liquidity_filter"]["min_adv_vnd"]
+        min_adv = load_config().universe["active_day_vnd_threshold"]
         panel["adv_active_days_20"] = microstructure.active_days_calendar(
             panel, min_adv, 20)
     panel = _drop_corporate_action_rows(panel)
     panel = panel.dropna(subset=FEATURE_COLS)
-    if require_target:
-        # Recovery labeling assigns N to every row (event time or censoring
-        # time), so this only drops rows with too little history to label.
-        panel = panel.dropna(subset=["target_days_to_recover"])
     # Canonical (date, symbol) row order. A plain ``sort_index()`` orders by
     # date only, leaving same-date rows in concat (i.e. input-symbol) order —
     # so the row layout depended on the order symbols were passed in. Because
